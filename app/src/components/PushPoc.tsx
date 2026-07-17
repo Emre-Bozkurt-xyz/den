@@ -6,8 +6,10 @@ import { ApiFetchError } from '../lib/api';
 type Status = { kind: 'idle' | 'ok' | 'err'; msg: string };
 
 /**
- * Stage 0 GO/NO-GO panel for Web Push. The "Enable notifications" click is the
- * user gesture iOS requires for the permission prompt (BACKBONE §8).
+ * Web Push panel — originally the Stage 0 GO/NO-GO gate, now also the debug
+ * entry point for the real (Stage 2) subscription flow. The "Enable
+ * notifications" click is the user gesture iOS requires for the permission
+ * prompt (BACKBONE §8). "Send test" only pushes to the caller's own devices.
  */
 export function PushPoc() {
   const [status, setStatus] = useState<Status>({ kind: 'idle', msg: '' });

@@ -20,7 +20,8 @@
     "test": "npm -w server run test --if-present && npm -w app run test --if-present",
     "db:generate": "npm -w server run db:generate",
     "db:migrate": "npm -w server run db:migrate",
-    "vapid:gen": "node server/scripts/gen-vapid.mjs"
+    "vapid:gen": "node server/scripts/gen-vapid.mjs",
+    "invite": "node --env-file=.env server/dist/scripts/invite.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

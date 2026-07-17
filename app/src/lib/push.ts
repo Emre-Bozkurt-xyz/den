@@ -48,7 +48,7 @@ export async function enablePush(): Promise<PushSubscription> {
   return sub;
 }
 
-/** PoC trigger — server sends a test notification to all stored subs. */
+/** Debug trigger — server sends a test notification to the caller's own subs. */
 export async function sendTestPush(): Promise<{ delivered: number; total: number }> {
   return api('/api/push/test', { method: 'POST' });
 }

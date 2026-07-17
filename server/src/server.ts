@@ -10,15 +10,16 @@ import { closeDb } from './db/index.js';
 async function main(): Promise<void> {
   const app = await buildApp();
 
-  // socket.io shares Fastify's underlying HTTP server.
-  const io = attachWs(app.server);
+  // socket.io shares Fastify's underlying HTTP server; routes reach it via
+  // the `app.io` decorator (see ws.ts).
+  attachWs(app);
 
   await app.listen({ host: env.host, port: env.port });
   app.log.info(`Den API on http://${env.host}:${env.port} (${env.nodeEnv})`);
 
   const shutdown = async (signal: string) => {
     app.log.info(`${signal} received — shutting down`);
-    io.close();
+    app.io.close();
     await app.close();
     await closeDb();
     process.exit(0);

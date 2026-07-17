@@ -19,9 +19,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Not published to the host in prod — only the api service reaches it.
-    expose:
-      - '5432'
+    # The api service reaches this over the compose network. We also publish it
+    # bound to LOCALHOST ONLY (never 0.0.0.0 — honours §10 "DB not exposed
+    # publicly") so host-side dev tooling (drizzle-kit migrate, psql) and
+    # debugging can reach it. Override POSTGRES_HOST_PORT if 5432 is taken.
+    ports:
+      - '127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432'
 
   api:
     build:

@@ -3,6 +3,13 @@
  * and exposes a typed frozen config object. Fail fast on missing required vars.
  */
 
+import { loadDotenv } from './env-file.js';
+
+// Populate process.env from the root .env for local runs before we read it.
+// No-op under Docker/prod (compose injects env). This must run before the
+// required()/optional() calls below execute during module evaluation.
+loadDotenv();
+
 function required(name: string): string {
   const v = process.env[name];
   if (v === undefined || v === '') {

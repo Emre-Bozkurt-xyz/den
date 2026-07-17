@@ -36,9 +36,17 @@ export const WsType = {
   Hello: 'hello',
   Ping: 'ping',
   Pong: 'pong',
+  /** Sent to a single socket when its request couldn't be fulfilled; `reqId`
+   *  correlates back to the frame that failed. Never broadcast to a room. */
+  Error: 'error',
   // messaging (Stage 2)
   MessageSend: 'message.send',
   MessageNew: 'message.new',
+  // chat membership (Stage 2)
+  ChatCreated: 'chat.created',
+  // friending (Stage 2)
+  FriendRequest: 'friend.request',
+  FriendAccepted: 'friend.accepted',
   // media (Stage 3)
   MediaReady: 'media.ready',
   // tags (Stage 5)
@@ -47,6 +55,43 @@ export const WsType = {
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
+
+// ─── payload shapes (Stage 2) — keep in sync with the emitters/handlers ─────
+
+/** Client → server: send a text message. Server validates chat membership,
+ *  persists, then broadcasts `MessageNew` to the chat room (sender included) —
+ *  the client reconciles its optimistic bubble via the envelope's `reqId`. */
+export interface MessageSendPayload {
+  chatId: string;
+  body: string;
+}
+
+/** Server → client (room broadcast). */
+export interface MessageNewPayload {
+  message: import('./api.js').Message;
+}
+
+/** Server → client (single socket), sent to every member added to a new chat
+ *  so their chat list updates without waiting on a refetch. */
+export interface ChatCreatedPayload {
+  chat: import('./api.js').ChatSummary;
+}
+
+/** Server → client (single socket): a friend request arrived. */
+export interface FriendRequestPayload {
+  from: import('./api.js').PublicUser;
+}
+
+/** Server → client (single socket): someone accepted your outgoing request. */
+export interface FriendAcceptedPayload {
+  by: import('./api.js').PublicUser;
+}
+
+/** Server → client (single socket): a request failed; `reqId` ties it back. */
+export interface ErrorPayload {
+  code: string;
+  message: string;
+}
 
 /** Build a server→client envelope with a fresh timestamp. */
 export function makeEnvelope<T extends string, P>(

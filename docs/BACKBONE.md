@@ -514,16 +514,18 @@ _Add here instead of building. Nothing in this list may be started before §2 is
 - [ ] `sharp` + HEIC and `ffmpeg` verified working on the VPS.
 
 **Stage 1 — Auth & identity:**
-- [ ] Migration 001 includes `users` (nullable `password_hash`, nullable `email`) **and** `auth_identities` — the OAuth-ready shape ships now even though only passwords are used.
-- [ ] Invite-code generation CLI; register/login/logout; session cookie verified working in installed PWA on both Samsung and iPhone.
-- [ ] Rate limiting on auth routes; argon2id; account settings stub (display name, avatar).
-- [ ] Write the OAuth/passkey plan's assumptions into code comments where they'll matter (login handler, register handler) so future-you doesn't design against them.
-- ✅ *Milestone: accounts exist, sessions survive PWA restarts on all three platforms.*
+- [x] Migration 001 includes `users` (nullable `password_hash`, nullable `email`) **and** `auth_identities` (+ `webauthn_credentials`, `invite_codes`, `sessions`, `push_subscriptions`) — the OAuth/passkey-ready shape ships now even though only passwords are used. Applied to Postgres; citext enabled.
+- [x] Invite-code generation CLI (`npm run invite create`); register/login/logout; session cookie. Verified end-to-end locally (API + Vite proxy). ⚠️ _Installed-PWA session persistence on Samsung/iPhone still needs a device pass (no iPhone yet — deferred with the push/voice gates)._
+- [x] Rate limiting on auth routes (10/min); argon2id (`@node-rs/argon2`); account settings stub (display name; avatar deferred to R2/Stage 3).
+- [x] OAuth/passkey assumptions written into `routes/auth.ts` header + inline (invites authorize / providers authenticate; match on `(provider, provider_user_id)`; ≥1 login method; reserved paths untouched).
+- ✅ *Milestone: accounts exist, sessions survive server restarts; login is case-insensitive with no username enumeration. Device-side PWA-restart check pending hardware.*
 
 **Stage 2 — Chat core:**
-- [ ] Friending (request/accept), DM + group creation.
-- [ ] WS envelope + rooms; text messaging with persistence, pagination, reconnect-refetch.
-- [ ] Push notifications wired to real messages.
+- [x] Friending (request/accept), DM + group creation. Friendship gates DMs and group adds (`areFriends` check in `chat/service.ts createChat`).
+- [x] WS envelope + rooms; text messaging with persistence, pagination, reconnect-refetch. `user:{id}` + `chat:{id}` socket.io rooms; cookie-authed handshake; keyset pagination on `messages(chat_id, id DESC)`.
+- [x] Push notifications wired to real messages. `push_subscriptions` persisted per user; `notifyChatMembers` pushes to members with no live socket in the chat's room (§8 "no active WS connection").
+- Verified end-to-end locally: REST (friend request/accept, DM idempotency, group creation, pagination, read receipts/unread counts) + WS (cookie auth, room fanout, dynamic room-join on `chat.created` for members already connected when a chat is created) via curl + a socket.io-client script, three-account (alice/bob/carol) DM + group scenarios. Full typecheck/lint/build green.
+- ⚠️ *Real-device pass (Samsung + iPhone) still pending — same hardware gate as Stage 0/1.*
 - ✅ *Usable milestone: a working private text chat app.*
 
 **Stage 3 — Media:**
@@ -565,4 +567,11 @@ _Add here instead of building. Nothing in this list may be started before §2 is
 | 2026-07-17 | OAuth = full-page redirect + PKCE; match on provider `sub`, never email; no auto-merge by email | Installed-PWA safe; prevents account-takeover-via-email-reuse |
 | 2026-07-17 | Passkeys before OAuth; `webauthn_credentials` ships in migration 001; final domain locked in Stage 0 | Best privacy fit (no third party, nothing phishable); rpID binds credentials to domain forever |
 | 2026-07-17 | App named **Den**; production domain locked as `den.ems-place.com` | Resolves Stage 0 domain-lock gate; rpID for future passkeys is now fixed |
+| 2026-07-17 | Password hashing via `@node-rs/argon2` (argon2id) | Prebuilt binaries → clean installs on Windows dev + Linux Docker, no node-gyp |
+| 2026-07-17 | Session cookie `Secure` is prod-only; migration 001 = auth tables only (chat tables deferred to Stage 2) | Secure cookies are dropped over http://localhost, would break dev; keeps stage ordering |
+| 2026-07-17 | Compose Postgres publishes on `127.0.0.1:${POSTGRES_HOST_PORT}` (localhost-only) | Host-side drizzle-kit/psql/debugging reach it without exposing DB publicly (§10) |
+| 2026-07-17 | Friend accept/decline routes address the *other user's id* (`POST /friends/requests/:userId/accept`), not a synthetic request id | `friendships` PK is the `(user_a, user_b)` pair (§5 DDL has no surrogate id column); a pair has at most one relationship at a time, so the other user's id is already a unique, stable handle |
+| 2026-07-17 | Sending a friend request to someone who already has a pending request in to you auto-accepts instead of erroring | Mutual interest — both people trying to add each other should just become friends, not hit a dead-end asking one of them to go find the other's request |
+| 2026-07-17 | WS rooms: `chat:{id}` (message fanout) + `user:{id}` (chat-agnostic notices: `chat.created`, `friend.request`, `friend.accepted`) | §8 only specifies chat-membership rooms for messages; the `user:` room is a natural extension — "just more type values," no new transport — so a newly-created chat or friend event reaches an already-connected client without a refetch |
+| 2026-07-17 | Bottom nav is 2 tabs (Chats, Profile) for Stage 2; Friends is a header button inside Chats, not a tab | Gallery (§9's third tab) doesn't exist until Stage 4 — avoids a nav redesign later; add Gallery as the third tab then |
 | | | _(append here as decisions evolve)_ |

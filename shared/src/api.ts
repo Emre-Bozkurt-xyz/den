@@ -25,6 +25,7 @@ export const ErrorCode = {
   RateLimited: 'rate_limited',
   InvalidInvite: 'invalid_invite',
   UsernameTaken: 'username_taken',
+  InvalidCredentials: 'invalid_credentials',
   Internal: 'internal',
 } as const;
 
@@ -42,6 +43,41 @@ export interface PublicUser {
 /** GET /me → current user, or 401 with ApiError. */
 export type MeResponse = PublicUser;
 
+/** POST /auth/register. Invites authorize; the provider (here, password)
+ *  authenticates. OAuth/passkeys do NOT bypass invites (BACKBONE §5). */
+export interface RegisterRequest {
+  inviteCode: string;
+  username: string;
+  displayName: string;
+  password: string;
+}
+
+/** POST /auth/login. */
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+/** Register and login both return the authenticated user (session set via cookie). */
+export type AuthResponse = PublicUser;
+
+/** PATCH /me — account settings stub (Stage 1: display name only; avatar
+ *  upload needs R2, Stage 3). */
+export interface UpdateMeRequest {
+  displayName?: string;
+}
+
+/** Client-side validation limits, shared so both sides agree (§ auth rules). */
+export const AuthLimits = {
+  usernameMin: 3,
+  usernameMax: 32,
+  /** Normalized charset for usernames: lowercase letters, digits, _ and -. */
+  usernamePattern: '^[a-z0-9_-]+$',
+  displayNameMax: 64,
+  passwordMin: 8,
+  passwordMax: 200,
+} as const;
+
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────
 
 /** Browser PushSubscription, serialized for POST /push/subscribe. */
@@ -57,3 +93,85 @@ export interface PushSubscribeRequest {
 export interface PushConfigResponse {
   vapidPublicKey: string;
 }
+
+// ─── friending (Stage 2, BACKBONE §5/§6) ────────────────────────────────────
+
+export type FriendshipStatus = 'pending' | 'accepted';
+
+/** One row of `GET /friends`: the other user plus the relationship to them.
+ *  `direction` is who sent a still-pending request; null once accepted. */
+export interface FriendEntry {
+  user: PublicUser;
+  status: FriendshipStatus;
+  direction: 'incoming' | 'outgoing' | null;
+  createdAt: string; // ISO 8601
+}
+
+/** GET /friends — split into the three lists the UI actually renders. */
+export interface FriendsResponse {
+  friends: FriendEntry[];
+  incoming: FriendEntry[];
+  outgoing: FriendEntry[];
+}
+
+/** POST /friends/requests. */
+export interface SendFriendRequestBody {
+  username: string;
+}
+
+// ─── chats & messages (Stage 2, BACKBONE §5/§6) ─────────────────────────────
+
+export type MessageKind = 'text' | 'image' | 'video' | 'voice' | 'system';
+
+export interface Message {
+  id: string;
+  chatId: string;
+  senderId: string;
+  kind: MessageKind;
+  body: string | null;
+  createdAt: string; // ISO 8601
+}
+
+/** DMs are 2-member chats with isGroup=false — never special-cased (BACKBONE §5/§11). */
+export interface ChatSummary {
+  id: string;
+  isGroup: boolean;
+  name: string | null; // null for DMs; client derives a display name from `members`
+  avatarUrl: string | null;
+  members: PublicUser[];
+  lastMessage: Message | null;
+  unreadCount: number;
+  createdAt: string;
+}
+
+export interface ChatsResponse {
+  chats: ChatSummary[];
+}
+
+/** POST /chats. 1 memberId ⇒ DM (returns the existing DM if one already exists
+ *  with that friend); 2+ ⇒ new group. All memberIds must already be accepted
+ *  friends of the caller (friendship gates DMs and group adds — BACKBONE §2). */
+export interface CreateChatRequest {
+  memberIds: string[];
+  name?: string;
+}
+
+/** GET /chats/:id/messages?before=&limit= — keyset pagination, newest page
+ *  first (id DESC); nextCursor feeds the next `before` for older history. */
+export interface MessagesResponse {
+  messages: Message[];
+  nextCursor: string | null;
+}
+
+/** POST /chats/:id/read. */
+export interface MarkReadRequest {
+  messageId: string;
+}
+
+export const ChatLimits = {
+  nameMax: 64,
+  messageBodyMax: 4000,
+  messagesPageDefault: 50,
+  messagesPageMax: 100,
+  maxGroupMembers: 50,
+} as const;

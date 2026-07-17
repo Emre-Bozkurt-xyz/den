@@ -11,6 +11,9 @@ import { ErrorCode, type ApiError } from '@den/shared';
 import { env } from './env.js';
 import { AppError } from './errors.js';
 import { healthRoutes } from './routes/health.js';
+import { authRoutes } from './routes/auth.js';
+import { friendRoutes } from './routes/friends.js';
+import { chatRoutes } from './routes/chats.js';
 import { pushRoutes } from './routes/push.js';
 import { voicePocRoutes } from './routes/voice-poc.js';
 
@@ -58,6 +61,9 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // ─── routes ───────────────────────────────────────────────────────────────
   await app.register(healthRoutes);
+  await app.register(authRoutes, { prefix: '/api' });
+  await app.register(friendRoutes, { prefix: '/api' });
+  await app.register(chatRoutes, { prefix: '/api' });
   await app.register(pushRoutes, { prefix: '/api' });
   await app.register(voicePocRoutes, { prefix: '/api' });
 
