@@ -1,0 +1,33 @@
+@import 'tailwindcss';
+
+/* Dark mode follows the system by default (BACKBONE §9). Tailwind v4's default
+   `dark:` variant is prefers-color-scheme, which is exactly what we want. */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* Self-hosted system font stack — no third-party/CDN fonts (hard invariant 10). */
+  font-family:
+    system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  /* Kill the iOS pull-to-refresh / rubber-band on the app shell. */
+  overscroll-behavior: none;
+}
+
+/* Disable double-tap zoom on interactive controls (BACKBONE §9). */
+button,
+a,
+[role='button'],
+input,
+label {
+  touch-action: manipulation;
+}

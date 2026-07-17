@@ -1,0 +1,38 @@
+# Den API — Fastify + socket.io + media workers.
+# Build context is the repo root (see docker-compose.yml).
+
+FROM node:22-slim AS build
+WORKDIR /repo
+# Manifests first for layer caching.
+# All workspace manifests must be present for `npm install --workspaces` to
+# resolve, even though this image only builds shared + server.
+COPY package.json package-lock.json* tsconfig.base.json ./
+COPY shared/package.json shared/
+COPY server/package.json server/
+COPY app/package.json app/
+RUN npm install --workspaces --include-workspace-root
+# Sources
+COPY shared/ shared/
+COPY server/ server/
+RUN npm -w shared run build && npm -w server run build
+
+FROM node:22-slim AS runtime
+WORKDIR /repo
+ENV NODE_ENV=production
+# ffmpeg: voice transcode (Stage 0 PoC) + video posters (Stage 3).
+# ⚠️ Stage 3 also needs libvips for sharp/HEIC — add libvips-dev then.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY package.json package-lock.json* ./
+COPY shared/package.json shared/
+COPY server/package.json server/
+COPY app/package.json app/
+RUN npm install --workspaces --include-workspace-root --omit=dev
+COPY --from=build /repo/shared/dist shared/dist
+COPY --from=build /repo/server/dist server/dist
+EXPOSE 3000
+# Simple healthcheck against the /health route.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "server/dist/server.js"]

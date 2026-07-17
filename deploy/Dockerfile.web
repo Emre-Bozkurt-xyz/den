@@ -1,0 +1,20 @@
+# Den web — builds the PWA and bakes the static output into Caddy.
+# Build context is the repo root (see docker-compose.yml).
+
+FROM node:22-slim AS build
+WORKDIR /repo
+# All workspace manifests must be present for `npm install --workspaces` to
+# resolve, even though this image only builds shared + app.
+COPY package.json package-lock.json* tsconfig.base.json ./
+COPY shared/package.json shared/
+COPY server/package.json server/
+COPY app/package.json app/
+RUN npm install --workspaces --include-workspace-root
+COPY shared/ shared/
+COPY app/ app/
+RUN npm -w shared run build && npm -w app run build
+
+FROM caddy:2-alpine AS runtime
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /repo/app/dist /srv/app
+EXPOSE 80 443

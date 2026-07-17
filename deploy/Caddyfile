@@ -1,0 +1,38 @@
+# Den — Caddy reverse proxy. Automatic TLS for the locked production domain.
+# App (static PWA) + API + WSS are all same-origin behind this one host, which
+# is what keeps the session cookie and socket.io simple (BACKBONE §3, §8).
+
+den.ems-place.com {
+	encode gzip zstd
+
+	# API + health → Fastify.
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+	handle /health {
+		reverse_proxy api:3000
+	}
+
+	# socket.io (WSS upgrade). Caddy passes Upgrade/Connection headers through
+	# reverse_proxy automatically. Keep the read timeout above the 25s WS ping
+	# so proxies don't kill idle sockets (BACKBONE §8).
+	handle /socket.io/* {
+		reverse_proxy api:3000
+	}
+
+	# Everything else = the built PWA (static files from the app build).
+	handle {
+		root * /srv/app
+		try_files {path} /index.html
+		file_server
+	}
+
+	# Long-lived sockets: don't cut the connection under the ping interval.
+	# (Caddy default proxy has no hard read timeout; this documents intent.)
+	log {
+		output stdout
+		format console
+	}
+}
+
+# Local/dev over http: `caddy run --config Caddyfile.local` uses :80 instead.

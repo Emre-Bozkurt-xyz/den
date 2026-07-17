@@ -1,0 +1,32 @@
+{
+  "name": "den",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Den — private, self-hosted chat + media PWA for a closed circle",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "shared",
+    "server",
+    "app"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,app -c blue,magenta \"npm -w server run dev\" \"npm -w app run dev\"",
+    "build": "npm -w shared run build && npm -w server run build && npm -w app run build",
+    "typecheck": "npm -w shared run typecheck && npm -w server run typecheck && npm -w app run typecheck",
+    "lint": "eslint .",
+    "test": "npm -w server run test --if-present && npm -w app run test --if-present",
+    "db:generate": "npm -w server run db:generate",
+    "db:migrate": "npm -w server run db:migrate",
+    "vapid:gen": "node server/scripts/gen-vapid.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.18.0",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0"
+  }
+}

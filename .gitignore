@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# builds
+dist/
+build/
+*.tsbuildinfo
+app/dev-dist/
+
+# env / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# runtime / local data
+*.log
+npm-debug.log*
+pg-data/
+deploy/caddy-data/
+deploy/caddy-config/
+tmp/
+server/tmp/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+Thumbs.db

@@ -1,0 +1,60 @@
+# Den — full stack. Run from repo root:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# Provide secrets via an .env file at the repo root (see .env.example).
+
+name: den
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-den}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-den}
+      POSTGRES_DB: ${POSTGRES_DB:-den}
+    volumes:
+      - ./pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-den} -d ${POSTGRES_DB:-den}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published to the host in prod — only the api service reaches it.
+    expose:
+      - '5432'
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      API_PORT: '3000'
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://den.ems-place.com}
+      DATABASE_URL: postgres://${POSTGRES_USER:-den}:${POSTGRES_PASSWORD:-den}@postgres:5432/${POSTGRES_DB:-den}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-den.ems-place.com}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
+      VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@ems-place.com}
+    expose:
+      - '3000'
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./caddy-data:/data
+      - ./caddy-config:/config
