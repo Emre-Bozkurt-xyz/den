@@ -508,9 +508,9 @@ _Add here instead of building. Nothing in this list may be started before §2 is
 
 **Stage 0 — Risk retirement (week 1):**
 - [x] **Lock the final production domain** — `den.ems-place.com`. Future passkeys bind to it permanently (§5 rpID trap). Decided; never move.
-- [ ] Repo scaffold (monorepo, Docker Compose, Postgres, Caddy TLS on a subdomain).
-- [ ] **Push PoC on a real iPhone:** minimal PWA + service worker + VAPID push. GO/NO-GO gate.
-- [ ] **Voice-record PoC on iOS Safari:** MediaRecorder → upload → ffmpeg → m4a → plays back on all platforms.
+- [x] Repo scaffold (monorepo, Docker Compose, Postgres, Caddy TLS on a subdomain). Built + typecheck/lint/build green. See `docs/STAGE0.md`.
+- [~] **Push PoC on a real iPhone:** minimal PWA + service worker + VAPID push. GO/NO-GO gate. _Code + server done; awaits physical iPhone test (STAGE0.md)._
+- [~] **Voice-record PoC on iOS Safari:** MediaRecorder → upload → ffmpeg → m4a → plays back on all platforms. _Transcode round-trip verified locally; iOS record/playback still to test._
 - [ ] `sharp` + HEIC and `ffmpeg` verified working on the VPS.
 
 **Stage 1 — Auth & identity:**

@@ -12,7 +12,9 @@ cp .env.example .env
 # fill in SESSION_SECRET (long random), POSTGRES_PASSWORD, and VAPID keys:
 npm run vapid:gen        # paste output into .env
 
-docker compose -f deploy/docker-compose.yml up -d --build
+# --env-file is required: compose otherwise looks for .env next to the compose
+# file (deploy/), but ours lives at the repo root.
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
 Caddy will obtain TLS automatically once `den.ems-place.com` points at the host
