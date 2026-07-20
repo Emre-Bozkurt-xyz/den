@@ -9,7 +9,7 @@ export function InstallInstructions() {
   if (isStandalone() || !isIosSafari()) return null;
 
   return (
-    <div className="rounded-2xl border border-amber-300/40 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/20 dark:bg-amber-950/40 dark:text-amber-200">
+    <div className="rounded-lg border border-amber-300/40 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/20 dark:bg-amber-950/40 dark:text-amber-200">
       <p className="font-semibold">Install Den to your Home Screen</p>
       <p className="mt-1 opacity-90">
         Push notifications and offline start only work from the installed app on iPhone.

@@ -424,17 +424,21 @@ All three kinds appear in the gallery. Type filter tabs: All / Images / Videos /
 
 ## 9. Frontend / UI (Instagram-flavored)
 
+> Shipped as of the UI revamp (`docs/UI_REVAMP.md`, stages UI-1 through UI-6). This section originally described the pre-revamp mobile-only MVP; it now describes what's actually built. Real-device (Samsung/iPhone) verification remains a standing gate per stage — see `docs/UI_REVAMP.md` §6/§7/§8 for what's confirmed vs. still pending.
+
 ### Navigation
-- **Bottom tab bar:** Chats · Gallery · Profile. (IG-style; thumb-reachable.)
-- Chats tab → chat list → conversation view (IG DM look: bubbles, avatar clusters, media inline).
-- Conversation header → tap → chat info → **"Gallery" entry point** (+ members, name).
-- Gallery tab (top level) → chats-as-albums grid (cover = latest media thumb) → per-chat gallery.
+- **Mobile (`useIsMobile()`, ≤768px):** bottom tab bar, Chats · Gallery · Profile, one `View` rendered full-screen at a time — the original IG-style thumb-reachable nav, unchanged in spirit from the original plan.
+- **Desktop (>768px):** left icon rail (same three destinations) replaces the bottom tabs; the Chats tab becomes dual-pane (fixed ~360px conversation list + active chat filling the rest), so list and open chat are visible simultaneously. Gallery and Profile stay single-pane on both layouts — no natural second pane for either. Friends/New Group render as a full-screen push on mobile, a centered overlay (list pane still mounted behind it) on desktop.
+- Chats tab → chat list → conversation view (IG DM look: asymmetric-tail bubbles, media inline, pill composer with circular icon buttons).
+- Conversation header → **"Gallery" entry point** (+ members, name) opens that chat's gallery.
+- Gallery tab (top level) → chats-as-albums grid (cover = latest media thumb, responsive column count) → per-chat gallery.
+- Design tokens (`app/src/index.css`: surface/text/border/accent/radius/shadow custom properties, dark mode via `prefers-color-scheme`) and `lucide-react` icons (no more emoji) back every screen; `ScreenHeader` is the one shared header component.
 
 ### Per-chat gallery screen
-- 3-column square grid (images/videos w/ duration badge); voice messages listed below grid or shown when Voice filter active.
+- Hand-rolled masonry grid (images/videos w/ duration badge) — shortest-column packing, aspect ratio predicted from `MediaInfo.width`/`height` (no image-load pop-in, no CSS `column-count`), column count derived from the gallery pane's actual measured width via `ResizeObserver` rather than a fixed 3-column layout; voice messages listed as a separate row list below the grid (never a thumbnail).
 - Search bar at top: free-text tag query (`beach -screenshots`), chips for active filters, type tabs.
 - Tag autocomplete dropdown as-you-type: `name (count)` rows, per-chat registry, keyboard + tap selection.
-- Tap media → full-screen viewer: swipe between results (in current filter order), tag list + add-tag UI, "Jump to message" button.
+- Tap media → full-screen viewer (`MediaViewer`): desktop arrow buttons **and** hand-rolled touch gestures both navigate the current filter-ordered result set — swipe left/right for prev/next, swipe down to close, pinch and double-tap to zoom/pan on images (raw Pointer Events, no gesture library; video items keep native `controls` and arrow-button/tap-outside navigation only — see `docs/UI_REVAMP.md` UI-6 notes for why gestures weren't layered onto video). Tag list + add-tag UI, "Jump to message" button.
 
 ### PWA & platform polish checklist
 - [ ] `manifest.webmanifest`: name, icons (512/192 + maskable), `display: standalone`, theme colors for light/dark.
@@ -610,4 +614,7 @@ _Add here instead of building. Nothing in this list may be started before §2 is
 | 2026-07-20 | `chatDisplayName`'s parameter type narrowed to `Pick<ChatSummary, 'name'\|'isGroup'\|'members'>` instead of full `ChatSummary` | `GalleryAlbum` has the same three fields but isn't a `ChatSummary` (no `id`/`avatarUrl`/`lastMessage`/etc.) — the narrower type lets gallery screens reuse the same display-name logic instead of duplicating it |
 | 2026-07-20 | Gallery tag-query positive matching uses one `EXISTS` clause per required tag (ANDed) instead of §5's documented `unnest(...)::bigint[]` reference SQL | postgres.js/drizzle's `sql` template doesn't cleanly bind a JS array to a `::bigint[]` cast (`cannot cast type record to bigint[]`, found in local testing); same semantics, avoids fighting the driver |
 | 2026-07-20 | `tag.added`/`tag.removed` WS handlers invalidate all `['gallery']` queries broadly rather than targeting the specific chat | The payload only carries `mediaId`, not `chatId`; react-query only refetches queries that are actually mounted, so the broad invalidation is cheap and keeps every open gallery/viewer in sync with shared-wiki tag edits |
+| 2026-07-20 | UI revamp (`docs/UI_REVAMP.md`, UI-1 through UI-6) ships hand-rolled swipe/pinch/double-tap gestures in `MediaViewer`, superseding the Stage-4 decision that arrow buttons alone were sufficient | Desktop-only arrow-button nav was accepted for MVP shipping speed, with an explicit note to "revisit only if real-device testing shows arrows feel wrong on a touchscreen" — the UI revamp project (design tokens, responsive shell, masonry gallery, gesture-driven viewer) was the planned point to revisit it. Arrow buttons are kept alongside the new gestures, not replaced, since desktop mouse users still benefit from them |
+| 2026-07-20 | `MediaViewer`'s new Pointer-Event gesture layer (swipe/pinch/double-tap) is scoped to `<img>` only — `<video>` keeps native `controls` and arrow-button/tap-outside navigation, no custom gestures | Custom `setPointerCapture`-based gestures on the same element as native video `controls` risk hijacking the browser's own scrubber/play/fullscreen touch surface, and that specific interaction can't be verified without real touch hardware; preserving existing video-control behavior exactly was judged more important than gesture parity with images for this stage. Logged as an open gap in `docs/UI_REVAMP.md` §8, revisit after real-device testing |
+| 2026-07-20 | Video gesture gap (previous entry) closed: `<video>` in `MediaViewer` now gets swipe-left/right (prev/next) and swipe-down-to-close, reusing image's exact thresholds via a shared pure `resolveSwipeGesture()` helper, gated by checking the pointerdown's Y position against a bottom exclusion zone (`VIDEO_CONTROLS_EXCLUSION_HEIGHT = 56px`) before arming any gesture tracking | A pointerdown inside the exclusion zone is left completely untouched (no `setPointerCapture`, no tracking, no `preventDefault`), so native controls-bar touches (scrubber/play/fullscreen) get a fully unmodified event stream, addressing the risk the previous entry flagged. Pinch-zoom/double-tap-zoom remain deliberately out of scope for video (never asked for, doesn't fit alongside native playback controls). The 56px exclusion height is a judgment call, not a measurement — stays unverified until the real-device pass; see `docs/UI_REVAMP.md` §8 |
 | | | _(append here as decisions evolve)_ |

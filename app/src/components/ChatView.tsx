@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { Hand, Images, Mic, Paperclip, Square } from 'lucide-react';
 import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import { chatDisplayName, markRead } from '../lib/chats';
@@ -7,6 +8,7 @@ import { kindForMime, uploadMedia } from '../lib/media';
 import { useRealtime } from '../lib/realtime';
 import { MediaBubble } from './MediaBubble';
 import { MediaViewer } from './MediaViewer';
+import { ScreenHeader } from './ScreenHeader';
 
 type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number } | null;
 
@@ -16,6 +18,8 @@ export function ChatView({
   onBack,
   onOpenGallery,
   jumpToMessageId,
+  initialDraft,
+  onDraftChange,
 }: {
   chat: ChatSummary;
   me: MeResponse;
@@ -24,11 +28,27 @@ export function ChatView({
   /** Set when arriving from the gallery's "jump to message" — loads older
    *  pages until the target is present, then scrolls it into view. */
   jumpToMessageId?: string;
+  /** Draft text lives in a per-chat cache owned by `AuthedApp` (keyed by
+   *  chat.id), not purely in this component's local state. `ChatView`
+   *  remounts on every genuine chat switch (by design, via `key={chat.id}`)
+   *  *and* on a mobile/desktop breakpoint crossing (`AuthedApp` renders two
+   *  structurally different trees per `useIsMobile()`) — the latter used to
+   *  silently drop in-progress draft text. Seeding from `initialDraft` and
+   *  mirroring every change back via `onDraftChange` means the draft
+   *  survives either kind of remount. See docs/UI_REVAMP.md §8. */
+  initialDraft: string;
+  onDraftChange: (draft: string) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
   const { sendMessage } = useRealtime();
   const qc = useQueryClient();
-  const [draft, setDraft] = useState('');
+  const [draft, setDraftState] = useState(initialDraft);
+  // Every write mirrors into AuthedApp's per-chat cache (see prop doc above)
+  // in addition to updating local state for this render.
+  function setDraft(value: string) {
+    setDraftState(value);
+    onDraftChange(value);
+  }
   const [upload, setUpload] = useState<UploadState>(null);
   const [uploadError, setUploadError] = useState('');
   const [viewerMedia, setViewerMedia] = useState<MediaInfo | null>(null);
@@ -139,27 +159,23 @@ export function ChatView({
   }
 
   return (
-    <div className="flex min-h-[100dvh] flex-col">
-      <header
-        className="flex items-center gap-3 border-b border-black/10 px-4 py-3 dark:border-white/10"
-        style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
-      >
-        <button onClick={onBack} className="text-sm text-indigo-600 dark:text-indigo-400" aria-label="Back">
-          ← Back
-        </button>
-        <div className="min-w-0 flex-1">
-          <p className="truncate font-semibold">{name}</p>
-          {chat.isGroup && <p className="truncate text-xs text-neutral-400">{chat.members.length} members</p>}
-        </div>
-        <button
-          onClick={onOpenGallery}
-          aria-label="Gallery"
-          className="shrink-0 text-sm text-indigo-600 dark:text-indigo-400"
-          style={{ touchAction: 'manipulation' }}
-        >
-          🖼️ Gallery
-        </button>
-      </header>
+    <div className="flex h-full flex-col">
+      <ScreenHeader
+        title={name}
+        subtitle={chat.isGroup ? `${chat.members.length} members` : undefined}
+        onBack={onBack}
+        trailing={
+          <button
+            onClick={onOpenGallery}
+            aria-label="Gallery"
+            className="flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <Images size={16} />
+            Gallery
+          </button>
+        }
+      />
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {hasNextPage && (
@@ -167,16 +183,18 @@ export function ChatView({
             <button
               onClick={() => void fetchNextPage()}
               disabled={isFetchingNextPage}
-              className="rounded-lg border border-black/10 px-3 py-1 text-xs text-neutral-500 dark:border-white/15 dark:text-neutral-400"
+              className="rounded-sm border border-border px-3 py-1 text-xs text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-60"
             >
               {isFetchingNextPage ? 'Loading…' : 'Load older messages'}
             </button>
           </div>
         )}
 
-        {isLoading && <p className="text-center text-sm text-neutral-400">Loading…</p>}
+        {isLoading && <p className="text-center text-sm text-text-muted">Loading…</p>}
         {!isLoading && messages.length === 0 && (
-          <p className="text-center text-sm text-neutral-400">Say hi 👋</p>
+          <p className="flex items-center justify-center gap-1.5 text-center text-sm text-text-muted">
+            Say hi <Hand size={16} />
+          </p>
         )}
 
         <div className="flex flex-col gap-1.5">
@@ -194,11 +212,16 @@ export function ChatView({
               >
                 <div
                   className={
-                    (m.media ? 'max-w-[75%] rounded-2xl p-1.5 text-sm ' : 'max-w-[75%] rounded-2xl px-3.5 py-2 text-sm ') +
+                    // Instagram-style bubble: rounded on 3 corners, a tighter
+                    // "tail" corner on the side that points at the sender.
+                    (m.media
+                      ? 'max-w-[75%] rounded-lg p-1.5 text-sm '
+                      : 'max-w-[75%] rounded-lg px-3.5 py-2 text-sm ') +
+                    (mine ? 'rounded-br-sm ' : 'rounded-bl-sm ') +
                     (highlightId === m.id ? 'ring-2 ring-amber-400 ' : '') +
                     (mine
-                      ? 'bg-indigo-600 text-white ' + (pending ? 'opacity-60' : '')
-                      : 'bg-black/5 text-neutral-900 dark:bg-white/10 dark:text-neutral-100')
+                      ? 'bg-accent text-white ' + (pending ? 'opacity-60' : '')
+                      : 'bg-surface-sunken text-text-primary')
                   }
                 >
                   {chat.isGroup && !mine && (
@@ -219,22 +242,25 @@ export function ChatView({
       </div>
 
       {upload && (
-        <div className="border-t border-black/10 px-4 py-2 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
+        <div className="border-t border-border bg-surface-raised px-4 py-2.5 text-xs text-text-secondary">
           Uploading {upload.kind}… {upload.progress}%
-          <div className="mt-1 h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
-            <div className="h-full bg-indigo-600 transition-[width]" style={{ width: `${upload.progress}%` }} />
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-pill bg-surface-sunken">
+            <div
+              className="h-full rounded-pill bg-accent transition-[width]"
+              style={{ width: `${upload.progress}%` }}
+            />
           </div>
         </div>
       )}
       {uploadError && (
-        <p className="border-t border-black/10 px-4 py-2 text-xs text-red-600 dark:border-white/10 dark:text-red-400">
+        <p className="border-t border-border bg-surface-raised px-4 py-2 text-xs text-red-600 dark:text-red-400">
           {uploadError}
         </p>
       )}
 
       <form
         onSubmit={submit}
-        className="flex items-end gap-2 border-t border-black/10 p-3 dark:border-white/10"
+        className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
         style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
       >
         <input ref={fileInputRef} type="file" accept="image/*,video/*" hidden onChange={(e) => void handleFilePicked(e)} />
@@ -243,21 +269,21 @@ export function ChatView({
           onClick={() => fileInputRef.current?.click()}
           disabled={!!upload || recording}
           aria-label="Attach photo or video"
-          className="shrink-0 rounded-xl border border-black/10 px-3 py-2.5 text-sm dark:border-white/15 disabled:opacity-40"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
           style={{ touchAction: 'manipulation' }}
         >
-          📎
+          <Paperclip size={18} />
         </button>
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Message"
-          className="min-w-0 flex-1 rounded-xl border border-black/10 bg-white px-3.5 py-2.5 text-base outline-none focus:border-indigo-500 dark:border-white/15 dark:bg-neutral-900"
+          className="h-11 min-w-0 flex-1 rounded-pill border border-border bg-surface px-4 text-base text-text-primary outline-none transition-colors focus:border-accent"
         />
         {draft.trim() ? (
           <button
             type="submit"
-            className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white"
+            className="flex h-11 shrink-0 items-center rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
             style={{ touchAction: 'manipulation' }}
           >
             Send
@@ -269,12 +295,12 @@ export function ChatView({
             disabled={!!upload}
             aria-label={recording ? 'Stop recording' : 'Record voice message'}
             className={
-              'shrink-0 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40 ' +
-              (recording ? 'bg-rose-600' : 'bg-indigo-600')
+              'grid h-11 w-11 shrink-0 place-items-center rounded-pill text-white transition-colors disabled:opacity-40 ' +
+              (recording ? 'bg-rose-600 hover:bg-rose-700 active:bg-rose-700' : 'bg-accent hover:bg-accent-hover active:bg-accent-hover')
             }
             style={{ touchAction: 'manipulation' }}
           >
-            {recording ? '■ Stop' : '🎤'}
+            {recording ? <Square size={18} /> : <Mic size={18} />}
           </button>
         )}
       </form>

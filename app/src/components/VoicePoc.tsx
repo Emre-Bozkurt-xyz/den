@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { Circle, Square } from 'lucide-react';
 import { ApiFetchError } from '../lib/api';
 
 type Phase = 'idle' | 'recording' | 'uploading' | 'ready' | 'error';
@@ -75,7 +76,7 @@ export function VoicePoc() {
   }
 
   return (
-    <section className="rounded-2xl border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-neutral-900">
+    <section className="rounded-lg border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-neutral-900">
       <h2 className="text-base font-semibold">Voice PoC</h2>
       <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
         Record → server ffmpeg → m4a/AAC → play back. Validates the cross-platform voice path (§7).
@@ -86,16 +87,18 @@ export function VoicePoc() {
           <button
             onClick={start}
             disabled={phase === 'uploading'}
-            className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-rose-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
           >
-            ● Record
+            <Circle size={14} fill="currentColor" />
+            Record
           </button>
         ) : (
           <button
             onClick={stop}
-            className="rounded-xl bg-neutral-800 px-4 py-2 text-sm font-medium text-white dark:bg-neutral-200 dark:text-black"
+            className="flex items-center gap-1.5 rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium text-white dark:bg-neutral-200 dark:text-black"
           >
-            ■ Stop
+            <Square size={14} fill="currentColor" />
+            Stop
           </button>
         )}
         {phase === 'recording' && <span className="text-sm text-rose-500">recording…</span>}

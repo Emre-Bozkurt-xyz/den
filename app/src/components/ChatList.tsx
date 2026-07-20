@@ -1,6 +1,9 @@
+import { Camera, Mic, Video } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { ChatSummary, MeResponse, Message } from '@den/shared';
 import { useChats } from '../hooks/useChats';
 import { chatDisplayName } from '../lib/chats';
+import { ScreenHeader } from './ScreenHeader';
 
 export function ChatList({
   me,
@@ -16,29 +19,32 @@ export function ChatList({
   const { data, isLoading } = useChats();
 
   return (
-    <div className="flex min-h-[100dvh] flex-col">
-      <header
-        className="flex items-center justify-between gap-2 border-b border-black/10 px-4 py-3 dark:border-white/10"
-        style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
-      >
-        <h1 className="text-2xl font-bold tracking-tight">Den</h1>
-        <div className="flex gap-2">
-          <button
-            onClick={onNewGroup}
-            className="rounded-lg border border-black/10 px-3 py-1.5 text-sm font-medium dark:border-white/15"
-          >
-            New group
-          </button>
-          <button onClick={onFriends} className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white">
-            Friends
-          </button>
-        </div>
-      </header>
+    <div className="flex h-full flex-col">
+      <ScreenHeader
+        title="Den"
+        size="large"
+        trailing={
+          <>
+            <button
+              onClick={onNewGroup}
+              className="rounded-sm border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-surface-sunken active:bg-surface-sunken"
+            >
+              New group
+            </button>
+            <button
+              onClick={onFriends}
+              className="rounded-sm bg-accent px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
+            >
+              Friends
+            </button>
+          </>
+        }
+      />
 
       <div className="flex-1 overflow-y-auto">
-        {isLoading && <p className="p-4 text-sm text-neutral-400">Loading…</p>}
+        {isLoading && <p className="p-4 text-sm text-text-muted">Loading…</p>}
         {data && data.chats.length === 0 && (
-          <div className="p-6 text-center text-sm text-neutral-400">
+          <div className="p-6 text-center text-sm text-text-muted">
             No chats yet. Add a friend, then tap Message to start one.
           </div>
         )}
@@ -48,25 +54,30 @@ export function ChatList({
             <button
               key={chat.id}
               onClick={() => onOpenChat(chat)}
-              className="flex w-full items-center gap-3 border-b border-black/5 px-4 py-3 text-left hover:bg-black/5 dark:border-white/5 dark:hover:bg-white/5"
+              className="flex w-full items-center gap-3 border-b border-border px-4 py-3 text-left transition-colors hover:bg-surface-sunken active:bg-surface-sunken"
             >
-              <div className="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-indigo-600 text-lg font-bold text-white">
-                {name.charAt(0).toUpperCase()}
+              {/* Fixed avatar footprint (relative + ring) — a hook point for a
+                  future online-state dot; no presence data exists yet, so
+                  nothing renders there now (out of MVP scope). */}
+              <div className="relative h-12 w-12 shrink-0">
+                <div className="grid h-full w-full place-items-center rounded-pill bg-accent text-base font-semibold text-white ring-2 ring-surface">
+                  {name.charAt(0).toUpperCase()}
+                </div>
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-2">
-                  <p className="truncate font-semibold">{name}</p>
+                  <p className="truncate font-semibold text-text-primary">{name}</p>
                   {chat.lastMessage && (
-                    <span className="shrink-0 text-xs text-neutral-400">{formatTime(chat.lastMessage.createdAt)}</span>
+                    <span className="shrink-0 text-xs text-text-muted">{formatTime(chat.lastMessage.createdAt)}</span>
                   )}
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <p className="truncate text-sm text-neutral-500 dark:text-neutral-400">
+                  <p className="truncate text-sm text-text-secondary">
                     {chat.lastMessage ? previewFor(chat.lastMessage, me.id) : 'No messages yet'}
                   </p>
                   {chat.unreadCount > 0 && (
-                    <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-full bg-indigo-600 px-1.5 text-xs font-semibold text-white">
-                      {chat.unreadCount}
+                    <span className="grid h-5 min-w-5 shrink-0 place-items-center rounded-pill bg-accent px-1.5 text-xs font-semibold tabular-nums text-white">
+                      {formatUnreadCount(chat.unreadCount)}
                     </span>
                   )}
                 </div>
@@ -79,12 +90,28 @@ export function ChatList({
   );
 }
 
-const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice message' };
+const MEDIA_ICON: Record<'image' | 'video' | 'voice', typeof Camera> = { image: Camera, video: Video, voice: Mic };
+const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = { image: 'Photo', video: 'Video', voice: 'Voice message' };
 
-function previewFor(message: Message, meId: string): string {
+function previewFor(message: Message, meId: string): ReactNode {
   const prefix = message.senderId === meId ? 'You: ' : '';
-  const body = message.body?.trim() || (message.media ? MEDIA_LABEL[message.media.kind] : '');
-  return `${prefix}${body}`;
+  const body = message.body?.trim();
+  if (body) return `${prefix}${body}`;
+  if (message.media) {
+    const Icon = MEDIA_ICON[message.media.kind];
+    return (
+      <span className="inline-flex items-center gap-1">
+        {prefix}
+        <Icon size={13} className="shrink-0" />
+        {MEDIA_LABEL[message.media.kind]}
+      </span>
+    );
+  }
+  return prefix;
+}
+
+function formatUnreadCount(n: number): string {
+  return n > 99 ? '99+' : String(n);
 }
 
 function formatTime(iso: string): string {

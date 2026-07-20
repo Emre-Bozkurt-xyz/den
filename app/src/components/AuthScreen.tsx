@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { AuthLimits } from '@den/shared';
+import { AtSign, KeyRound, Loader2, Lock, User as UserIcon } from 'lucide-react';
 import { login, register } from '../lib/auth';
 import { ApiFetchError } from '../lib/api';
 
@@ -36,7 +37,7 @@ export function AuthScreen() {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+    <div className="min-h-[100dvh] bg-surface text-text-primary">
       <div
         className="mx-auto flex min-h-[100dvh] max-w-sm flex-col justify-center gap-6 px-6"
         style={{
@@ -45,11 +46,11 @@ export function AuthScreen() {
         }}
       >
         <div className="text-center">
-          <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-2xl bg-indigo-600 text-2xl font-bold text-white">
+          <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-lg bg-accent text-2xl font-bold text-white">
             D
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Den</h1>
-          <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          <p className="text-sm text-text-secondary">
             {mode === 'login' ? 'Welcome back.' : 'You need an invite to join.'}
           </p>
         </div>
@@ -62,6 +63,7 @@ export function AuthScreen() {
               onChange={setInviteCode}
               placeholder="XXXX-XXXX-XXXX-XXXX"
               autoCapitalize="characters"
+              icon={KeyRound}
             />
           )}
           <Field
@@ -71,6 +73,7 @@ export function AuthScreen() {
             placeholder="lowercase, a–z 0–9 _ -"
             autoCapitalize="none"
             autoComplete="username"
+            icon={AtSign}
           />
           {mode === 'register' && (
             <Field
@@ -78,6 +81,7 @@ export function AuthScreen() {
               value={displayName}
               onChange={setDisplayName}
               placeholder="How your name shows up"
+              icon={UserIcon}
             />
           )}
           <Field
@@ -87,6 +91,7 @@ export function AuthScreen() {
             onChange={setPassword}
             placeholder={`at least ${AuthLimits.passwordMin} characters`}
             autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+            icon={Lock}
           />
 
           {message && <p className="text-sm text-red-600 dark:text-red-400">{message}</p>}
@@ -94,14 +99,15 @@ export function AuthScreen() {
           <button
             type="submit"
             disabled={mutation.isPending}
-            className="mt-1 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-40"
+            className="mt-1 flex items-center justify-center gap-2 rounded-md bg-accent px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-accent-hover disabled:pointer-events-none disabled:opacity-40"
           >
-            {mutation.isPending ? '…' : mode === 'login' ? 'Log in' : 'Create account'}
+            {mutation.isPending && <Loader2 size={16} className="animate-spin" />}
+            {mode === 'login' ? 'Log in' : 'Create account'}
           </button>
         </form>
 
-        <p className="text-center text-sm text-neutral-500 dark:text-neutral-400">
-          {mode === 'login' ? "Have an invite?" : 'Already have an account?'}{' '}
+        <p className="text-center text-sm text-text-secondary">
+          {mode === 'login' ? 'Have an invite?' : 'Already have an account?'}{' '}
           <button
             onClick={() => {
               setMode(mode === 'login' ? 'register' : 'login');
@@ -125,23 +131,26 @@ function Field(props: {
   placeholder?: string;
   autoComplete?: string;
   autoCapitalize?: string;
+  icon: typeof AtSign;
 }) {
+  const Icon = props.icon;
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
-        {props.label}
-      </span>
-      <input
-        className="rounded-xl border border-black/10 bg-white px-3 py-2.5 text-base outline-none focus:border-indigo-500 dark:border-white/15 dark:bg-neutral-900"
-        type={props.type ?? 'text'}
-        value={props.value}
-        onChange={(e) => props.onChange(e.target.value)}
-        placeholder={props.placeholder}
-        autoComplete={props.autoComplete}
-        autoCapitalize={props.autoCapitalize}
-        autoCorrect="off"
-        spellCheck={false}
-      />
+      <span className="text-xs font-medium text-text-secondary">{props.label}</span>
+      <div className="relative">
+        <Icon size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+        <input
+          className="w-full rounded-md border border-border bg-surface-raised py-2.5 pl-9 pr-3 text-base outline-none focus:border-accent"
+          type={props.type ?? 'text'}
+          value={props.value}
+          onChange={(e) => props.onChange(e.target.value)}
+          placeholder={props.placeholder}
+          autoComplete={props.autoComplete}
+          autoCapitalize={props.autoCapitalize}
+          autoCorrect="off"
+          spellCheck={false}
+        />
+      </div>
     </label>
   );
 }

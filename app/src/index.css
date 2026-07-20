@@ -3,8 +3,79 @@
 /* Dark mode follows the system by default (BACKBONE §9). Tailwind v4's default
    `dark:` variant is prefers-color-scheme, which is exactly what we want. */
 
+/* ---------------------------------------------------------------------------
+ * Design tokens (UI-1, docs/UI_REVAMP.md §4.1).
+ *
+ * Raw values live as plain custom properties so they can be read from either
+ * Tailwind utilities (via the @theme block below) or inline styles/plain CSS.
+ * Light values are the :root defaults; the dark block overrides the same
+ * names under prefers-color-scheme, so anything built on these tokens gets
+ * dark mode for free without a manual toggle (out of scope for this stage).
+ * Accent intentionally reuses Tailwind's own indigo-600/700 variables so the
+ * brand hue never has to be kept in sync by hand in two places.
+ * ------------------------------------------------------------------------ */
 :root {
   color-scheme: light dark;
+
+  --surface: var(--color-neutral-50);
+  --surface-raised: #ffffff;
+  --surface-sunken: var(--color-neutral-100);
+
+  --text-primary: var(--color-neutral-900);
+  --text-secondary: var(--color-neutral-600);
+  --text-muted: var(--color-neutral-400);
+
+  --border: rgb(0 0 0 / 0.1);
+
+  --accent: var(--color-indigo-600);
+  --accent-hover: var(--color-indigo-700);
+
+  --shadow-soft-raw: 0 2px 8px rgb(0 0 0 / 0.08);
+  --shadow-strong-raw: 0 8px 24px rgb(0 0 0 / 0.24);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: var(--color-neutral-950);
+    --surface-raised: var(--color-neutral-900);
+    --surface-sunken: var(--color-neutral-800);
+
+    --text-primary: var(--color-neutral-100);
+    --text-secondary: var(--color-neutral-400);
+    --text-muted: var(--color-neutral-500);
+
+    --border: rgb(255 255 255 / 0.1);
+
+    --shadow-soft-raw: 0 2px 8px rgb(0 0 0 / 0.4);
+    --shadow-strong-raw: 0 8px 24px rgb(0 0 0 / 0.6);
+  }
+}
+
+@theme {
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-border: var(--border);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+
+  /* Consolidated 4-step radius scale — replaces the ad-hoc rounded-lg/xl/2xl
+   * mix. Reuses Tailwind's own sm/md/lg utility names (rounded-sm/md/lg) so
+   * no new utility vocabulary has to be learned; rounded-pill is new, for
+   * circles/capsules that used to be rounded-full. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  --shadow-soft: var(--shadow-soft-raw);
+  --shadow-strong: var(--shadow-strong-raw);
 }
 
 html,

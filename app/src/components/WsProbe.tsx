@@ -23,7 +23,7 @@ export function WsProbe() {
   }
 
   return (
-    <section className="rounded-2xl border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-neutral-900">
+    <section className="rounded-sm border border-black/10 bg-white p-4 dark:border-white/10 dark:bg-neutral-900">
       <h2 className="text-base font-semibold">WebSocket probe</h2>
       <div className="mt-2 flex items-center gap-3 text-sm">
         <span
@@ -33,14 +33,14 @@ export function WsProbe() {
           }
         >
           <span
-            className={'h-2 w-2 rounded-full ' + (connected ? 'bg-green-500' : 'bg-neutral-400')}
+            className={'h-2 w-2 rounded-pill ' + (connected ? 'bg-green-500' : 'bg-neutral-400')}
           />
           {connected ? 'connected' : 'disconnected'}
         </span>
         <button
           onClick={onPing}
           disabled={!connected}
-          className="rounded-lg border border-black/10 px-3 py-1 text-sm dark:border-white/15 disabled:opacity-40"
+          className="rounded-sm border border-black/10 px-3 py-1 text-sm dark:border-white/15 disabled:opacity-40"
         >
           Ping
         </button>
