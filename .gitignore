@@ -18,6 +18,7 @@ app/dev-dist/
 *.log
 npm-debug.log*
 pg-data/
+deploy/minio-data/
 deploy/caddy-data/
 deploy/caddy-config/
 tmp/

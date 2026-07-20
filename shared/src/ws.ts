@@ -93,6 +93,27 @@ export interface ErrorPayload {
   message: string;
 }
 
+/** Server → client (room broadcast), Stage 5: a tag was attached to media in
+ *  this chat. Shared-wiki tagging — every member's gallery/viewer stays in
+ *  sync without a refetch. */
+export interface TagAddedPayload {
+  mediaId: string;
+  tag: import('./api.js').Tag;
+}
+
+/** Server → client (room broadcast), Stage 5: a tag was detached. */
+export interface TagRemovedPayload {
+  mediaId: string;
+  tagId: string;
+}
+
+/** Server → client (room broadcast), Stage 3: a media message's processing
+ *  finished (or failed) — updates the "processing" placeholder in place. The
+ *  message id ties it back to the placeholder already in the client cache. */
+export interface MediaReadyPayload {
+  message: import('./api.js').Message;
+}
+
 /** Build a server→client envelope with a fresh timestamp. */
 export function makeEnvelope<T extends string, P>(
   type: T,

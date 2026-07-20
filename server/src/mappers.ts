@@ -1,6 +1,6 @@
 /** Row → DTO mappers. Keep the BIGINT→string boundary here so ids never leak as
  *  JS numbers (precision) into the API (see @den/shared PublicUser). */
-import type { ChatSummary, Message as MessageDto, MessageKind, PublicUser } from '@den/shared';
+import type { ChatSummary, MediaInfo, MediaKind, MediaStatus, Message as MessageDto, MessageKind, PublicUser } from '@den/shared';
 
 export interface UserRow {
   id: bigint;
@@ -28,7 +28,35 @@ export interface MessageRow {
   createdAt: Date;
 }
 
-export function toMessage(m: MessageRow): MessageDto {
+export interface MediaRow {
+  id: bigint;
+  kind: string;
+  status: string;
+  mime: string;
+  sizeBytes: bigint;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+}
+
+/** `urls` is null until status='ready' — the worker hasn't minted a
+ *  processed asset yet, so there's nothing to presign a GET for. */
+export function toMediaInfo(m: MediaRow, urls: { url: string; thumbUrl: string | null } | null): MediaInfo {
+  return {
+    id: m.id.toString(),
+    kind: m.kind as MediaKind,
+    status: m.status as MediaStatus,
+    mime: m.mime,
+    sizeBytes: m.sizeBytes.toString(),
+    width: m.width,
+    height: m.height,
+    durationMs: m.durationMs,
+    url: urls?.url ?? null,
+    thumbUrl: urls?.thumbUrl ?? null,
+  };
+}
+
+export function toMessage(m: MessageRow, media: MediaInfo | null = null): MessageDto {
   return {
     id: m.id.toString(),
     chatId: m.chatId.toString(),
@@ -36,6 +64,7 @@ export function toMessage(m: MessageRow): MessageDto {
     kind: m.kind as MessageKind,
     body: m.body,
     createdAt: m.createdAt.toISOString(),
+    media,
   };
 }
 
@@ -50,7 +79,7 @@ export interface ChatRow {
 export function toChatSummary(args: {
   chat: ChatRow;
   members: UserRow[];
-  lastMessage: MessageRow | null;
+  lastMessage: MessageDto | null;
   unreadCount: number;
 }): ChatSummary {
   return {
@@ -59,7 +88,7 @@ export function toChatSummary(args: {
     name: args.chat.name,
     avatarUrl: null, // group avatars need R2 (Stage 3)
     members: args.members.map(toPublicUser),
-    lastMessage: args.lastMessage ? toMessage(args.lastMessage) : null,
+    lastMessage: args.lastMessage,
     unreadCount: args.unreadCount,
     createdAt: args.chat.createdAt.toISOString(),
   };

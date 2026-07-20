@@ -12,27 +12,15 @@
  *     Stage 3 pipeline replaces this entirely.
  *   - Output is written to a temp dir and served back; nothing is persisted.
  */
-import { spawn } from 'node:child_process';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { validation } from '../errors.js';
+import { runFfmpeg } from '../media/ffmpeg.js';
 
 const WORK_DIR = join(process.cwd(), 'server', 'tmp', 'voice-poc');
-
-async function runFfmpeg(args: string[]): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    ff.stderr.on('data', (d) => (stderr += d.toString()));
-    ff.on('error', (e) => reject(new Error(`ffmpeg spawn failed: ${e.message}`)));
-    ff.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-500)}`)),
-    );
-  });
-}
 
 export async function voicePocRoutes(app: FastifyInstance): Promise<void> {
   await mkdir(WORK_DIR, { recursive: true });

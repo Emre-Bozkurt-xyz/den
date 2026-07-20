@@ -2,8 +2,10 @@ import type { ChatSummary, ChatsResponse, CreateChatRequest, MessagesResponse } 
 import { api } from './api';
 
 /** DMs derive their display name from the other member; groups fall back to
- *  a comma-joined member list when unnamed (BACKBONE §5: "name null for DMs"). */
-export function chatDisplayName(chat: ChatSummary, meId: string): string {
+ *  a comma-joined member list when unnamed (BACKBONE §5: "name null for DMs").
+ *  Accepts any shape with these three fields — GalleryAlbum has them too, so
+ *  gallery screens can reuse this without a full ChatSummary. */
+export function chatDisplayName(chat: Pick<ChatSummary, 'name' | 'isGroup' | 'members'>, meId: string): string {
   const others = chat.members.filter((m) => m.id !== meId);
   if (!chat.isGroup) return others[0]?.displayName ?? 'Unknown';
   return chat.name ?? (others.map((m) => m.displayName).join(', ') || 'Group');

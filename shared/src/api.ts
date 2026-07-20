@@ -130,6 +130,8 @@ export interface Message {
   kind: MessageKind;
   body: string | null;
   createdAt: string; // ISO 8601
+  /** Present iff kind is 'image'|'video'|'voice' (Stage 3). */
+  media: MediaInfo | null;
 }
 
 /** DMs are 2-member chats with isGroup=false — never special-cased (BACKBONE §5/§11). */
@@ -174,4 +176,128 @@ export const ChatLimits = {
   messagesPageDefault: 50,
   messagesPageMax: 100,
   maxGroupMembers: 50,
+} as const;
+
+// ─── media (Stage 3, BACKBONE §5/§6/§7) ─────────────────────────────────────
+
+export type MediaKind = 'image' | 'video' | 'voice';
+export type MediaStatus = 'processing' | 'ready' | 'failed';
+
+/** Media metadata attached to a message. `Message.media` is null for
+ *  kind='text'|'system'. Never carries R2 keys — only short-lived presigned
+ *  URLs the server mints on read (hard invariant 2). */
+export interface MediaInfo {
+  id: string;
+  kind: MediaKind;
+  status: MediaStatus;
+  mime: string;
+  sizeBytes: string; // BIGINT serialized as string
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  url: string | null; // presigned GET; null until status='ready'
+  thumbUrl: string | null; // presigned GET for thumb; null for voice or not-ready
+}
+
+/** POST /media/uploads. Server enforces per-kind max size (§6): images 25MB,
+ *  video 500MB, voice 20MB — never trust the client beyond these ceilings. */
+export interface CreateUploadRequest {
+  chatId: string;
+  kind: MediaKind;
+  mime: string;
+  sizeBytes: number;
+}
+
+export interface CreateUploadResponse {
+  mediaId: string;
+  presignedPutUrl: string;
+  /** Caller must PUT with this exact Content-Type header (SigV4-signed). */
+  requiredContentType: string;
+}
+
+/** POST /media/:id/complete. Optional `body` = caption text on the message. */
+export interface CompleteUploadRequest {
+  body?: string;
+}
+
+/** GET /media/:id/url response — fresh presigned GET pair, re-mintable any
+ *  time (they expire; the client re-requests rather than caching long-term). */
+export interface MediaUrlResponse {
+  url: string;
+  thumbUrl: string | null;
+}
+
+export const MediaLimits = {
+  maxBytes: {
+    image: 25 * 1024 * 1024,
+    video: 500 * 1024 * 1024,
+    voice: 20 * 1024 * 1024,
+  },
+  /** Presigned URL lifetimes (§7 R2 hygiene: GETs ≤ 1h; PUT is short-lived too). */
+  putUrlTtlSeconds: 10 * 60,
+  getUrlTtlSeconds: 60 * 60,
+} as const satisfies { maxBytes: Record<MediaKind, number>; putUrlTtlSeconds: number; getUrlTtlSeconds: number };
+
+// ─── tags (Stage 5, BACKBONE §5/§6) ─────────────────────────────────────────
+
+/** Per-chat tag registry entry. Shared-wiki permissions: any member may
+ *  attach/detach any tag (CLAUDE.md hard invariant 5) — no per-tag owner. */
+export interface Tag {
+  id: string;
+  name: string;
+  usageCount: number;
+}
+
+/** GET /chats/:id/tags?prefix= — autocomplete, ranked by usage. */
+export interface TagsAutocompleteResponse {
+  tags: Tag[];
+}
+
+/** POST /media/:id/tags. Server normalizes `name` (BACKBONE §5) and creates
+ *  the tag in the chat's registry if it doesn't already exist. */
+export interface AddTagRequest {
+  name: string;
+}
+
+// ─── gallery (Stage 4, BACKBONE §5/§6/§9) ───────────────────────────────────
+
+/** One tile in a per-chat gallery grid. `messageId` powers "jump to message". */
+export interface GalleryItem {
+  media: MediaInfo;
+  messageId: string;
+  chatId: string;
+  createdAt: string; // ISO 8601, the message's createdAt (gallery sort key)
+  tags: Tag[];
+}
+
+/** GET /chats/:id/gallery?kind=&q=&before=&limit= — keyset pagination on
+ *  media id DESC, matching the messages-page pattern (BACKBONE §6). `q` is
+ *  the raw booru query string (`beach -screenshots`); see shared/tags.ts
+ *  `parseTagQuery`. An unresolvable positive tag returns an empty page,
+ *  not an error (booru behavior — BACKBONE §5). */
+export interface GalleryResponse {
+  items: GalleryItem[];
+  nextCursor: string | null;
+}
+
+/** One row of the top-level Gallery tab's chats-as-albums grid. */
+export interface GalleryAlbum {
+  chatId: string;
+  name: string | null; // null for DMs; client derives via chatDisplayName like ChatSummary
+  isGroup: boolean;
+  members: PublicUser[];
+  coverThumbUrl: string | null; // latest ready media's thumb (voice has none → null)
+  mediaCount: number;
+}
+
+/** GET /gallery/albums — every chat the user is in that has ≥1 ready media
+ *  item, newest activity first. Chats with zero media are omitted (an empty
+ *  album tile has nothing useful to show). */
+export interface GalleryAlbumsResponse {
+  albums: GalleryAlbum[];
+}
+
+export const GalleryLimits = {
+  pageDefault: 60,
+  pageMax: 120,
 } as const;

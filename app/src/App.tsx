@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { ChatSummary, MeResponse } from '@den/shared';
+import type { ChatSummary, GalleryAlbum, MeResponse } from '@den/shared';
 import { useMe } from './hooks/useMe';
 import { AuthScreen } from './components/AuthScreen';
 import { Profile } from './components/Profile';
@@ -12,14 +12,16 @@ import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { FriendsScreen } from './components/FriendsScreen';
 import { NewGroupScreen } from './components/NewGroupScreen';
-import { createChat } from './lib/chats';
+import { GalleryScreen } from './components/GalleryScreen';
+import { ChatGallery } from './components/ChatGallery';
+import { createChat, fetchChats } from './lib/chats';
 import { useQueryClient } from '@tanstack/react-query';
 
 /**
  * App shell + auth gate. Server is the source of truth: we render off the
  * /me query, never off local state (hard invariant 3). Chat features (Stage
- * 2) sit behind a small hand-rolled view stack — no router dependency needed
- * for this. Gallery (Stage 4) will become the third bottom-tab entry.
+ * 2-4) sit behind a small hand-rolled view stack — no router dependency
+ * needed for this.
  */
 export default function App() {
   const { data: me, isLoading } = useMe();
@@ -43,10 +45,12 @@ export default function App() {
 
 type View =
   | { name: 'chats' }
-  | { name: 'chat'; chat: ChatSummary }
+  | { name: 'chat'; chat: ChatSummary; jumpToMessageId?: string }
   | { name: 'friends' }
   | { name: 'newGroup' }
-  | { name: 'profile' };
+  | { name: 'profile' }
+  | { name: 'gallery' }
+  | { name: 'chatGallery'; album: GalleryAlbum };
 
 function AuthedApp({ me }: { me: MeResponse }) {
   const [view, setView] = useState<View>({ name: 'chats' });
@@ -56,6 +60,20 @@ function AuthedApp({ me }: { me: MeResponse }) {
     const chat = await createChat({ memberIds: [userId] });
     void qc.invalidateQueries({ queryKey: ['chats'] });
     setView({ name: 'chat', chat });
+  }
+
+  /** Gallery only has chatId/messageId (GalleryItem doesn't carry a full
+   *  ChatSummary) — look the chat up from the already-fetched list, falling
+   *  back to a refetch for the rare case it isn't cached yet. */
+  async function jumpToMessage(chatId: string, messageId: string): Promise<void> {
+    let chats = qc.getQueryData<{ chats: ChatSummary[] }>(['chats'])?.chats;
+    let chat = chats?.find((c) => c.id === chatId);
+    if (!chat) {
+      chats = (await fetchChats()).chats;
+      qc.setQueryData(['chats'], { chats });
+      chat = chats.find((c) => c.id === chatId);
+    }
+    if (chat) setView({ name: 'chat', chat, jumpToMessageId: messageId });
   }
 
   if (view.name === 'friends') {
@@ -77,7 +95,31 @@ function AuthedApp({ me }: { me: MeResponse }) {
   }
 
   if (view.name === 'chat') {
-    return <ChatView chat={view.chat} me={me} onBack={() => setView({ name: 'chats' })} />;
+    return (
+      <ChatView
+        chat={view.chat}
+        me={me}
+        onBack={() => setView({ name: 'chats' })}
+        onOpenGallery={() =>
+          setView({
+            name: 'chatGallery',
+            album: { chatId: view.chat.id, name: view.chat.name, isGroup: view.chat.isGroup, members: view.chat.members, coverThumbUrl: null, mediaCount: 0 },
+          })
+        }
+        jumpToMessageId={view.jumpToMessageId}
+      />
+    );
+  }
+
+  if (view.name === 'chatGallery') {
+    return (
+      <ChatGallery
+        album={view.album}
+        me={me}
+        onBack={() => setView({ name: 'gallery' })}
+        onJumpToMessage={(chatId, messageId) => void jumpToMessage(chatId, messageId)}
+      />
+    );
   }
 
   return (
@@ -85,6 +127,8 @@ function AuthedApp({ me }: { me: MeResponse }) {
       <div className="flex-1 overflow-y-auto">
         {view.name === 'profile' ? (
           <ProfileTab me={me} />
+        ) : view.name === 'gallery' ? (
+          <GalleryScreen me={me} onOpenAlbum={(album) => setView({ name: 'chatGallery', album })} />
         ) : (
           <ChatList
             me={me}
@@ -100,6 +144,7 @@ function AuthedApp({ me }: { me: MeResponse }) {
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <TabButton label="Chats" active={view.name === 'chats'} onClick={() => setView({ name: 'chats' })} />
+        <TabButton label="Gallery" active={view.name === 'gallery'} onClick={() => setView({ name: 'gallery' })} />
         <TabButton label="Profile" active={view.name === 'profile'} onClick={() => setView({ name: 'profile' })} />
       </nav>
     </div>

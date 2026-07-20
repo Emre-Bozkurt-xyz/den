@@ -79,9 +79,12 @@ export function ChatList({
   );
 }
 
+const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice message' };
+
 function previewFor(message: Message, meId: string): string {
   const prefix = message.senderId === meId ? 'You: ' : '';
-  return `${prefix}${message.body ?? ''}`;
+  const body = message.body?.trim() || (message.media ? MEDIA_LABEL[message.media.kind] : '');
+  return `${prefix}${body}`;
 }
 
 function formatTime(iso: string): string {

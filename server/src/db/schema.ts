@@ -8,8 +8,11 @@
  * Migration 002 (Stage 2): chat core from BACKBONE §5.
  *   friendships · chats · chat_members · messages
  *
- * The media/tag tables (media, tags, media_tags) are Stage 3/5 and land in
- * later migrations — not here, per "stages ship in order" (CLAUDE.md).
+ * Migration 003 (Stage 3): media from BACKBONE §5/§7.
+ *   media
+ *
+ * Migration 004 (Stage 5): tags from BACKBONE §5.
+ *   tags · media_tags
  *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
@@ -22,6 +25,7 @@ import {
   check,
   customType,
   index,
+  integer,
   pgTable,
   primaryKey,
   text,
@@ -201,6 +205,75 @@ export const messages = pgTable(
       sql`${t.kind} IN ('text','image','video','voice','system')`,
     ),
     index('idx_messages_chat').on(t.chatId, t.id.desc()),
+  ],
+);
+
+// ─── media (Stage 3) ─────────────────────────────────────────────────────
+
+export const media = pgTable(
+  'media',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    messageId: bigint('message_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => messages.id),
+    uploaderId: bigint('uploader_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => users.id),
+    kind: text('kind').notNull(), // 'image' | 'video' | 'voice'
+    r2Key: text('r2_key').notNull(),
+    mime: text('mime').notNull(),
+    sizeBytes: bigint('size_bytes', { mode: 'bigint' }).notNull(),
+    width: bigint('width', { mode: 'number' }), // images/videos
+    height: bigint('height', { mode: 'number' }),
+    durationMs: bigint('duration_ms', { mode: 'number' }), // videos/voice
+    thumbKey: text('thumb_key'), // R2 key of thumbnail (null for voice)
+    status: text('status').notNull().default('processing'), // 'processing' | 'ready' | 'failed'
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('media_kind_check', sql`${t.kind} IN ('image','video','voice')`),
+    check('media_status_check', sql`${t.status} IN ('processing','ready','failed')`),
+    index('idx_media_message').on(t.messageId),
+  ],
+);
+
+// ─── tags (Stage 5) ──────────────────────────────────────────────────────
+
+export const tags = pgTable(
+  'tags',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    chatId: bigint('chat_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => chats.id),
+    name: citext('name').notNull(), // normalized (§5): lowercase, spaces→hyphens
+    usageCount: integer('usage_count').notNull().default(0),
+    createdBy: bigint('created_by', { mode: 'bigint' })
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('tags_chat_id_name_unique').on(t.chatId, t.name)],
+);
+
+export const mediaTags = pgTable(
+  'media_tags',
+  {
+    mediaId: bigint('media_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => media.id),
+    tagId: bigint('tag_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => tags.id),
+    taggedBy: bigint('tagged_by', { mode: 'bigint' }) // attribution only, not ownership (§5)
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.mediaId, t.tagId] }),
+    index('idx_media_tags_tag').on(t.tagId, t.mediaId), // the gallery-query index (§5)
   ],
 );
 

@@ -10,6 +10,7 @@ import { chatMembers, chats, messages, users } from '../db/schema.js';
 import { toChatSummary, toMessage, type ChatRow, type UserRow } from '../mappers.js';
 import { forbidden, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
+import { mediaInfoForMessages } from '../media/service.js';
 
 async function usersByIds(ids: bigint[]): Promise<UserRow[]> {
   if (ids.length === 0) return [];
@@ -24,14 +25,17 @@ async function memberIdsOf(chatId: bigint): Promise<bigint[]> {
   return rows.map((r) => r.userId);
 }
 
-async function lastMessageOf(chatId: bigint) {
+async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
   const rows = await db
     .select()
     .from(messages)
     .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt)))
     .orderBy(desc(messages.id))
     .limit(1);
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+  const mediaMap = await mediaInfoForMessages([row.id]);
+  return toMessage(row, mediaMap.get(row.id.toString()) ?? null);
 }
 
 async function unreadCountFor(chatId: bigint, viewerId: bigint, lastReadId: bigint | null): Promise<number> {
@@ -156,8 +160,9 @@ export async function getMessagesPage(chatId: bigint, before: bigint | null, lim
     .orderBy(desc(messages.id))
     .limit(limit);
 
+  const mediaMap = await mediaInfoForMessages(rows.map((r) => r.id));
   const nextCursor = rows.length === limit ? rows[rows.length - 1]!.id.toString() : null;
-  return { messages: rows.map(toMessage), nextCursor };
+  return { messages: rows.map((r) => toMessage(r, mediaMap.get(r.id.toString()) ?? null)), nextCursor };
 }
 
 export async function markRead(chatId: bigint, userId: bigint, messageId: bigint): Promise<void> {

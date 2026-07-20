@@ -49,6 +49,17 @@ async function sendOne(sub: SubRow, payload: string): Promise<void> {
   }
 }
 
+const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = {
+  image: '📷 Photo',
+  video: '🎥 Video',
+  voice: '🎤 Voice message',
+};
+
+function previewFor(message: Message): string {
+  if (message.media) return message.body?.trim() || MEDIA_LABEL[message.media.kind];
+  return message.body?.slice(0, 120) ?? '';
+}
+
 export async function notifyChatMembers(io: IOServer, chatId: bigint, message: Message): Promise<void> {
   if (!ensureVapid()) return; // not configured locally — skip quietly, not fatal to sending the message
 
@@ -72,7 +83,7 @@ export async function notifyChatMembers(io: IOServer, chatId: bigint, message: M
   const payload = JSON.stringify({
     chatId: chatId.toString(),
     senderName: senderRows[0]?.displayName ?? 'Someone',
-    preview: message.body?.slice(0, 120) ?? '',
+    preview: previewFor(message),
     url: '/',
   });
 

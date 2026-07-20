@@ -1,16 +1,46 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { ChatSummary, MeResponse } from '@den/shared';
+import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import { chatDisplayName, markRead } from '../lib/chats';
+import { kindForMime, uploadMedia } from '../lib/media';
 import { useRealtime } from '../lib/realtime';
+import { MediaBubble } from './MediaBubble';
+import { MediaViewer } from './MediaViewer';
 
-export function ChatView({ chat, me, onBack }: { chat: ChatSummary; me: MeResponse; onBack: () => void }) {
+type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number } | null;
+
+export function ChatView({
+  chat,
+  me,
+  onBack,
+  onOpenGallery,
+  jumpToMessageId,
+}: {
+  chat: ChatSummary;
+  me: MeResponse;
+  onBack: () => void;
+  onOpenGallery: () => void;
+  /** Set when arriving from the gallery's "jump to message" — loads older
+   *  pages until the target is present, then scrolls it into view. */
+  jumpToMessageId?: string;
+}) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
   const { sendMessage } = useRealtime();
   const qc = useQueryClient();
   const [draft, setDraft] = useState('');
+  const [upload, setUpload] = useState<UploadState>(null);
+  const [uploadError, setUploadError] = useState('');
+  const [viewerMedia, setViewerMedia] = useState<MediaInfo | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messageRefs = useRef(new Map<string, HTMLDivElement>());
+  const jumpedRef = useRef(false);
   const name = chatDisplayName(chat, me.id);
 
   const messages = flattenMessages(data?.pages);
@@ -25,14 +55,87 @@ export function ChatView({ chat, me, onBack }: { chat: ChatSummary; me: MeRespon
   }, [chat.id, lastMessageId, qc]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [chat.id, messages.length]);
+    if (!jumpToMessageId) bottomRef.current?.scrollIntoView({ block: 'end' });
+  }, [chat.id, messages.length, jumpToMessageId]);
+
+  // Keyset pagination is newest-first, so an older target message may not be
+  // in the first page yet — keep paging back until it shows up (or we run
+  // out of history). Runs once per jump target.
+  useEffect(() => {
+    if (!jumpToMessageId || jumpedRef.current) return;
+    const found = messages.some((m) => m.id === jumpToMessageId);
+    if (found) {
+      jumpedRef.current = true;
+      messageRefs.current.get(jumpToMessageId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setHighlightId(jumpToMessageId);
+      setTimeout(() => setHighlightId(null), 2000);
+    } else if (hasNextPage && !isFetchingNextPage) {
+      void fetchNextPage();
+    }
+  }, [jumpToMessageId, messages, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!draft.trim()) return;
     sendMessage(chat.id, draft);
     setDraft('');
+  }
+
+  async function handleFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow picking the same file again
+    if (!file) return;
+    const kind = kindForMime(file.type);
+    if (!kind || kind === 'voice') {
+      setUploadError('Pick an image or video');
+      return;
+    }
+    await runUpload(file, kind, file.type);
+  }
+
+  async function runUpload(file: Blob, kind: 'image' | 'video' | 'voice', mime: string) {
+    setUploadError('');
+    setUpload({ kind, progress: 0 });
+    try {
+      await uploadMedia(chat.id, file, kind, mime, draft, (pct) => setUpload({ kind, progress: pct }));
+      setDraft('');
+    } catch {
+      setUploadError('Upload failed — try again');
+    } finally {
+      setUpload(null);
+    }
+  }
+
+  async function startRecording() {
+    setUploadError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const rec = new MediaRecorder(stream); // platform picks its native container; server normalizes to m4a
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+      rec.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' });
+        void runUpload(blob, 'voice', blob.type);
+      };
+      recorderRef.current = rec;
+      rec.start();
+      setRecording(true);
+    } catch {
+      setUploadError('Microphone access failed');
+    }
+  }
+
+  function stopRecording() {
+    recorderRef.current?.stop();
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    setRecording(false);
+  }
+
+  function openViewer(m: Message) {
+    if (m.media?.status === 'ready' && (m.media.kind === 'image' || m.media.kind === 'video')) {
+      setViewerMedia(m.media);
+    }
   }
 
   return (
@@ -44,10 +147,18 @@ export function ChatView({ chat, me, onBack }: { chat: ChatSummary; me: MeRespon
         <button onClick={onBack} className="text-sm text-indigo-600 dark:text-indigo-400" aria-label="Back">
           ← Back
         </button>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <p className="truncate font-semibold">{name}</p>
           {chat.isGroup && <p className="truncate text-xs text-neutral-400">{chat.members.length} members</p>}
         </div>
+        <button
+          onClick={onOpenGallery}
+          aria-label="Gallery"
+          className="shrink-0 text-sm text-indigo-600 dark:text-indigo-400"
+          style={{ touchAction: 'manipulation' }}
+        >
+          🖼️ Gallery
+        </button>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -73,21 +184,32 @@ export function ChatView({ chat, me, onBack }: { chat: ChatSummary; me: MeRespon
             const mine = m.senderId === me.id;
             const pending = m.id.startsWith('pending:');
             return (
-              <div key={m.id} className={'flex ' + (mine ? 'justify-end' : 'justify-start')}>
+              <div
+                key={m.id}
+                ref={(el) => {
+                  if (el) messageRefs.current.set(m.id, el);
+                  else messageRefs.current.delete(m.id);
+                }}
+                className={'flex ' + (mine ? 'justify-end' : 'justify-start')}
+              >
                 <div
                   className={
-                    'max-w-[75%] rounded-2xl px-3.5 py-2 text-sm ' +
+                    (m.media ? 'max-w-[75%] rounded-2xl p-1.5 text-sm ' : 'max-w-[75%] rounded-2xl px-3.5 py-2 text-sm ') +
+                    (highlightId === m.id ? 'ring-2 ring-amber-400 ' : '') +
                     (mine
                       ? 'bg-indigo-600 text-white ' + (pending ? 'opacity-60' : '')
                       : 'bg-black/5 text-neutral-900 dark:bg-white/10 dark:text-neutral-100')
                   }
                 >
                   {chat.isGroup && !mine && (
-                    <p className="mb-0.5 text-xs font-semibold opacity-70">
+                    <p className="mb-0.5 px-2 pt-1 text-xs font-semibold opacity-70">
                       {chat.members.find((mem) => mem.id === m.senderId)?.displayName ?? 'Unknown'}
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap break-words">{m.body}</p>
+                  {m.media && <MediaBubble message={m} onOpen={() => openViewer(m)} />}
+                  {m.body && (
+                    <p className={'whitespace-pre-wrap break-words ' + (m.media ? 'px-2 pt-1.5 pb-0.5' : '')}>{m.body}</p>
+                  )}
                 </div>
               </div>
             );
@@ -96,26 +218,68 @@ export function ChatView({ chat, me, onBack }: { chat: ChatSummary; me: MeRespon
         <div ref={bottomRef} />
       </div>
 
+      {upload && (
+        <div className="border-t border-black/10 px-4 py-2 text-xs text-neutral-500 dark:border-white/10 dark:text-neutral-400">
+          Uploading {upload.kind}… {upload.progress}%
+          <div className="mt-1 h-1 overflow-hidden rounded-full bg-black/10 dark:bg-white/10">
+            <div className="h-full bg-indigo-600 transition-[width]" style={{ width: `${upload.progress}%` }} />
+          </div>
+        </div>
+      )}
+      {uploadError && (
+        <p className="border-t border-black/10 px-4 py-2 text-xs text-red-600 dark:border-white/10 dark:text-red-400">
+          {uploadError}
+        </p>
+      )}
+
       <form
         onSubmit={submit}
         className="flex items-end gap-2 border-t border-black/10 p-3 dark:border-white/10"
         style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
       >
+        <input ref={fileInputRef} type="file" accept="image/*,video/*" hidden onChange={(e) => void handleFilePicked(e)} />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!!upload || recording}
+          aria-label="Attach photo or video"
+          className="shrink-0 rounded-xl border border-black/10 px-3 py-2.5 text-sm dark:border-white/15 disabled:opacity-40"
+          style={{ touchAction: 'manipulation' }}
+        >
+          📎
+        </button>
         <input
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Message"
           className="min-w-0 flex-1 rounded-xl border border-black/10 bg-white px-3.5 py-2.5 text-base outline-none focus:border-indigo-500 dark:border-white/15 dark:bg-neutral-900"
         />
-        <button
-          type="submit"
-          disabled={!draft.trim()}
-          className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40"
-          style={{ touchAction: 'manipulation' }}
-        >
-          Send
-        </button>
+        {draft.trim() ? (
+          <button
+            type="submit"
+            className="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white"
+            style={{ touchAction: 'manipulation' }}
+          >
+            Send
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => (recording ? stopRecording() : void startRecording())}
+            disabled={!!upload}
+            aria-label={recording ? 'Stop recording' : 'Record voice message'}
+            className={
+              'shrink-0 rounded-xl px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-40 ' +
+              (recording ? 'bg-rose-600' : 'bg-indigo-600')
+            }
+            style={{ touchAction: 'manipulation' }}
+          >
+            {recording ? '■ Stop' : '🎤'}
+          </button>
+        )}
       </form>
+
+      {viewerMedia && <MediaViewer media={viewerMedia} onClose={() => setViewerMedia(null)} />}
     </div>
   );
 }

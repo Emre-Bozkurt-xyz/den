@@ -19,10 +19,11 @@ RUN npm -w shared run build && npm -w server run build
 FROM node:22-slim AS runtime
 WORKDIR /repo
 ENV NODE_ENV=production
-# ffmpeg: voice transcode (Stage 0 PoC) + video posters (Stage 3).
-# ⚠️ Stage 3 also needs libvips for sharp/HEIC — add libvips-dev then.
+# ffmpeg: voice transcode + video posters. libvips: sharp's HEIC/AVIF decode
+# (sharp's prebuilt binary bundles libvips itself, but the system lib covers
+# HEIC — verify on the real VPS per BACKBONE §14 Stage 0 checklist).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates libvips \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json* ./
 COPY shared/package.json shared/

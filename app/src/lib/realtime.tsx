@@ -6,6 +6,7 @@ import {
   makeEnvelope,
   type WsEnvelope,
   type Message,
+  type MediaReadyPayload,
   type MessageNewPayload,
   type MessagesResponse,
   type MeResponse,
@@ -88,12 +89,27 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           }
           break;
         }
+        case WsType.MediaReady: {
+          const { message } = frame.payload as MediaReadyPayload;
+          qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
+            withFirstPage(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
+          );
+          void qc.invalidateQueries({ queryKey: ['chats'] });
+          break;
+        }
         case WsType.ChatCreated:
           void qc.invalidateQueries({ queryKey: ['chats'] });
           break;
         case WsType.FriendRequest:
         case WsType.FriendAccepted:
           void qc.invalidateQueries({ queryKey: ['friends'] });
+          break;
+        case WsType.TagAdded:
+        case WsType.TagRemoved:
+          // Payloads only carry mediaId, not chatId — invalidating broadly
+          // is cheap (react-query only refetches queries currently mounted)
+          // and keeps every open gallery/viewer in sync with shared-wiki tags.
+          void qc.invalidateQueries({ queryKey: ['gallery'] });
           break;
         default:
           break;
@@ -122,6 +138,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       kind: 'text',
       body: trimmed,
       createdAt: new Date().toISOString(),
+      media: null,
     };
 
     pendingRef.current.set(reqId, { chatId, tempId });

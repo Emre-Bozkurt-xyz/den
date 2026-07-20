@@ -22,12 +22,17 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     const result = await createChat(req.user!.id, req.body ?? { memberIds: [] });
 
     if (result.created) {
-      // Join each new member's live sockets to the chat room so message
-      // fanout works immediately, without waiting for a reconnect — and let
-      // their chat list update without a refetch.
-      for (const memberId of result.newMemberIds) {
+      // Join every member's live sockets — including the creator's own — to
+      // the new chat room so message fanout works immediately, without
+      // waiting for a reconnect. Missing the creator here means their own
+      // sent messages never reach their own socket (broadcasts go to the
+      // room, and their socket isn't in it yet), which stalls the optimistic
+      // pending-bubble reconciliation in realtime.tsx until next reconnect.
+      for (const memberId of [...result.newMemberIds, req.user!.id]) {
         const sockets = await app.io?.in(userRoom(memberId)).fetchSockets();
         for (const s of sockets ?? []) await s.join(chatRoom(result.chat.id));
+      }
+      for (const memberId of result.newMemberIds) {
         app.io?.to(userRoom(memberId)).emit('ws', makeEnvelope(WsType.ChatCreated, { chat: result.chat }));
       }
     }

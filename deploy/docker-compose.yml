@@ -26,6 +26,28 @@ services:
     ports:
       - '127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432'
 
+  # Local/dev-only stand-in for Cloudflare R2 (S3-compatible API). Prod points
+  # R2_ENDPOINT at the real R2 account endpoint instead — same client code,
+  # zero code changes (see server/src/media/r2.ts). Not part of the prod
+  # compose profile; § BACKBONE 3 still names R2 as the real media store.
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${R2_ACCESS_KEY_ID:-den-dev}
+      MINIO_ROOT_PASSWORD: ${R2_SECRET_ACCESS_KEY:-den-dev-secret}
+    volumes:
+      - ./minio-data:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - '127.0.0.1:9000:9000'
+      - '127.0.0.1:9001:9001'
+
   api:
     build:
       context: ..
@@ -35,18 +57,41 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      NODE_ENV: production
+      # Deliberately NOT `${NODE_ENV:-production}` — .env's NODE_ENV is set to
+      # 'development' for the host `npm run dev` workflow, and this image only
+      # installs prod deps (no pino-pretty), so inheriting that value here
+      # crash-loops the container. Use the separate API_NODE_ENV to opt into
+      # non-Secure cookies for local docker testing (`API_NODE_ENV=development`).
+      NODE_ENV: ${API_NODE_ENV:-production}
       API_HOST: 0.0.0.0
       API_PORT: '3000'
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://den.ems-place.com}
       DATABASE_URL: postgres://${POSTGRES_USER:-den}:${POSTGRES_PASSWORD:-den}@postgres:5432/${POSTGRES_DB:-den}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
-      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-den.ems-place.com}
+      # No domain-specific fallback: an unset/empty COOKIE_DOMAIN gives a
+      # host-only cookie, which is what local dev needs. Real prod .env always
+      # sets this explicitly (see .env.example), so production is unaffected.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@ems-place.com}
-    expose:
-      - '3000'
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-den-dev}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-den-dev-secret}
+      R2_BUCKET: ${R2_BUCKET:-den-media}
+      # Same trap as NODE_ENV above: .env's R2_ENDPOINT is set to
+      # localhost:9000 for the host `npm run dev` workflow, which is
+      # unreachable from inside this container. API_R2_ENDPOINT is a
+      # docker-only override so the container always defaults to the
+      # in-network `minio` service hostname regardless of what .env says.
+      R2_ENDPOINT: ${API_R2_ENDPOINT:-http://minio:9000}
+      R2_PUBLIC_ENDPOINT: ${R2_PUBLIC_ENDPOINT:-http://localhost:9000}
+      R2_FORCE_PATH_STYLE: ${R2_FORCE_PATH_STYLE:-true}
+    # Bound to localhost only (same pattern as postgres above) — lets the
+    # Vite dev server's proxy (app/vite.config.ts, default target
+    # localhost:3000) reach this container directly for local testing.
+    ports:
+      - '127.0.0.1:3000:3000'
 
   web:
     build:
