@@ -88,7 +88,18 @@ services:
       # docker-only override so the container always defaults to the
       # in-network `minio` service hostname regardless of what .env says.
       R2_ENDPOINT: ${API_R2_ENDPOINT:-http://minio:9000}
-      R2_PUBLIC_ENDPOINT: ${R2_PUBLIC_ENDPOINT:-http://localhost:9000}
+      # Same docker-only-override pattern, and for a sharper reason than the
+      # NODE_ENV/R2_ENDPOINT cases above: `${R2_PUBLIC_ENDPOINT:-default}`
+      # (single var, `:-`) can't tell "unset" apart from "deliberately empty"
+      # — a real prod .env's intentionally-blank R2_PUBLIC_ENDPOINT (see
+      # r2.ts: empty means "no rewrite, r2Endpoint is already public") was
+      # silently getting replaced by the MinIO-era localhost:9000 default,
+      # which broke every presigned URL in prod. A distinct override var
+      # sidesteps the ambiguity entirely: unset in prod's .env → truly empty
+      # in the container. Only set API_R2_PUBLIC_ENDPOINT=http://localhost:9000
+      # if you're testing the full stack (api included) inside Docker
+      # locally against the dev MinIO stand-in.
+      R2_PUBLIC_ENDPOINT: ${API_R2_PUBLIC_ENDPOINT:-}
       R2_FORCE_PATH_STYLE: ${R2_FORCE_PATH_STYLE:-true}
     # Bound to localhost only (same pattern as postgres above) — lets the
     # Vite dev server's proxy (app/vite.config.ts, default target
