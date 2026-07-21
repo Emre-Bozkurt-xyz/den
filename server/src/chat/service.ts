@@ -10,6 +10,7 @@ import { chatMembers, chats, messages, users } from '../db/schema.js';
 import { toChatSummary, toMessage, type ChatRow, type UserRow } from '../mappers.js';
 import { forbidden, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
+import { assertMember } from './membership.js';
 import { mediaInfoForMessages } from '../media/service.js';
 
 async function usersByIds(ids: bigint[]): Promise<UserRow[]> {
@@ -182,4 +183,74 @@ export async function sendTextMessage(chatId: bigint, senderId: bigint, body: st
   }
   const inserted = await db.insert(messages).values({ chatId, senderId, kind: 'text', body: trimmed }).returning();
   return toMessage(inserted[0]!);
+}
+
+// ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/MESSAGE_DELETE.md) ──
+
+function parseMessageId(raw: string): bigint {
+  try {
+    return BigInt(raw);
+  } catch {
+    throw validation('invalid message id');
+  }
+}
+
+/** Parses + dedupes a message-id batch and enforces the size ceiling. Shared
+ *  by soft-delete and restore — both are all-or-nothing batch ops. */
+function parseMessageIdBatch(rawIds: string[]): bigint[] {
+  if (!Array.isArray(rawIds) || rawIds.length === 0) throw validation('messageIds must be a non-empty array');
+  if (rawIds.length > ChatLimits.deleteBatchMax) {
+    throw validation(`batches are limited to ${ChatLimits.deleteBatchMax} messages`);
+  }
+  return Array.from(new Set(rawIds.map(parseMessageId)));
+}
+
+/** Loads message rows by id and enforces "every id belongs to this chat and
+ *  was sent by this caller" as a single all-or-nothing check — a missing id,
+ *  a wrong-chat id, or someone else's message throws 403 for the *whole*
+ *  batch and nothing is written (docs/MESSAGE_DELETE.md §3: "Partial success
+ *  is a worse UX than a clean refusal and leaks which ids exist"). */
+async function loadOwnMessagesOrThrow(chatId: bigint, senderId: bigint, ids: bigint[]) {
+  const rows = await db.select().from(messages).where(inArray(messages.id, ids));
+  if (rows.length !== ids.length || rows.some((r) => r.chatId !== chatId || r.senderId !== senderId)) {
+    throw forbidden('all messages must be your own, in this chat');
+  }
+  return rows;
+}
+
+/** Soft-deletes the caller's own messages in this chat (CLAUDE.md #8: sets
+ *  `deleted_at` only — never `DELETE`, never touches media/R2/tags, those
+ *  belong to the iceboxed hard wipe). Idempotent: an already-deleted id is a
+ *  no-op; the returned list is only the ids that actually transitioned, so
+ *  the caller's WS broadcast never announces a phantom change. */
+export async function softDeleteMessages(viewerId: bigint, chatId: bigint, rawIds: string[]): Promise<string[]> {
+  await assertMember(viewerId, chatId);
+  const ids = parseMessageIdBatch(rawIds);
+  const rows = await loadOwnMessagesOrThrow(chatId, viewerId, ids);
+
+  const toDelete = rows.filter((r) => r.deletedAt === null).map((r) => r.id);
+  if (toDelete.length === 0) return [];
+  await db.update(messages).set({ deletedAt: new Date() }).where(inArray(messages.id, toDelete));
+  return toDelete.map((id) => id.toString());
+}
+
+/** Restores messages the caller previously soft-deleted (the undo toast).
+ *  Same all-or-nothing ownership rule as `softDeleteMessages`. Deliberately
+ *  has no server-side time limit — the ~10s undo window is purely the
+ *  client toast's lifetime; this is the seed a future trash page could grow
+ *  from, at no cost now. Returns full DTOs (with fresh media URLs), not just
+ *  ids: other members already dropped their local copy on `message.deleted`
+ *  and can't reconstruct it from an id alone. */
+export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: string[]): Promise<MessageDto[]> {
+  await assertMember(viewerId, chatId);
+  const ids = parseMessageIdBatch(rawIds);
+  const rows = await loadOwnMessagesOrThrow(chatId, viewerId, ids);
+
+  const toRestore = rows.filter((r) => r.deletedAt !== null).map((r) => r.id);
+  if (toRestore.length === 0) return [];
+  await db.update(messages).set({ deletedAt: null }).where(inArray(messages.id, toRestore));
+
+  const restoredRows = await db.select().from(messages).where(inArray(messages.id, toRestore));
+  const mediaMap = await mediaInfoForMessages(toRestore);
+  return restoredRows.map((r) => toMessage(r, mediaMap.get(r.id.toString()) ?? null));
 }

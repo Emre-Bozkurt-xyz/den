@@ -7,7 +7,9 @@ import {
   type WsEnvelope,
   type Message,
   type MediaReadyPayload,
+  type MessageDeletedPayload,
   type MessageNewPayload,
+  type MessageRestoredPayload,
   type MessagesResponse,
   type MeResponse,
 } from '@den/shared';
@@ -35,6 +37,27 @@ function withFirstPage(cache: MessagesCache | undefined, update: (messages: Mess
   const first = pages[0]!;
   pages[0] = { ...first, messages: update(first.messages) };
   return { ...cache, pages };
+}
+
+/** Like `withFirstPage`, but applies across every page — a bulk delete can
+ *  span a page boundary, so removing ids has to check the whole cache, not
+ *  just the newest page (docs/MESSAGE_DELETE.md §4). */
+function withAllPages(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
+  if (!cache) return cache;
+  return { ...cache, pages: cache.pages.map((p) => ({ ...p, messages: update(p.messages) })) };
+}
+
+/** Sort key for reinserting restored messages: numeric id descending
+ *  (newest first, matching the server's keyset page order), with any
+ *  still-pending optimistic bubble (`pending:<reqId>`, not yet a real
+ *  BigInt id) pinned above everything else rather than fed to `BigInt()`. */
+function byIdDesc(a: Message, b: Message): number {
+  const aPending = a.id.startsWith('pending:');
+  const bPending = b.id.startsWith('pending:');
+  if (aPending || bPending) return aPending && bPending ? 0 : aPending ? -1 : 1;
+  const an = BigInt(a.id);
+  const bn = BigInt(b.id);
+  return an === bn ? 0 : an > bn ? -1 : 1;
 }
 
 /**
@@ -100,6 +123,29 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         case WsType.ChatCreated:
           void qc.invalidateQueries({ queryKey: ['chats'] });
           break;
+        case WsType.MessageDeleted: {
+          const { chatId, messageIds } = frame.payload as MessageDeletedPayload;
+          const ids = new Set(messageIds);
+          qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
+            withAllPages(old, (messages) => messages.filter((m) => !ids.has(m.id))),
+          );
+          // Deleting the newest message changes the chat-list preview and
+          // unread count — not optional (docs/MESSAGE_DELETE.md §3).
+          void qc.invalidateQueries({ queryKey: ['chats'] });
+          break;
+        }
+        case WsType.MessageRestored: {
+          const { chatId, messages: restored } = frame.payload as MessageRestoredPayload;
+          qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
+            withFirstPage(old, (messages) => {
+              const byId = new Map(messages.map((m) => [m.id, m]));
+              for (const m of restored) byId.set(m.id, m);
+              return Array.from(byId.values()).sort(byIdDesc);
+            }),
+          );
+          void qc.invalidateQueries({ queryKey: ['chats'] });
+          break;
+        }
         case WsType.FriendRequest:
         case WsType.FriendAccepted:
           void qc.invalidateQueries({ queryKey: ['friends'] });

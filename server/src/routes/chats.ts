@@ -5,10 +5,20 @@
  * (CLAUDE.md hard invariant 1).
  */
 import type { FastifyInstance } from 'fastify';
-import { ChatLimits, WsType, makeEnvelope, type ChatsResponse, type CreateChatRequest, type MarkReadRequest, type MessagesResponse } from '@den/shared';
+import {
+  ChatLimits,
+  WsType,
+  makeEnvelope,
+  type ChatsResponse,
+  type CreateChatRequest,
+  type MarkReadRequest,
+  type Message as MessageDto,
+  type MessageIdsRequest,
+  type MessagesResponse,
+} from '@den/shared';
 import { requireAuth } from '../auth/session.js';
 import { assertMember } from '../chat/membership.js';
-import { createChat, getMessagesPage, listChatsForUser, markRead } from '../chat/service.js';
+import { createChat, getMessagesPage, listChatsForUser, markRead, restoreMessages, softDeleteMessages } from '../chat/service.js';
 import { chatRoom, userRoom } from '../realtime/rooms.js';
 import { validation } from '../errors.js';
 
@@ -65,6 +75,45 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       if (messageId === null) throw validation('messageId required');
       await markRead(chatId, req.user!.id, messageId);
       return { ok: true };
+    },
+  );
+
+  // Own-messages-only soft delete + undo (Stage 6 / §2 item 11). `POST`-with-
+  // body rather than `DELETE`-with-body, matching the `/read` convention
+  // above. Membership + ownership are enforced inside softDeleteMessages/
+  // restoreMessages (chat/service.ts) — mixed/invalid batches are rejected
+  // whole with 403, writing nothing (docs/MESSAGE_DELETE.md §3).
+  app.post<{ Params: { id: string }; Body: MessageIdsRequest }>(
+    '/chats/:id/messages/delete',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      const messageIds = await softDeleteMessages(req.user!.id, chatId, req.body?.messageIds ?? []);
+
+      // Skip the broadcast entirely when nothing actually changed (e.g. a
+      // retried delete of already-deleted ids) — no phantom WS frame.
+      if (messageIds.length > 0) {
+        app.io
+          ?.to(chatRoom(chatId))
+          .emit('ws', makeEnvelope(WsType.MessageDeleted, { chatId: chatId.toString(), messageIds }));
+      }
+      return { messageIds };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: MessageIdsRequest }>(
+    '/chats/:id/messages/restore',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      const restored: MessageDto[] = await restoreMessages(req.user!.id, chatId, req.body?.messageIds ?? []);
+
+      if (restored.length > 0) {
+        app.io
+          ?.to(chatRoom(chatId))
+          .emit('ws', makeEnvelope(WsType.MessageRestored, { chatId: chatId.toString(), messages: restored }));
+      }
+      return { messages: restored };
     },
   );
 }

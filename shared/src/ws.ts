@@ -52,6 +52,9 @@ export const WsType = {
   // tags (Stage 5)
   TagAdded: 'tag.added',
   TagRemoved: 'tag.removed',
+  // message lifecycle (Stage 6 / §2 item 11)
+  MessageDeleted: 'message.deleted',
+  MessageRestored: 'message.restored',
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
@@ -112,6 +115,24 @@ export interface TagRemovedPayload {
  *  message id ties it back to the placeholder already in the client cache. */
 export interface MediaReadyPayload {
   message: import('./api.js').Message;
+}
+
+/** Server → client (room broadcast), Stage 6: these messages are gone for
+ *  everyone. Ids only — the client already has the bodies and is removing
+ *  them (§ docs/MESSAGE_DELETE.md §2). Batched by design: a bulk delete of
+ *  30 messages is one frame, not 30. */
+export interface MessageDeletedPayload {
+  chatId: string;
+  messageIds: string[];
+}
+
+/** Server → client (room broadcast), Stage 6: an undo put these back.
+ *  Carries FULL message objects, not ids — non-deleter clients dropped their
+ *  copies on `message.deleted` and can't reconstruct them from an id alone
+ *  without a refetch. */
+export interface MessageRestoredPayload {
+  chatId: string;
+  messages: import('./api.js').Message[];
 }
 
 /** Build a server→client envelope with a fresh timestamp. */

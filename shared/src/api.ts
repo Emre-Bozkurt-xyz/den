@@ -170,12 +170,20 @@ export interface MarkReadRequest {
   messageId: string;
 }
 
+/** POST /chats/:id/messages/delete and .../restore (Stage 6 / §2 item 11).
+ *  All ids must belong to this chat and be sent by the caller — mixed
+ *  batches are rejected whole, nothing written (docs/MESSAGE_DELETE.md §3). */
+export interface MessageIdsRequest {
+  messageIds: string[];
+}
+
 export const ChatLimits = {
   nameMax: 64,
   messageBodyMax: 4000,
   messagesPageDefault: 50,
   messagesPageMax: 100,
   maxGroupMembers: 50,
+  deleteBatchMax: 100,
 } as const;
 
 // ─── media (Stage 3, BACKBONE §5/§6/§7) ─────────────────────────────────────
