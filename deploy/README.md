@@ -126,6 +126,15 @@ every push to `main` — no inbound port needed for CI, no SSH deploy step.
 
 ### Troubleshooting
 
+**A fix landed on `main` but the deploy fails with the identical error** —
+check *which commit* the run is on. GitHub's **"Re-run jobs"** replays the run
+at its **original commit**, so it will never pick up anything merged since;
+the fix looks broken when it simply wasn't present. Either open the newer run
+that the push created, or use **Actions → Deploy → Run workflow**
+(`workflow_dispatch`), which always runs the tip of the branch. A quick tell:
+if a step you know you added isn't in the log at all, you're looking at an old
+commit.
+
 **`error from sender: open .../deploy/pg-data: permission denied`** — the
 build context (the repo root) included Postgres's data dir, which is owned by
 the container's postgres uid with 0700 perms, so the build-context sender

@@ -6,6 +6,11 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # Manual trigger from the Actions tab. Use this instead of "Re-run jobs" on
+  # an old failed run: a re-run replays the ORIGINAL commit, so it will not
+  # pick up fixes that landed on main since — which looks exactly like the fix
+  # not working. workflow_dispatch always runs the tip of the chosen branch.
+  workflow_dispatch:
 
 concurrency:
   group: deploy
