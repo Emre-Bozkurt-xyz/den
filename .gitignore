@@ -23,6 +23,8 @@ deploy/caddy-data/
 deploy/caddy-config/
 tmp/
 server/tmp/
+.playwright-mcp/
+minio-data/
 
 # editor / OS
 .DS_Store

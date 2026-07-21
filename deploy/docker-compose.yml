@@ -100,9 +100,11 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    # 443 deliberately not published: Caddy runs plain-HTTP-only here (see
+    # deploy/Caddyfile) since TLS terminates upstream at the VPS reverse
+    # proxy, which forwards decrypted HTTP through the frp tunnel to :80.
     ports:
       - '80:80'
-      - '443:443'
     volumes:
       - ./caddy-data:/data
       - ./caddy-config:/config

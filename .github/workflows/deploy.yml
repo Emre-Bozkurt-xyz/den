@@ -1,0 +1,43 @@
+name: Deploy
+
+# Runs on the home-server self-hosted runner itself — the job's shell commands
+# execute directly on that machine, no SSH step needed. See deploy/README.md
+# "CI/CD — self-hosted runner" for one-time runner setup on the host.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Default actions/checkout behavior runs `git clean -ffdx` before
+          # checkout, which would delete the untracked .env this job depends
+          # on if it lived inside the repo. It doesn't — see ENV_FILE below —
+          # but `clean: false` is kept anyway as a second line of defense so
+          # a future stray untracked file in the workspace is never silently
+          # wiped by a deploy.
+          clean: false
+
+      - name: Build and start stack
+        env:
+          # Lives outside the repo checkout entirely (see runner setup docs) —
+          # never touched by git clean, never in the git history.
+          ENV_FILE: ${{ vars.DEN_ENV_FILE || '/opt/apps/den/secrets/.env' }}
+        run: |
+          docker compose --env-file "$ENV_FILE" -f deploy/docker-compose.yml up -d --build
+
+      - name: Run DB migrations
+        env:
+          ENV_FILE: ${{ vars.DEN_ENV_FILE || '/opt/apps/den/secrets/.env' }}
+        run: |
+          docker compose --env-file "$ENV_FILE" -f deploy/docker-compose.yml exec -T api npm -w server run db:migrate
+
+      - name: Prune old images
+        run: docker image prune -f

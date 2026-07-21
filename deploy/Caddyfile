@@ -1,8 +1,13 @@
-# Den — Caddy reverse proxy. Automatic TLS for the locked production domain.
+# Den — Caddy reverse proxy. Plain HTTP only: TLS is terminated upstream by
+# the reverse proxy on the VPS (frp tunnels decrypted HTTP from there to this
+# host's :80) — Caddy here must NOT attempt its own automatic HTTPS/ACME or
+# it'll redirect the already-plaintext tunneled request back to https with
+# nothing on this end to receive it. The explicit `http://` scheme on the
+# site address is what opts this block out of Caddy's automatic HTTPS.
 # App (static PWA) + API + WSS are all same-origin behind this one host, which
 # is what keeps the session cookie and socket.io simple (BACKBONE §3, §8).
 
-den.ems-place.com {
+http://den.ems-place.com {
 	encode gzip zstd
 
 	# API + health → Fastify.
@@ -34,5 +39,3 @@ den.ems-place.com {
 		format console
 	}
 }
-
-# Local/dev over http: `caddy run --config Caddyfile.local` uses :80 instead.
