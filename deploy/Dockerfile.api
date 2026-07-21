@@ -32,6 +32,15 @@ COPY app/package.json app/
 RUN npm install --workspaces --include-workspace-root --omit=dev
 COPY --from=build /repo/shared/dist shared/dist
 COPY --from=build /repo/server/dist server/dist
+# drizzle-kit migrate (run via `docker compose exec api npm -w server run
+# db:migrate`) needs its own config file plus the actual migration SQL/journal
+# — neither is part of the compiled dist/ output above. `migrate` itself
+# doesn't read the `schema` path the config references (only `generate`/
+# `push` do), but src/db/ is copied too anyway — a few KB of TS source, cheap
+# insurance against drizzle-kit resolving it for some reason we didn't trace.
+COPY server/drizzle.config.ts server/
+COPY server/drizzle server/drizzle
+COPY server/src/db server/src/db
 EXPOSE 3000
 # Simple healthcheck against the /health route.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
