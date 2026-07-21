@@ -1,6 +1,23 @@
 # Den — full stack. Run from repo root:
 #   docker compose -f deploy/docker-compose.yml up -d --build
 # Provide secrets via an .env file at the repo root (see .env.example).
+#
+# ⚠️ PERSISTENT DATA PATHS — read before changing a volume line below.
+# Relative bind mounts resolve against THIS FILE'S directory, not the cwd.
+# That is a trap on the prod host, which has two checkouts of this repo:
+# the manual one (/opt/apps/den/repo) and the GitHub runner's workspace
+# (/opt/actions-runner/den/_work/den/den). `name: den` pins the compose
+# project, so both directories drive the SAME containers — but a plain
+# `./pg-data` would mean each one bind-mounts a DIFFERENT host directory.
+# A deploy from the runner would therefore recreate den-postgres-1 against
+# an empty data dir: prod would look like it had lost every user, message
+# and invite, while the real data sat untouched at the other path.
+#
+# DEN_DATA_ROOT decouples the data location from whichever checkout ran the
+# command. It comes from the --env-file, which BOTH deploy paths already
+# share (/opt/apps/den/secrets/.env), so setting it once fixes both.
+# Unset/empty → '.', i.e. exactly the old behaviour, which is what local dev
+# wants. See deploy/.env.prod.example and deploy/README.md.
 
 name: den
 
@@ -13,7 +30,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-den}
       POSTGRES_DB: ${POSTGRES_DB:-den}
     volumes:
-      - ./pg-data:/var/lib/postgresql/data
+      - ${DEN_DATA_ROOT:-.}/pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-den} -d ${POSTGRES_DB:-den}']
       interval: 10s
@@ -41,7 +58,7 @@ services:
       MINIO_ROOT_USER: ${R2_ACCESS_KEY_ID:-den-dev}
       MINIO_ROOT_PASSWORD: ${R2_SECRET_ACCESS_KEY:-den-dev-secret}
     volumes:
-      - ./minio-data:/data
+      - ${DEN_DATA_ROOT:-.}/minio-data:/data
     healthcheck:
       test: ['CMD', 'mc', 'ready', 'local']
       interval: 10s
@@ -124,5 +141,5 @@ services:
     ports:
       - '80:80'
     volumes:
-      - ./caddy-data:/data
-      - ./caddy-config:/config
+      - ${DEN_DATA_ROOT:-.}/caddy-data:/data
+      - ${DEN_DATA_ROOT:-.}/caddy-config:/config

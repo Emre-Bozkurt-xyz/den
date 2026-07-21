@@ -1,0 +1,56 @@
+# Docker build context excludes. Both images (deploy/Dockerfile.api and
+# deploy/Dockerfile.web) use the REPO ROOT as their build context, so
+# everything here is sent to the daemon on every build unless excluded.
+#
+# ⚠️ This file's absence was a real prod outage: the compose bind mounts put
+# Postgres's data directory at deploy/pg-data/, owned by the container's
+# postgres uid with 0700 perms. The build-context sender runs as the runner
+# user, can't read it, and the whole build dies with
+#   "error from sender: open .../deploy/pg-data: permission denied"
+# Every self-hosted-runner deploy failed this way. Excluding the runtime data
+# dirs fixes that AND stops shipping an entire database to the daemon on
+# every build.
+#
+# NOTE: .gitignore does NOT apply to Docker build contexts — the two lists
+# have to be maintained separately. Keep the runtime/data entries below in
+# sync with .gitignore's "runtime / local data" block.
+
+# runtime / local data — never belongs in an image, and pg-data is unreadable
+pg-data/
+deploy/pg-data/
+minio-data/
+deploy/minio-data/
+deploy/caddy-data/
+deploy/caddy-config/
+tmp/
+server/tmp/
+*.log
+
+# secrets — must never enter a build context, let alone a layer
+.env
+.env.*
+!.env.example
+
+# dependencies + build output: images run their own npm install and build,
+# so shipping these only slows the context upload and risks host/container
+# native-binary mismatches (sharp, @node-rs/argon2).
+node_modules/
+**/node_modules/
+dist/
+build/
+app/dev-dist/
+*.tsbuildinfo
+
+# vcs / CI / editor / docs — not needed by any build stage
+.git/
+.github/
+.playwright-mcp/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+docs/
+
+# NOTE: deploy/ itself is deliberately NOT excluded — Dockerfile.web does
+# `COPY deploy/Caddyfile /etc/caddy/Caddyfile`, and Dockerfile.api needs
+# nothing from it but is happy either way. Only the data dirs above are cut.

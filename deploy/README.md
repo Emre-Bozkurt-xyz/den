@@ -73,6 +73,31 @@ every push to `main` — no inbound port needed for CI, no SSH deploy step.
    with a repo variable `DEN_ENV_FILE` under Settings → Secrets and
    variables → Actions → Variables if you put it somewhere else).
 
+   ⚠️ **`DEN_DATA_ROOT` is required in that `.env`.** The runner does *not*
+   deploy from `/opt/apps/den/repo` — `actions/checkout` puts the code in the
+   runner's own workspace (`/opt/actions-runner/den/_work/den/den`), so the
+   host has **two** checkouts of this repo. Compose resolves relative bind
+   mounts against the compose file's directory, and `name: den` pins both
+   checkouts to the same project — so without `DEN_DATA_ROOT`, a runner
+   deploy recreates `den-postgres-1` bound to an *empty* `pg-data/` in the
+   runner workspace. Prod would look like every user, message and invite had
+   vanished (the real data is still fine, at the other path — but new writes
+   land in the new DB, so you get a split brain on top).
+
+   Point it at wherever the live data already is, which for a host that has
+   been deploying manually from `/opt/apps/den/repo` is:
+   ```bash
+   # confirm first — this should list a populated Postgres data dir
+   sudo ls /opt/apps/den/repo/deploy/pg-data
+   # then add to /opt/apps/den/secrets/.env
+   DEN_DATA_ROOT=/opt/apps/den/repo/deploy
+   ```
+   The workflow's "Guard persistent data paths" step refuses to deploy if
+   this is unset or its `pg-data/` is missing, so a misconfiguration fails
+   loudly instead of quietly starting a fresh database. Relocating the data
+   somewhere tidier (e.g. `/opt/apps/den/data`) is a fine idea, but do it as
+   a deliberate, stack-stopped step — and not before backups exist.
+
 2. **Register the runner** (repo-scoped): on GitHub, go to this repo →
    **Settings → Actions → Runners → New self-hosted runner**, pick Linux/x64,
    and follow the generated commands on the home server — they look like:
@@ -94,10 +119,19 @@ every push to `main` — no inbound port needed for CI, no SSH deploy step.
    Check it's alive: `sudo ./svc.sh status`, and it should also show
    "Idle"/green under the repo's Settings → Actions → Runners page.
 
-4. **Push to `main`** — the workflow checks out the repo, runs
-   `docker compose up -d --build`, runs migrations inside the `api`
-   container, and prunes old images. Watch it live under the repo's
-   **Actions** tab.
+4. **Push to `main`** — the workflow checks out the repo, guards the data
+   paths (see step 1), runs `docker compose up -d --build`, runs migrations
+   inside the `api` container, and prunes old images. Watch it live under the
+   repo's **Actions** tab.
+
+### Troubleshooting
+
+**`error from sender: open .../deploy/pg-data: permission denied`** — the
+build context (the repo root) included Postgres's data dir, which is owned by
+the container's postgres uid with 0700 perms, so the build-context sender
+can't read it. Fixed by the root `.dockerignore`; if you hit it again, check
+that file still excludes `deploy/pg-data/`. Note `.gitignore` does **not**
+apply to Docker build contexts — the two lists are maintained separately.
 
 ### Notes
 

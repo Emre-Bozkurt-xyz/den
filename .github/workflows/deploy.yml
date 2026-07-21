@@ -25,6 +25,33 @@ jobs:
           # wiped by a deploy.
           clean: false
 
+      # Fail fast rather than silently bringing up an empty database.
+      # This job runs from the runner's own workspace, which is NOT the
+      # manual deploy checkout — see the DEN_DATA_ROOT comment block at the
+      # top of deploy/docker-compose.yml for why a relative bind mount would
+      # point Postgres at a fresh, empty directory here and make prod look
+      # wiped. If that variable is missing or its data dir isn't there, stop
+      # before `up` touches any container.
+      - name: Guard persistent data paths
+        env:
+          ENV_FILE: ${{ vars.DEN_ENV_FILE || '/opt/apps/den/secrets/.env' }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::error::env file not found at $ENV_FILE"
+            exit 1
+          fi
+          DATA_ROOT="$(grep -E '^DEN_DATA_ROOT=' "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+          if [ -z "$DATA_ROOT" ]; then
+            echo "::error::DEN_DATA_ROOT is unset/empty in $ENV_FILE. Without it, compose resolves ./pg-data relative to this runner workspace and Postgres starts on an EMPTY data dir. Set it to the absolute directory holding the live pg-data/ (see deploy/README.md)."
+            exit 1
+          fi
+          if [ ! -d "$DATA_ROOT/pg-data" ]; then
+            echo "::error::DEN_DATA_ROOT=$DATA_ROOT but $DATA_ROOT/pg-data does not exist. Refusing to deploy onto a fresh database."
+            exit 1
+          fi
+          echo "Persistent data root OK: $DATA_ROOT"
+
       - name: Build and start stack
         env:
           # Lives outside the repo checkout entirely (see runner setup docs) —
