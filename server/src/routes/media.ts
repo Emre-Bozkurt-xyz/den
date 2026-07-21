@@ -5,14 +5,14 @@
  * mint presigned URLs and record/verify metadata.
  */
 import type { FastifyInstance } from 'fastify';
-import { makeEnvelope, WsType, type AddTagRequest, type CompleteUploadRequest, type CreateUploadRequest, type CreateUploadResponse, type MediaUrlResponse, type Tag } from '@den/shared';
+import { makeEnvelope, WsType, type AddTagRequest, type CompleteUploadRequest, type CreateUploadRequest, type CreateUploadResponse, type MediaTagsResponse, type MediaUrlResponse, type Tag } from '@den/shared';
 import { requireAuth } from '../auth/session.js';
 import { assertMember } from '../chat/membership.js';
 import { validation } from '../errors.js';
 import { notifyChatMembers } from '../push/notify.js';
 import { chatRoom } from '../realtime/rooms.js';
 import { chatIdForMedia, completeUpload, createUpload, finalizeProcessing, getMediaUrls } from '../media/service.js';
-import { addTag, removeTag } from '../media/tags.js';
+import { addTag, removeTag, tagsForMediaIds } from '../media/tags.js';
 
 const MEDIA_KINDS = new Set(['image', 'video', 'voice']);
 
@@ -82,6 +82,21 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
 
     const urls = await getMediaUrls(mediaId);
     const res: MediaUrlResponse = urls;
+    return res;
+  });
+
+  // Single-media tag read. The gallery batches tags into its page response,
+  // but the chat-side viewer opens straight off a message bubble with no
+  // gallery page behind it (docs/UI_REVAMP.md UI-7) — same membership gate,
+  // same data, just addressable one media at a time.
+  app.get<{ Params: { id: string } }>('/media/:id/tags', { preHandler: requireAuth }, async (req) => {
+    const mediaId = parseId(req.params.id);
+    const chatId = await chatIdForMedia(mediaId);
+    if (chatId === null) throw validation('media not found');
+    await assertMember(req.user!.id, chatId);
+
+    const byMedia = await tagsForMediaIds([mediaId]);
+    const res: MediaTagsResponse = { tags: byMedia.get(mediaId.toString()) ?? [] };
     return res;
   });
 

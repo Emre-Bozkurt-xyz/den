@@ -267,6 +267,14 @@ export interface AddTagRequest {
   name: string;
 }
 
+/** GET /media/:id/tags — the tags currently attached to one media item.
+ *  The gallery gets tags batched into `GalleryItem`; this exists for the
+ *  chat-side viewer, which opens straight from a message bubble and has no
+ *  gallery page to inherit them from (docs/UI_REVAMP.md UI-7). */
+export interface MediaTagsResponse {
+  tags: Tag[];
+}
+
 // ─── gallery (Stage 4, BACKBONE §5/§6/§9) ───────────────────────────────────
 
 /** One tile in a per-chat gallery grid. `messageId` powers "jump to message". */

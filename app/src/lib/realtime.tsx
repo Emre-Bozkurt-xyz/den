@@ -156,6 +156,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           // is cheap (react-query only refetches queries currently mounted)
           // and keeps every open gallery/viewer in sync with shared-wiki tags.
           void qc.invalidateQueries({ queryKey: ['gallery'] });
+          void qc.invalidateQueries({ queryKey: ['mediaTags'] });
           break;
         default:
           break;

@@ -1,5 +1,11 @@
-import type { AddTagRequest, Tag, TagsAutocompleteResponse } from '@den/shared';
+import type { AddTagRequest, MediaTagsResponse, Tag, TagsAutocompleteResponse } from '@den/shared';
 import { api } from './api';
+
+/** Tags on one media item — used by the chat-side viewer, which (unlike the
+ *  gallery) has no page response to inherit batched tags from. */
+export function fetchMediaTags(mediaId: string): Promise<MediaTagsResponse> {
+  return api<MediaTagsResponse>(`/api/media/${mediaId}/tags`);
+}
 
 export function fetchTagAutocomplete(chatId: string, prefix: string): Promise<TagsAutocompleteResponse> {
   const qs = prefix ? `?prefix=${encodeURIComponent(prefix)}` : '';

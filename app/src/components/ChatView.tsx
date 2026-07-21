@@ -5,13 +5,24 @@ import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import { chatDisplayName, deleteMessages, markRead, restoreMessages } from '../lib/chats';
 import { kindForMime, uploadMedia } from '../lib/media';
+import { blockMessages, groupMessages, type MessageBlock } from '../lib/messageGroups';
+import { addTag, removeTag } from '../lib/tags';
 import { useRealtime } from '../lib/realtime';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useMediaTags } from '../hooks/useMediaTags';
 import { MediaBubble } from './MediaBubble';
+import { MediaGridSheet, MediaStack } from './MediaStack';
 import { MediaViewer } from './MediaViewer';
 import { ScreenHeader } from './ScreenHeader';
 
-type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number } | null;
+/** `index`/`total` are 1-based positions within one multi-file pick — each
+ *  file is still its own upload and its own message (UI-7). */
+type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number; index: number; total: number } | null;
+
+/** What the full-screen viewer is showing. A list rather than a single item
+ *  so prev/next works when the viewer was opened from a stack's grid sheet,
+ *  with the exact same component the gallery uses. */
+type ViewerState = { list: MediaInfo[]; index: number } | null;
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
@@ -57,7 +68,10 @@ export function ChatView({
   }
   const [upload, setUpload] = useState<UploadState>(null);
   const [uploadError, setUploadError] = useState('');
-  const [viewerMedia, setViewerMedia] = useState<MediaInfo | null>(null);
+  const [viewer, setViewer] = useState<ViewerState>(null);
+  // Messages of the stack whose grid sheet is open (UI-7). Held as messages,
+  // not media, so picking a tile can seed the viewer in stack order.
+  const [stackSheet, setStackSheet] = useState<Message[] | null>(null);
   const [recording, setRecording] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,7 +103,17 @@ export function ChatView({
   const suppressClickRef = useRef(false);
 
   const messages = flattenMessages(data?.pages);
+  // Runs (same sender, close in time) + stacks (adjacent bare photos/videos).
+  // Stacking is off during multi-select so every message stays individually
+  // selectable — see lib/messageGroups.ts.
+  const runs = groupMessages(messages, { stack: !selectionMode });
   const lastMessageId = messages[messages.length - 1]?.id;
+  const viewerMedia = viewer ? (viewer.list[viewer.index] ?? null) : null;
+  // Tags for whatever the viewer is showing. Per the UI-7 decision, tagging
+  // stays a viewing-time action (never part of the send path) — this just
+  // makes the existing gallery TagEditor reachable straight from a chat
+  // bubble instead of only via the gallery screen.
+  const viewerTags = useMediaTags(viewerMedia?.id ?? null);
   const selectedMessages = messages.filter((m) => selectedIds.has(m.id));
   const allSelectedMine = selectedMessages.length > 0 && selectedMessages.every((m) => m.senderId === me.id);
   const canCopySelection = selectedMessages.some((m) => m.body);
@@ -137,10 +161,17 @@ export function ChatView({
     setSelectionAnchorId(null);
   }
 
-  function enterSelectionMode(m: Message) {
+  /** Takes a list, not a single message, because long-pressing a fanned stack
+   *  selects every message it covers — a stack is a drawing of N messages,
+   *  never an addressable unit of its own (docs/UI_REVAMP.md UI-7). Entering
+   *  selection mode also un-stacks the run, so the user immediately sees the
+   *  individual bubbles they just selected. */
+  function enterSelectionMode(msgs: Message[]) {
+    const ids = msgs.map((m) => m.id);
+    if (ids.length === 0) return;
     setSelectionMode(true);
-    setSelectedIds(new Set([m.id]));
-    setSelectionAnchorId(m.id);
+    setSelectedIds(new Set(ids));
+    setSelectionAnchorId(ids[ids.length - 1]!);
     setActionMenuFor(null);
   }
 
@@ -245,20 +276,25 @@ export function ChatView({
   // see docs/MESSAGE_DELETE.md §4's "long-press when already in selection
   // mode"). Never selectable/actionable while still an optimistic pending
   // bubble — there's nothing to delete server-side yet.
-  function onBubblePointerDown(e: React.PointerEvent, m: Message) {
+  function onBubblePointerDown(e: React.PointerEvent, msgs: Message[]) {
     // Clear any stale suppression from a previous interaction whose click
     // never arrived (long-press fired, then the pointer lifted off the
     // bubble — no click event, so onBubbleClick never got to reset it).
     // Without this, that next tap would be silently swallowed.
     suppressClickRef.current = false;
-    if (m.id.startsWith('pending:')) return;
+    const m = msgs[0];
+    if (!m || m.id.startsWith('pending:')) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     longPressStartRef.current = { x: e.clientX, y: e.clientY };
     clearLongPressTimer();
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       suppressClickRef.current = true;
+      // Stacks (msgs.length > 1) skip the single-message action sheet: Copy
+      // and Delete are per-message, so the useful gesture is "select all of
+      // these", which also expands the stack back into individual bubbles.
       if (selectionMode) toggleSelect(m.id);
+      else if (msgs.length > 1) enterSelectionMode(msgs);
       else setActionMenuFor(m);
     }, LONG_PRESS_MS);
   }
@@ -281,12 +317,15 @@ export function ChatView({
     longPressStartRef.current = null;
   }
 
-  function onBubbleClick(e: React.MouseEvent, m: Message) {
+  function onBubbleClick(e: React.MouseEvent, msgs: Message[]) {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       return;
     }
-    if (m.id.startsWith('pending:') || !selectionMode) return;
+    // Selection mode disables stacking, so a clickable block is always a
+    // single message here.
+    const m = msgs[0];
+    if (!m || m.id.startsWith('pending:') || !selectionMode) return;
     if (e.shiftKey && selectionAnchorId) {
       selectRange(selectionAnchorId, m.id);
       return;
@@ -301,26 +340,55 @@ export function ChatView({
     setDraft('');
   }
 
+  /** Multi-pick (UI-7): each file is uploaded separately and becomes its own
+   *  message — no batching exists on the wire. Consecutive ones simply *draw*
+   *  as a fanned stack (lib/messageGroups.ts). Uploads run sequentially, not
+   *  in parallel: the media pipeline is per-item anyway and a serial queue
+   *  keeps the progress bar honest and phone radios/CPU from being hammered
+   *  by N concurrent PUTs. */
   async function handleFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = ''; // allow picking the same file again
-    if (!file) return;
-    const kind = kindForMime(file.type);
-    if (!kind || kind === 'voice') {
+    const picked = Array.from(e.target.files ?? []);
+    e.target.value = ''; // allow picking the same file(s) again
+    if (picked.length === 0) return;
+
+    const files = picked.flatMap((file) => {
+      const kind = kindForMime(file.type);
+      return kind === 'image' || kind === 'video' ? [{ file, kind }] : [];
+    });
+    if (files.length === 0) {
       setUploadError('Pick an image or video');
       return;
     }
-    await runUpload(file, kind, file.type);
+    if (files.length < picked.length) setUploadError('Skipped files that were not an image or video');
+
+    let failed = 0;
+    for (const [i, { file, kind }] of files.entries()) {
+      // The composer's text rides along as a caption on the first item only —
+      // repeating it on every message of a batch would read as spam.
+      const ok = await runUpload(file, kind, file.type, i === 0 ? draft : '', i + 1, files.length);
+      if (!ok) failed++;
+    }
+    if (failed > 0) {
+      setUploadError(failed === files.length ? 'Upload failed — try again' : `${failed} of ${files.length} uploads failed`);
+    }
   }
 
-  async function runUpload(file: Blob, kind: 'image' | 'video' | 'voice', mime: string) {
-    setUploadError('');
-    setUpload({ kind, progress: 0 });
+  async function runUpload(
+    file: Blob,
+    kind: 'image' | 'video' | 'voice',
+    mime: string,
+    caption: string,
+    index = 1,
+    total = 1,
+  ): Promise<boolean> {
+    if (index === 1) setUploadError('');
+    setUpload({ kind, progress: 0, index, total });
     try {
-      await uploadMedia(chat.id, file, kind, mime, draft, (pct) => setUpload({ kind, progress: pct }));
-      setDraft('');
+      await uploadMedia(chat.id, file, kind, mime, caption, (pct) => setUpload({ kind, progress: pct, index, total }));
+      if (caption) setDraft('');
+      return true;
     } catch {
-      setUploadError('Upload failed — try again');
+      return false;
     } finally {
       setUpload(null);
     }
@@ -336,7 +404,10 @@ export function ChatView({
       rec.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
       rec.onstop = () => {
         const blob = new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' });
-        void runUpload(blob, 'voice', blob.type);
+        // No caption: the mic button only exists while the composer is empty.
+        void runUpload(blob, 'voice', blob.type, '').then((ok) => {
+          if (!ok) setUploadError('Upload failed — try again');
+        });
       };
       recorderRef.current = rec;
       rec.start();
@@ -352,21 +423,30 @@ export function ChatView({
     setRecording(false);
   }
 
+  /** True when a tap on media should be ignored because it belongs to the
+   *  selection/long-press gesture instead. Selection mode swallows taps for
+   *  select/toggle (opening the full-screen viewer mid-selection would be a
+   *  dead end and disrupts the gesture); the suppression flag is the same one
+   *  the wrapper's onClick applies, re-checked here because MediaBubble and
+   *  MediaStack put their own onClick on the inner <img>/<div>, which fires
+   *  BEFORE the wrapper's (target before ancestor) — without this, a
+   *  long-press on an image opened the viewer on top of the action sheet.
+   *  Deliberately does not reset the flag — onBubbleClick still owns that,
+   *  and runs immediately after this. */
+  function mediaTapSuppressed(): boolean {
+    return selectionMode || suppressClickRef.current;
+  }
+
   function openViewer(m: Message) {
-    // Selection mode swallows taps on the bubble for select/toggle instead —
-    // opening the full-screen viewer mid-selection would be a dead end (no
-    // action menu inside it) and disrupts the selection gesture.
-    if (selectionMode) return;
-    // Same suppression the wrapper's onClick applies, checked again here
-    // because MediaBubble puts its own onClick on the inner <img>/<div>:
-    // that inner handler fires BEFORE the wrapper's (target before ancestor),
-    // so without this a long-press on an image opened the full-screen viewer
-    // on top of the action sheet. Deliberately does not reset the flag —
-    // onBubbleClick still owns that, and runs immediately after this.
-    if (suppressClickRef.current) return;
+    if (mediaTapSuppressed()) return;
     if (m.media?.status === 'ready' && (m.media.kind === 'image' || m.media.kind === 'video')) {
-      setViewerMedia(m.media);
+      setViewer({ list: [m.media], index: 0 });
     }
+  }
+
+  function openStack(msgs: Message[]) {
+    if (mediaTapSuppressed()) return;
+    setStackSheet(msgs);
   }
 
   return (
@@ -450,71 +530,47 @@ export function ChatView({
           </p>
         )}
 
-        <div className="flex flex-col gap-1.5">
-          {messages.map((m) => {
-            const mine = m.senderId === me.id;
-            const pending = m.id.startsWith('pending:');
-            const selected = selectedIds.has(m.id);
-            const actionsButton = !isMobile && !pending && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setActionMenuFor(m);
-                }}
-                aria-label="Message actions"
-                className="shrink-0 self-start rounded-pill p-1 text-text-muted opacity-0 transition-opacity hover:bg-surface-sunken group-hover:opacity-100"
-                style={{ touchAction: 'manipulation' }}
-              >
-                <MoreVertical size={14} />
-              </button>
-            );
+        {/* Runs are separated by a real gap; bubbles *inside* a run sit 2px
+            apart so a burst of messages reads as one connected block, with
+            the tail drawn only on the run's last bubble (UI-7). */}
+        <div className="flex flex-col gap-3">
+          {runs.map((run) => {
+            const mine = run.senderId === me.id;
+            const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
             return (
               <div
-                key={m.id}
-                ref={(el) => {
-                  if (el) messageRefs.current.set(m.id, el);
-                  else messageRefs.current.delete(m.id);
-                }}
-                className={'group flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}
+                key={run.key}
+                className={
+                  'flex max-w-[78%] flex-col gap-[2px] ' + (mine ? 'items-end self-end' : 'items-start self-start')
+                }
               >
-                {mine && actionsButton}
-                <div
-                  onPointerDown={(e) => onBubblePointerDown(e, m)}
-                  onPointerMove={onBubblePointerMove}
-                  onPointerUp={onBubblePointerUp}
-                  onPointerCancel={onBubblePointerCancel}
-                  onClick={(e) => onBubbleClick(e, m)}
-                  className={
-                    // Instagram-style bubble: rounded on 3 corners, a tighter
-                    // "tail" corner on the side that points at the sender.
-                    (m.media
-                      ? 'max-w-[75%] rounded-lg p-1.5 text-sm '
-                      : 'max-w-[75%] rounded-lg px-3.5 py-2 text-sm ') +
-                    (mine ? 'rounded-br-sm ' : 'rounded-bl-sm ') +
-                    (highlightId === m.id ? 'ring-2 ring-amber-400 ' : '') +
-                    (selected ? 'ring-2 ring-indigo-500 ' : '') +
-                    (mine
-                      ? 'bg-accent text-white ' + (pending ? 'opacity-60' : '')
-                      : 'bg-surface-sunken text-text-primary')
-                  }
-                  style={{
-                    touchAction: 'manipulation',
-                    WebkitTouchCallout: 'none',
-                    WebkitUserSelect: 'none',
-                    userSelect: 'none',
-                  }}
-                >
-                  {chat.isGroup && !mine && (
-                    <p className="mb-0.5 px-2 pt-1 text-xs font-semibold opacity-70">
-                      {chat.members.find((mem) => mem.id === m.senderId)?.displayName ?? 'Unknown'}
-                    </p>
-                  )}
-                  {m.media && <MediaBubble message={m} onOpen={() => openViewer(m)} />}
-                  {m.body && (
-                    <p className={'whitespace-pre-wrap break-words ' + (m.media ? 'px-2 pt-1.5 pb-0.5' : '')}>{m.body}</p>
-                  )}
-                </div>
-                {!mine && actionsButton}
+                {chat.isGroup && !mine && (
+                  <p className="px-1 pb-0.5 text-xs font-semibold text-text-secondary">{senderName}</p>
+                )}
+                {run.blocks.map((block, bi) => (
+                  <MessageBlockRow
+                    key={blockMessages(block)[0]!.id}
+                    block={block}
+                    mine={mine}
+                    isRunTail={bi === run.blocks.length - 1}
+                    selectedIds={selectedIds}
+                    highlightId={highlightId}
+                    selectionMode={selectionMode}
+                    showActionsButton={!isMobile && block.kind === 'single'}
+                    registerRef={(id, el) => {
+                      if (el) messageRefs.current.set(id, el);
+                      else messageRefs.current.delete(id);
+                    }}
+                    onOpenActions={setActionMenuFor}
+                    onOpenViewer={openViewer}
+                    onOpenStack={openStack}
+                    onPointerDownBlock={onBubblePointerDown}
+                    onPointerMoveBlock={onBubblePointerMove}
+                    onPointerUpBlock={onBubblePointerUp}
+                    onPointerCancelBlock={onBubblePointerCancel}
+                    onClickBlock={onBubbleClick}
+                  />
+                ))}
               </div>
             );
           })}
@@ -539,7 +595,8 @@ export function ChatView({
 
       {upload && (
         <div className="border-t border-border bg-surface-raised px-4 py-2.5 text-xs text-text-secondary">
-          Uploading {upload.kind}… {upload.progress}%
+          Uploading {upload.kind}
+          {upload.total > 1 ? ` ${upload.index} of ${upload.total}` : ''}… {upload.progress}%
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-pill bg-surface-sunken">
             <div
               className="h-full rounded-pill bg-accent transition-[width]"
@@ -559,7 +616,14 @@ export function ChatView({
         className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
         style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
       >
-        <input ref={fileInputRef} type="file" accept="image/*,video/*" hidden onChange={(e) => void handleFilePicked(e)} />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,video/*"
+          multiple
+          hidden
+          onChange={(e) => void handleFilePicked(e)}
+        />
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -601,7 +665,35 @@ export function ChatView({
         )}
       </form>
 
-      {viewerMedia && <MediaViewer media={viewerMedia} onClose={() => setViewerMedia(null)} />}
+      {stackSheet && (
+        <MediaGridSheet
+          messages={stackSheet}
+          onClose={() => setStackSheet(null)}
+          onPick={(index) => {
+            const list = stackSheet.flatMap((m) => (m.media ? [m.media] : []));
+            setViewer({ list, index });
+          }}
+        />
+      )}
+
+      {viewerMedia && (
+        <MediaViewer
+          media={viewerMedia}
+          chatId={chat.id}
+          onClose={() => setViewer(null)}
+          // Prev/next only exist when the viewer was opened from a stack —
+          // a lone bubble has nothing to step through.
+          onPrev={viewer && viewer.index > 0 ? () => setViewer({ ...viewer, index: viewer.index - 1 }) : undefined}
+          onNext={
+            viewer && viewer.index < viewer.list.length - 1
+              ? () => setViewer({ ...viewer, index: viewer.index + 1 })
+              : undefined
+          }
+          tags={viewerTags.data?.tags ?? []}
+          onAddTag={(nameRaw) => void addTag(viewerMedia.id, nameRaw).then(() => void viewerTags.refetch())}
+          onRemoveTag={(tagId) => void removeTag(viewerMedia.id, tagId).then(() => void viewerTags.refetch())}
+        />
+      )}
 
       {actionMenuFor && (
         <div
@@ -626,7 +718,7 @@ export function ChatView({
                 </button>
               )}
               <button
-                onClick={() => enterSelectionMode(actionMenuFor)}
+                onClick={() => enterSelectionMode([actionMenuFor])}
                 className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary"
                 style={{ touchAction: 'manipulation' }}
               >
@@ -654,6 +746,141 @@ export function ChatView({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * One block within a run (docs/UI_REVAMP.md UI-7) — either a single message
+ * or a fanned stack of adjacent bare photos/videos.
+ *
+ * Two rules do most of the visual work here:
+ *  - **Only the run's last bubble gets a tail.** Every bubble is otherwise
+ *    uniformly `rounded-lg`; the tail is the tightened bottom corner on the
+ *    sender's side, applied only when `isRunTail`. Earlier bubbles in a run
+ *    stay fully rounded so a burst reads as one connected block.
+ *  - **Photos and videos get no bubble at all.** They're drawn bare,
+ *    Instagram-style; a caption (if any) becomes its own small bubble
+ *    underneath rather than a padded strip inside a container around the
+ *    image. Voice is the exception — it stays in a bubble and inherits its
+ *    color via `currentColor`.
+ *
+ * The whole block is one pointer target (long-press/selection), so a stack's
+ * long-press can select all of the messages it covers at once.
+ */
+function MessageBlockRow({
+  block,
+  mine,
+  isRunTail,
+  selectedIds,
+  highlightId,
+  selectionMode,
+  showActionsButton,
+  registerRef,
+  onOpenActions,
+  onOpenViewer,
+  onOpenStack,
+  onPointerDownBlock,
+  onPointerMoveBlock,
+  onPointerUpBlock,
+  onPointerCancelBlock,
+  onClickBlock,
+}: {
+  block: MessageBlock;
+  mine: boolean;
+  isRunTail: boolean;
+  selectedIds: Set<string>;
+  highlightId: string | null;
+  selectionMode: boolean;
+  showActionsButton: boolean;
+  registerRef: (id: string, el: HTMLDivElement | null) => void;
+  onOpenActions: (m: Message) => void;
+  onOpenViewer: (m: Message) => void;
+  onOpenStack: (msgs: Message[]) => void;
+  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[]) => void;
+  onPointerMoveBlock: (e: React.PointerEvent) => void;
+  onPointerUpBlock: () => void;
+  onPointerCancelBlock: () => void;
+  onClickBlock: (e: React.MouseEvent, msgs: Message[]) => void;
+}) {
+  const msgs = blockMessages(block);
+  const m = msgs[0]!;
+  const isStack = block.kind === 'stack';
+  const pending = m.id.startsWith('pending:');
+  const selected = msgs.some((mm) => selectedIds.has(mm.id));
+  const highlighted = msgs.some((mm) => mm.id === highlightId);
+
+  // Photos/videos (including their processing/failed placeholders, which are
+  // already self-contained cards) render without a bubble behind them.
+  const bare = !isStack && m.media !== null && m.media.kind !== 'voice';
+  const showBubble = !isStack && (!bare || !!m.body);
+  const isVoice = m.media?.kind === 'voice';
+
+  const actionsButton = showActionsButton && !pending && (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpenActions(m);
+      }}
+      aria-label="Message actions"
+      className="shrink-0 self-start rounded-pill p-1 text-text-muted opacity-0 transition-opacity hover:bg-surface-sunken group-hover:opacity-100"
+      style={{ touchAction: 'manipulation' }}
+    >
+      <MoreVertical size={14} />
+    </button>
+  );
+
+  return (
+    <div className={'group flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
+      {mine && actionsButton}
+      <div
+        ref={(el) => {
+          // Every message the block covers points at the same element, so
+          // jump-to-message can scroll to a photo inside a stack.
+          for (const mm of msgs) registerRef(mm.id, el);
+        }}
+        onPointerDown={(e) => onPointerDownBlock(e, msgs)}
+        onPointerMove={onPointerMoveBlock}
+        onPointerUp={onPointerUpBlock}
+        onPointerCancel={onPointerCancelBlock}
+        onClick={(e) => onClickBlock(e, msgs)}
+        className={
+          'flex min-w-0 max-w-full flex-col gap-[2px] rounded-md ' +
+          (mine ? 'items-end ' : 'items-start ') +
+          (highlighted ? 'ring-2 ring-amber-400 ' : '') +
+          (selected ? 'ring-2 ring-indigo-500 ' : '') +
+          (pending && bare ? 'opacity-60 ' : '')
+        }
+        style={{
+          touchAction: 'manipulation',
+          WebkitTouchCallout: 'none',
+          WebkitUserSelect: 'none',
+          userSelect: 'none',
+        }}
+      >
+        {isStack && <MediaStack messages={msgs} onOpen={() => onOpenStack(msgs)} />}
+        {bare && <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />}
+        {showBubble && (
+          <div
+            className={
+              'max-w-full rounded-lg text-sm ' +
+              (isVoice ? 'px-2 py-1.5 ' : 'px-3.5 py-2 ') +
+              // The tail: a tightened bottom corner on the sender's side,
+              // drawn only on the last bubble of a run.
+              (isRunTail ? (mine ? 'rounded-br-[4px] ' : 'rounded-bl-[4px] ') : '') +
+              (mine
+                ? 'bg-accent text-white ' + (pending ? 'opacity-60 ' : '')
+                : 'bg-surface-sunken text-text-primary ')
+            }
+          >
+            {!bare && m.media && (
+              <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
+            )}
+            {m.body && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
+          </div>
+        )}
+      </div>
+      {!mine && actionsButton}
     </div>
   );
 }

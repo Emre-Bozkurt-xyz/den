@@ -1,5 +1,6 @@
 import { Loader2, Play, TriangleAlert, Video } from 'lucide-react';
 import type { Message } from '@den/shared';
+import { VoiceMessage } from './VoiceMessage';
 
 const LABEL: Record<'image' | 'video' | 'voice', string> = { image: 'photo', video: 'video', voice: 'voice message' };
 
@@ -10,10 +11,25 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-/** Renders a message's media (§7: image/video get a tap-to-expand bubble;
- *  voice is a first-class inline list item, never a thumbnail). Shows a
- *  'processing' placeholder until the media.ready WS frame lands. */
-export function MediaBubble({ message, onOpen }: { message: Message; onOpen: () => void }) {
+/** Renders a message's media (§7). As of UI-7 photos/videos are drawn *bare*
+ *  — no bubble behind them, Instagram-style — so the rounding here is the
+ *  visible edge of the message, not an inset thumbnail. `ChatView` is what
+ *  decides not to wrap them; this component just never assumes a background.
+ *  Voice stays a first-class inline row (never a thumbnail) and is the one
+ *  kind that does still live inside a bubble, so it draws in `currentColor`
+ *  to inherit whichever bubble it landed in. Shows a 'processing'
+ *  placeholder until the media.ready WS frame lands. */
+export function MediaBubble({
+  message,
+  onOpen,
+  interactive = true,
+}: {
+  message: Message;
+  onOpen: () => void;
+  /** False while multi-select is active — taps belong to selection, so inner
+   *  controls (voice play/seek) go inert instead of competing for them. */
+  interactive?: boolean;
+}) {
   const media = message.media;
   if (!media) return null;
 
@@ -41,7 +57,7 @@ export function MediaBubble({ message, onOpen }: { message: Message; onOpen: () 
         src={media.thumbUrl ?? media.url ?? undefined}
         onClick={onOpen}
         alt=""
-        className="max-h-64 max-w-full cursor-pointer rounded-md object-cover"
+        className="max-h-72 max-w-full cursor-pointer rounded-md object-cover"
         style={{ touchAction: 'manipulation' }}
       />
     );
@@ -51,7 +67,7 @@ export function MediaBubble({ message, onOpen }: { message: Message; onOpen: () 
     return (
       <div onClick={onOpen} className="relative cursor-pointer" style={{ touchAction: 'manipulation' }}>
         {media.thumbUrl ? (
-          <img src={media.thumbUrl} alt="" className="max-h-64 max-w-full rounded-md object-cover" />
+          <img src={media.thumbUrl} alt="" className="max-h-72 max-w-full rounded-md object-cover" />
         ) : (
           <div className="flex h-32 w-48 flex-col items-center justify-center gap-1.5 rounded-md bg-surface-sunken text-xs text-text-secondary">
             <Video size={18} />
@@ -72,11 +88,6 @@ export function MediaBubble({ message, onOpen }: { message: Message; onOpen: () 
     );
   }
 
-  // voice — inline player, not a thumbnail
-  return (
-    <div className="flex min-w-[220px] max-w-full items-center gap-2">
-      {/* iOS requires a user gesture to start playback — native controls give us that for free. */}
-      <audio controls preload="metadata" src={media.url ?? undefined} className="h-10 w-full" />
-    </div>
-  );
+  // voice — custom inline player (UI-7), not native <audio controls>
+  return <VoiceMessage media={media} interactive={interactive} />;
 }
