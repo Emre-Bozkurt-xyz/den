@@ -28,10 +28,13 @@ services:
 
   # Local/dev-only stand-in for Cloudflare R2 (S3-compatible API). Prod points
   # R2_ENDPOINT at the real R2 account endpoint instead — same client code,
-  # zero code changes (see server/src/media/r2.ts). Not part of the prod
-  # compose profile; § BACKBONE 3 still names R2 as the real media store.
+  # zero code changes (see server/src/media/r2.ts). `profiles: [dev]` means a
+  # plain `docker compose up` (prod, and the CI deploy workflow) never starts
+  # this — it only comes up when explicitly requested with `--profile dev`.
+  # § BACKBONE 3 still names R2 as the real media store.
   minio:
     image: minio/minio:latest
+    profiles: [dev]
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -89,9 +92,13 @@ services:
       R2_FORCE_PATH_STYLE: ${R2_FORCE_PATH_STYLE:-true}
     # Bound to localhost only (same pattern as postgres above) — lets the
     # Vite dev server's proxy (app/vite.config.ts, default target
-    # localhost:3000) reach this container directly for local testing.
+    # localhost:3000) reach this container directly for local testing. Not
+    # needed in a pure prod deploy (Caddy reaches this over the internal
+    # compose network as `api:3000` regardless), but harmless to publish
+    # unless the host port collides with something else — override
+    # API_HOST_PORT in .env on a shared host where 3000 is already taken.
     ports:
-      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:${API_HOST_PORT:-3000}:3000'
 
   web:
     build:

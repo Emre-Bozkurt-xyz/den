@@ -17,22 +17,41 @@ npm run vapid:gen        # paste output into .env
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
-Caddy will obtain TLS automatically once `den.ems-place.com` points at the host
-and ports 80/443 are reachable.
+Caddy in this repo's `deploy/Caddyfile` runs **plain HTTP only** — the real
+deployment terminates TLS upstream at a reverse proxy on the VPS, which
+reaches this host over an frp tunnel (see "CI/CD" below for the full
+topology). If you're pointing this compose stack straight at the internet
+with no such upstream, you'll need to swap the Caddyfile back to automatic
+HTTPS (drop the `http://` scheme on the site address).
+
+For a real prod deploy, use `deploy/.env.prod.example` as the starting point
+instead of the root `.env.example` — it has the prod-specific values
+(`NODE_ENV=production`, real R2 credentials instead of the MinIO stand-in,
+explicit `COOKIE_DOMAIN`, etc.) called out.
 
 ## Notes
 
 - **Postgres** is not published to the host; only the `api` service reaches it
   over the compose network. Data persists in `deploy/pg-data/` (gitignored).
-- **Migrations** (Stage 1 onward): run inside the api container once the domain
-  schema exists — `docker compose exec api npm -w server run db:migrate`.
-  Stage 0 has no domain schema yet, so there is nothing to migrate.
+- **MinIO is dev-only** and gated behind a Compose profile — a plain
+  `docker compose up` (prod, and the CI deploy workflow below) never starts
+  it. To bring it up for local Docker-based dev: add `--profile dev` to the
+  `up` command.
+- **Migrations**: run inside the api container once the domain schema exists —
+  `docker compose exec api npm -w server run db:migrate`.
 - **ffmpeg** is installed in the api image (voice PoC now; video posters later).
   ⚠️ Stage 3 adds `sharp`/HEIC — install `libvips` in `Dockerfile.api` then and
   re-verify HEIC decode on the VPS (Stage 0 checklist item).
 - **Local dev** without Docker: `npm run dev` (Vite :5173 proxies to API :3000).
   You still need a Postgres reachable at `DATABASE_URL` — the simplest is just
   the compose `postgres` service: `docker compose -f deploy/docker-compose.yml up -d postgres`.
+  Add MinIO too (`--profile dev up -d postgres minio`) if you're testing media
+  upload against the local S3 stand-in rather than real R2.
+- **Port collisions on a shared host**: `api`'s host-published port defaults to
+  `3000` (only needed for a host-side `npm run dev` to reach the containerized
+  API — not required for a pure prod deploy) — override `API_HOST_PORT` in
+  `.env` if something else on the box already owns 3000. Same pattern already
+  exists for Postgres via `POSTGRES_HOST_PORT`.
 
 ## CI/CD — self-hosted runner (push-to-deploy)
 
@@ -45,14 +64,14 @@ every push to `main` — no inbound port needed for CI, no SSH deploy step.
 ### One-time setup on the home server
 
 1. **Prereqs**: Docker + Docker Compose plugin installed, this repo cloned
-   somewhere permanent (e.g. `/opt/den`), and a real `.env` filled in per
-   "First run" above — but keep it **outside the repo checkout**, e.g.
-   `/opt/den-secrets/.env`. This matters: the runner re-checks-out the repo on
-   every run, and an `.env` living inside the checkout risks being wiped by
-   git's clean step. The workflow reads it via `--env-file` at that fixed
-   path (default `/opt/den/.env` in the workflow — override with a repo
-   variable `DEN_ENV_FILE` under Settings → Secrets and variables → Actions →
-   Variables if you put it somewhere else).
+   somewhere permanent (e.g. `/opt/apps/den/repo`), and a real `.env` filled
+   in from `deploy/.env.prod.example` — but keep it **outside the repo
+   checkout**, at `/opt/apps/den/secrets/.env`. This matters: the runner
+   re-checks-out the repo on every run, and an `.env` living inside the
+   checkout risks being wiped by git's clean step. The workflow reads it via
+   `--env-file` at that fixed path (the default in the workflow — override
+   with a repo variable `DEN_ENV_FILE` under Settings → Secrets and
+   variables → Actions → Variables if you put it somewhere else).
 
 2. **Register the runner** (repo-scoped): on GitHub, go to this repo →
    **Settings → Actions → Runners → New self-hosted runner**, pick Linux/x64,
