@@ -26,8 +26,31 @@ http://den.ems-place.com {
 	}
 
 	# Everything else = the built PWA (static files from the app build).
+	#
+	# ⚠️ Cache-Control here is load-bearing, not tidiness. `file_server` sets
+	# only ETag/Last-Modified; with no Cache-Control at all, browsers fall
+	# back to *heuristic* freshness (~10% of the age since Last-Modified).
+	# Since dist/ is baked into the image at build time, Last-Modified is the
+	# image build date — so a few days after a deploy, index.html was being
+	# served straight from the HTTP cache with no revalidation, still pointing
+	# at the previous hashed bundle. That's what used to make a deploy invisible
+	# on installed PWAs until the user wiped all website data.
 	handle {
 		root * /srv/app
+
+		# Vite's content-hashed output: the filename changes whenever the bytes
+		# do, so these can be cached forever and never revalidated.
+		@immutable path /assets/*
+		header @immutable Cache-Control "public, max-age=31536000, immutable"
+
+		# Everything else — index.html, sw.js, the manifest, icons — has a
+		# stable URL with changing content, so it must revalidate every time.
+		# The cost is a conditional request answered with 304, not a re-download.
+		@revalidate {
+			not path /assets/*
+		}
+		header @revalidate Cache-Control "no-cache"
+
 		try_files {path} /index.html
 		file_server
 	}
