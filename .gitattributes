@@ -1,0 +1,19 @@
+# Shell scripts must ALWAYS check out with LF endings, on every platform.
+#
+# This repo is authored on Windows. With CRLF endings a script fails on Linux
+# with the confusing "bad interpreter: /usr/bin/env bash^M: no such file or
+# directory" — the shebang line picks up the stray carriage return. It happens
+# to work today only because the local core.autocrlf=true normalizes to LF on
+# commit; this makes it a property of the repo instead of a property of one
+# machine's git config.
+#
+# Companion trap, since both bite the same file: Windows can't set the POSIX
+# exec bit, so a new script commits as mode 100644 and Linux says "Permission
+# denied". Fix with `git update-index --chmod=+x <file>` (plain `chmod +x`
+# doesn't survive). deploy/deploy.sh is already 100755, and the workflow
+# invokes it via `bash` so the bit isn't load-bearing either way.
+*.sh text eol=lf
+
+# Same reasoning: these are consumed by Linux tooling (docker build, caddy).
+Dockerfile* text eol=lf
+*.Dockerfile text eol=lf

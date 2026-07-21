@@ -29,6 +29,36 @@ instead of the root `.env.example` — it has the prod-specific values
 (`NODE_ENV=production`, real R2 credentials instead of the MinIO stand-in,
 explicit `COOKIE_DOMAIN`, etc.) called out.
 
+## Deploying to prod — `deploy/deploy.sh`
+
+**On the prod host, always deploy with this script — never by hand.** CI runs
+the exact same file (`.github/workflows/deploy.yml` is a one-liner calling it),
+so there is a single deploy path that cannot drift. That matters: this repo
+already had an incident where manual deploys kept working while *every* CI
+deploy failed, and the breakage went unnoticed because the manual route
+covered for it.
+
+```bash
+cd /opt/apps/den/repo
+git pull
+bash deploy/deploy.sh                       # default env: /opt/apps/den/secrets/.env
+bash deploy/deploy.sh --env-file /other/.env
+```
+
+What it does, in order: preflight (docker present, env file present,
+`DEN_DATA_ROOT` set **and** its `pg-data/` actually existing) → `up -d --build`
+→ wait for the `api` container → `db:migrate` → prune → print status. Every
+preflight check runs before anything touches a container, so a misconfigured
+host fails loudly and changes nothing.
+
+> **Why `bash deploy/deploy.sh` and not `./deploy/deploy.sh`?** Both work. The
+> repo is authored on Windows, which can't set the POSIX exec bit on disk; the
+> bit is stored in git explicitly (`git update-index --chmod=+x deploy/deploy.sh`)
+> so the file *is* executable when checked out on Linux. Calling it through
+> `bash` just means a lost exec bit can never break a deploy. If you add
+> another script from Windows and Linux says `Permission denied`, that git
+> command is the fix — `chmod +x` alone won't survive the commit.
+
 ## Notes
 
 - **Postgres** is not published to the host; only the `api` service reaches it
