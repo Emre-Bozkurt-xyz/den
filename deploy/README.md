@@ -83,6 +83,79 @@ host fails loudly and changes nothing.
   `.env` if something else on the box already owns 3000. Same pattern already
   exists for Postgres via `POSTGRES_HOST_PORT`.
 
+## Backups — `deploy/backup.sh`
+
+Nightly `pg_dump` to R2, with a **bounded** retention count so backups can't
+quietly accumulate storage forever.
+
+Everything runs through the containers that already exist: the dump comes from
+the `postgres` image (which ships `pg_dump`/`pg_restore`) and the upload runs
+inside the `api` image (which already holds the R2 credentials and SDK). No
+extra tooling on the host, and the R2 keys are never copied anywhere new.
+
+```bash
+bash deploy/backup.sh                  # dump -> validate -> upload -> prune
+BACKUP_KEEP=14 bash deploy/backup.sh   # override retention for one run
+
+# inspect what's stored
+docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml \
+  exec -T api node server/dist/scripts/backup.js list
+```
+
+**Retention: `BACKUP_KEEP`, default 7.** Objects live under the `backups/`
+prefix, keyed `backups/den-<UTC timestamp>.dump`. After each upload the
+uploader lists that prefix and deletes everything past the newest N, so the
+count is clamped by construction rather than by a cleanup job that might not
+run. Dumps of a closed-circle chat DB are small — media lives in R2 as
+objects, not in Postgres — so 7 is comfortably inside the R2 free tier.
+
+**The dump is validated before it's stored.** Size check, then
+`pg_restore --list` (parses the archive's table of contents, read-only, never
+touches the live DB). A silently truncated backup is worse than none: it looks
+like protection while restoring nothing.
+
+### Scheduling (systemd)
+
+```bash
+sudo cp deploy/systemd/den-backup.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now den-backup.timer
+
+systemctl list-timers den-backup.timer      # confirm next run
+sudo systemctl start den-backup.service     # run once, now
+journalctl -u den-backup.service -n 50      # read the result
+```
+
+`Persistent=true` on the timer means a backup missed while the host was off
+runs at next boot rather than being skipped — precisely the situation where
+you'd want one.
+
+### Restoring (test this before you need it)
+
+A backup nobody has ever restored is a hypothesis, not a backup. Verify into a
+**throwaway** database — never straight over the live one:
+
+```bash
+# copy a dump out of R2 (via the api container), then:
+docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml \
+  exec -T postgres createdb -U den den_restore_test
+docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml \
+  exec -T postgres pg_restore -U den -d den_restore_test < den-<stamp>.dump
+# sanity check, then drop it
+docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml \
+  exec -T postgres psql -U den -d den_restore_test -c \
+  "SELECT (SELECT count(*) FROM users) users, (SELECT count(*) FROM messages) messages;"
+```
+
+⚠️ **A dump contains everything** — message bodies, argon2 password hashes,
+session rows, invite codes — and shares the private media bucket. One leaked
+R2 credential exposes both. Fine for a closed circle; if that changes, move
+backups to their own bucket with a separately scoped token.
+
+⚠️ If the §7 orphan-sweep job is ever built ("delete R2 objects whose media
+row is missing"), it **must** scope itself to the `media/` prefix or it will
+cheerfully delete every backup.
+
 ## CI/CD — self-hosted runner (push-to-deploy)
 
 Topology: Cloudflare/DNS → **FRP** on the VPS tunnels public 80/443 to Caddy on

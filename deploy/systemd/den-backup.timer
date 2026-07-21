@@ -1,0 +1,17 @@
+# Nightly trigger for den-backup.service. See that file for install steps.
+
+[Unit]
+Description=Run Den's Postgres backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+# Spread the actual start over a window so the backup never lines up exactly
+# with anything else scheduled on the hour.
+RandomizedDelaySec=15m
+# Run a missed backup on next boot instead of silently skipping it. Without
+# this, a host that's off at 03:30 simply has no backup that day — the exact
+# situation where you'd want one.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

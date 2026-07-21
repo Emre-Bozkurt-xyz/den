@@ -1,0 +1,29 @@
+# Den — nightly Postgres backup to R2. Paired with den-backup.timer.
+#
+# Install on the home server:
+#   sudo cp deploy/systemd/den-backup.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now den-backup.timer
+#
+# Adjust the paths below if the repo/env file don't live where the deploy
+# docs assume. Verify with:  sudo systemctl start den-backup.service
+#                            journalctl -u den-backup.service -n 50
+
+[Unit]
+Description=Den — Postgres backup to R2
+# The whole job runs through docker exec, so it's pointless before docker is up.
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/apps/den/repo
+Environment=DEN_ENV_FILE=/opt/apps/den/secrets/.env
+# Retention. Kept deliberately small — dumps of a closed-circle chat DB are
+# tiny (media lives in R2 as objects, not in Postgres), and an unbounded
+# backup count just accumulates storage cost for files nobody reads.
+Environment=BACKUP_KEEP=7
+ExecStart=/usr/bin/env bash /opt/apps/den/repo/deploy/backup.sh
+# Backups are not urgent; keep them off the CPU/IO that serves the app.
+Nice=10
+IOSchedulingClass=idle
