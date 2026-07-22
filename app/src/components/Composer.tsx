@@ -32,8 +32,21 @@ const LEVEL_BAR_COUNT = 32; // rolling window length for the live waveform
 const LEVEL_SAMPLE_INTERVAL_MS = 80; // how often a rAF-driven sample commits into the rolling window (~12/s — smooth enough, cheap enough)
 const LEVEL_GAIN = 4; // rough visual boost so quiet mic input still reads as a real waveform, not a flat line — untuned, see file header
 
+// Auto-growing textarea (user feedback, 2026-07-22 — the old single-line
+// <input> overflowed longer messages). Grows with content up to a clamp, then
+// scrolls internally, the way every mature messenger composer does.
+const COMPOSER_MAX_HEIGHT = 128; // px — ~5-6 lines before it starts scrolling
+
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
+}
+
+/** Best-effort haptic tick for gesture threshold crossings (user feedback,
+ *  2026-07-22). Android Chrome supports the Vibration API; iOS Safari does
+ *  not expose it at all, so this is a silent no-op there — feature-detected,
+ *  never assumed. */
+function haptic(ms: number): void {
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') navigator.vibrate(ms);
 }
 
 function rmsLevel(buf: Uint8Array): number {
@@ -78,6 +91,10 @@ export function Composer({
   const [dragY, setDragY] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Tracks whether the in-progress cancel drag has crossed the threshold, so
+  // the haptic tick fires exactly once on crossing (not every pointermove).
+  const cancelArmedRef = useRef(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -119,6 +136,26 @@ export function Composer({
     // Intentionally mount/unmount-only — the cleanup reads refs, not state,
     // so there's nothing to add to this dependency list.
   }, []);
+
+  // Re-measure whenever the text changes — including external clears (send
+  // empties the parent-owned `draft`, which snaps the box back to one line).
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+  }, [draft]);
+
+  function submit() {
+    if (!draft.trim()) return;
+    onSend();
+    // Keep focus in the field so the on-screen keyboard doesn't collapse
+    // after every send (user feedback: Samsung PWA dropped the keyboard and
+    // forced a re-tap). The send button itself also suppresses its own
+    // focus-steal via onPointerDown (see the JSX) — this refocus covers the
+    // Enter-to-send path and is a harmless no-op when focus never left.
+    textareaRef.current?.focus();
+  }
 
   function stopLevelLoop() {
     if (levelRafRef.current !== null) cancelAnimationFrame(levelRafRef.current);
@@ -263,6 +300,7 @@ export function Composer({
     if (!isMobile || e.pointerType === 'mouse') return; // desktop uses onMicClick
     e.currentTarget.setPointerCapture(e.pointerId);
     gestureRef.current = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY };
+    cancelArmedRef.current = false;
     setDragX(0);
     setDragY(0);
     primeAudioContext();
@@ -276,12 +314,29 @@ export function Composer({
     const dy = Math.min(0, e.clientY - g.startY);
     setDragX(dx);
     setDragY(dy);
-    if (dy <= LOCK_THRESHOLD_DY) lockRecording();
+
+    // Fire a single haptic tick the moment the cancel drag arms/disarms, so
+    // the user feels the threshold rather than only seeing it (the visual
+    // arm state lives in RecordingBar, keyed off cancelProgress ≥ 1).
+    const cancelArmed = dx <= CANCEL_THRESHOLD_DX;
+    if (cancelArmed !== cancelArmedRef.current) {
+      cancelArmedRef.current = cancelArmed;
+      if (cancelArmed) haptic(40);
+    }
+
+    // Crossing the lock threshold both locks *and* ticks — this only ever
+    // fires once because locking flips recState out of 'recording', after
+    // which this handler early-returns.
+    if (dy <= LOCK_THRESHOLD_DY) {
+      haptic(30);
+      lockRecording();
+    }
   }
 
   function onMicPointerUp(e: React.PointerEvent<HTMLButtonElement>) {
     const g = gestureRef.current;
     gestureRef.current = null;
+    cancelArmedRef.current = false;
     if (!g || g.pointerId !== e.pointerId) return;
     if (recState === 'locked') return; // already hands-free; the Stop/Cancel buttons take it from here
     if (recState !== 'recording' && recState !== 'requesting') return;
@@ -296,6 +351,7 @@ export function Composer({
     // Browser-interrupted gesture (e.g. an edge-swipe took over) — same
     // "abort safely" posture as MediaViewer's pointercancel handlers.
     gestureRef.current = null;
+    cancelArmedRef.current = false;
     setDragX(0);
     setDragY(0);
     if (recState === 'recording' || recState === 'requesting') cancelRecording();
@@ -327,7 +383,7 @@ export function Composer({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSend();
+        submit();
       }}
       className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
       style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
@@ -363,12 +419,24 @@ export function Composer({
           otherwise. Cross-fades in via .animate-composer-morph on mount —
           see index.css. */}
       {recState === 'idle' ? (
-        <input
+        <textarea
+          ref={textareaRef}
           key="text"
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
+          onKeyDown={(e) => {
+            // Desktop: Enter sends, Shift+Enter inserts a newline. Mobile:
+            // Enter always inserts a newline (there's a dedicated send
+            // button, and a soft-keyboard return key sending would be a
+            // surprise) — matches Instagram/WhatsApp.
+            if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          rows={1}
           placeholder="Message"
-          className="h-11 min-w-0 flex-1 animate-composer-morph rounded-pill border border-border bg-surface px-4 text-base text-text-primary outline-none transition-colors focus:border-accent"
+          className="max-h-32 min-h-[44px] min-w-0 flex-1 resize-none animate-composer-morph overflow-y-auto rounded-[22px] border border-border bg-surface px-4 py-2.5 text-base leading-6 text-text-primary outline-none transition-colors focus:border-accent"
         />
       ) : (
         <div key="bar" className="animate-composer-morph flex min-w-0 flex-1">
@@ -402,6 +470,11 @@ export function Composer({
       ) : recState === 'idle' && draft.trim() ? (
         <button
           type="submit"
+          // Suppress the button's own focus-steal so tapping Send doesn't blur
+          // the textarea and collapse the on-screen keyboard (user feedback:
+          // Samsung PWA). The click/submit still fires normally; only the
+          // default focus shift is cancelled.
+          onPointerDown={(e) => e.preventDefault()}
           className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
           style={{ touchAction: 'manipulation' }}
         >

@@ -21,7 +21,7 @@ import { MoreVertical, Reply, Smile } from 'lucide-react';
  */
 export function MessageActions({ onMore }: { onMore: () => void }) {
   return (
-    <div className="flex shrink-0 items-center gap-0.5 self-start opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+    <div className="flex shrink-0 items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <IconButton icon={MoreVertical} label="Message actions" onClick={onMore} />
       <PlaceholderIconButton icon={Reply} label="Reply" />
       <PlaceholderIconButton icon={Smile} label="React" />

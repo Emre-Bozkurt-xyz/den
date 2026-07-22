@@ -20,7 +20,11 @@ function daysBetween(a: Date, b: Date): number {
   return Math.round((startOfDay(b).getTime() - startOfDay(a).getTime()) / DAY_MS);
 }
 
-const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+// `hour12: true` is explicit, not left to the locale default: some locales
+// (and some Android system settings, e.g. a Samsung set to a 24h region)
+// would otherwise render "19:30" — the app wants a 12h clock everywhere
+// (user feedback, 2026-07-22).
+const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', hour12: true });
 const weekdayFormatter = new Intl.DateTimeFormat(undefined, { weekday: 'long' });
 const monthDayFormatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const monthDayYearFormatter = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' });

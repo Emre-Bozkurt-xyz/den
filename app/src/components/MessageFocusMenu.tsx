@@ -26,6 +26,7 @@ const LIFT_SCALE = 1.03;
 const TRANSITION_MS = 150;
 const PANEL_STAGGER_MS = 60; // panel starts easing in slightly after the bubble begins lifting — a small stagger, not a strict "wait for the bubble to finish"
 const VIEWPORT_MARGIN = 16; // px — keeps the panel off the screen edges; "clean margins", never edge-to-edge
+const PANEL_SIDE_BIAS = 0.32; // 0 = dead center, 1 = centered on the bubble; a gentle lean toward the message's side
 // Best-effort estimate of the panel's rendered height (send-time header +
 // up to 3 action rows), used only to decide whether it should drop *below*
 // or *above* the lifted bubble. Not measured against real content sizes or a
@@ -144,14 +145,30 @@ export function MessageFocusMenu({
     pointerEvents: 'none',
   };
 
+  // Lean the panel gently toward the side the message is on (right for
+  // `mine`, left for others) rather than dead-centering it — a small bias
+  // reads as "this belongs to that message" without squishing the panel
+  // against the screen edge (user feedback, 2026-07-22). `PANEL_SIDE_BIAS`
+  // is the fraction of the way from screen center toward the bubble's own
+  // center; kept low so it's a lean, not a snap. Width mirrors the old
+  // `min(85vw, 320px)` so it can be positioned and clamped in JS.
+  const viewportW = window.innerWidth;
+  const panelW = Math.min(0.85 * viewportW, 320);
+  const bubbleCenterX = rect.left + rect.width / 2;
+  const biasedCenterX = viewportW / 2 + (bubbleCenterX - viewportW / 2) * PANEL_SIDE_BIAS;
+  const panelLeft = Math.min(
+    viewportW - panelW - VIEWPORT_MARGIN,
+    Math.max(VIEWPORT_MARGIN, biasedCenterX - panelW / 2),
+  );
+
   const panelStyle: CSSProperties = {
     position: 'fixed',
-    left: '50%',
+    left: panelLeft,
     ...(panelSide === 'below' ? { top: rect.bottom + 8 } : { bottom: viewportH - rect.top + 8 }),
-    width: 'min(85vw, 320px)',
+    width: panelW,
     maxHeight: `calc(100vh - ${VIEWPORT_MARGIN * 2}px)`,
     opacity: panelRevealed ? 1 : 0,
-    transform: `translateX(-50%) ${panelRevealed ? 'translateY(0) scale(1)' : `translateY(${panelSide === 'below' ? -6 : 6}px) scale(0.98)`}`,
+    transform: panelRevealed ? 'translateY(0) scale(1)' : `translateY(${panelSide === 'below' ? -6 : 6}px) scale(0.98)`,
     transition: reducedMotion ? 'none' : `opacity ${TRANSITION_MS}ms ease-out, transform ${TRANSITION_MS}ms cubic-bezier(0.22,1,0.36,1)`,
     zIndex: 62,
     paddingBottom: 'env(safe-area-inset-bottom)',

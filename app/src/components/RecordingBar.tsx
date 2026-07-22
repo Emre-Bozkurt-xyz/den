@@ -1,4 +1,4 @@
-import { Lock } from 'lucide-react';
+import { Lock, Square } from 'lucide-react';
 
 /**
  * UI-8e recording state machine (docs/UI8_CHAT_INSTAGRAM.md) — owned by
@@ -57,35 +57,53 @@ export function RecordingBar({
 }) {
   const showDragHints = isMobile && (recState === 'recording' || recState === 'requesting');
   const cancelling = recState === 'cancelling';
+  // "Armed" = the finger has crossed the threshold and *releasing now* will
+  // act. Composer clamps each progress to exactly 1 at its threshold, so ≥1
+  // is the arm signal (user feedback, 2026-07-22 — wanted a clear "this will
+  // cancel" state, not just a sliding hint).
+  const cancelArmed = cancelProgress >= 1;
+  const lockArmed = lockProgress >= 1;
 
   return (
     <div
       className={
-        'flex h-11 min-w-0 flex-1 items-center gap-2 rounded-pill border border-border bg-surface px-3 transition-opacity ' +
-        (cancelling ? 'opacity-50' : 'opacity-100')
+        'flex h-11 min-w-0 flex-1 items-center gap-2 rounded-pill border bg-surface px-3 transition-[opacity,border-color] ' +
+        (cancelling ? 'opacity-50 ' : 'opacity-100 ') +
+        // The whole bar tints red the moment cancel arms, reinforcing the
+        // growing stop icon so it's unmissable that a release cancels.
+        (cancelArmed ? 'border-red-500' : 'border-border')
       }
     >
-      {/* Slide-to-cancel hint — a passive target, not a real button; the
-          actual cancel trigger is Composer's drag-distance check on the mic
-          button itself. Fades toward the cancel threshold as feedback that
-          follows the finger, per the UI-8e gesture spec. */}
+      {/* Slide-to-cancel affordance — a passive indicator, not a real button
+          (the actual cancel trigger is Composer's drag-distance check on the
+          mic button). The classic stop square grows and reddens as the drag
+          approaches the threshold, then snaps to a solid, pulsing red once
+          armed — a responsiveness cue that follows the finger. */}
       {showDragHints && (
         <span
-          className="flex shrink-0 items-center gap-1 text-xs text-text-muted"
-          style={{ opacity: 1 - cancelProgress * 0.85, transform: `translateX(${-cancelProgress * 6}px)` }}
+          className={
+            'flex shrink-0 items-center transition-colors ' +
+            (cancelArmed ? 'animate-pulse text-red-500' : cancelProgress > 0.5 ? 'text-red-400' : 'text-text-muted')
+          }
+          style={{ transform: `scale(${1 + cancelProgress * 0.6})`, transformOrigin: 'center' }}
+          aria-hidden
         >
-          ‹ Slide to cancel
+          <Square size={14} fill={cancelArmed ? 'currentColor' : 'none'} strokeWidth={2.25} />
         </span>
       )}
 
-      {/* Rec dot + timer. */}
-      <span className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-text-secondary">
+      {/* Rec dot + timer. Dims while a cancel is armed so attention moves to
+          the stop icon. */}
+      <span
+        className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-text-secondary transition-opacity"
+        style={{ opacity: cancelArmed ? 0.4 : 1 }}
+      >
         <span className={'h-2 w-2 rounded-pill bg-red-500 ' + (recState === 'recording' || recState === 'locked' ? 'animate-pulse' : 'opacity-40')} />
         {recState === 'requesting' ? '...' : formatElapsed(elapsedMs)}
       </span>
 
       {/* Live waveform. */}
-      <div className="flex h-6 min-w-0 flex-1 items-center gap-[2px]">
+      <div className="flex h-6 min-w-0 flex-1 items-center gap-[2px]" style={{ opacity: cancelArmed ? 0.4 : 1 }}>
         {levels.map((v, i) => (
           <span
             key={i}
@@ -95,14 +113,22 @@ export function RecordingBar({
         ))}
       </div>
 
-      {/* Lock chevron — fills in as a mobile drag approaches the lock
-          threshold; a static (unfilled) lock icon once actually locked. */}
+      {/* Lock chevron — grows and shifts toward the accent as a mobile drag
+          approaches the lock threshold, snapping to a filled accent lock once
+          armed/locked. A static filled lock while hands-free (locked). */}
       {isMobile && (recState === 'locked' || showDragHints) && (
         <span
-          className="flex shrink-0 items-center text-text-muted"
-          style={{ opacity: recState === 'locked' ? 1 : 0.35 + lockProgress * 0.65 }}
+          className={
+            'flex shrink-0 items-center transition-colors ' +
+            (recState === 'locked' || lockArmed ? 'text-accent' : 'text-text-muted')
+          }
+          style={{
+            opacity: recState === 'locked' ? 1 : 0.35 + lockProgress * 0.65,
+            transform: `scale(${recState === 'locked' ? 1 : 1 + lockProgress * 0.4})`,
+            transformOrigin: 'center',
+          }}
         >
-          <Lock size={14} fill={recState === 'locked' || lockProgress > 0.99 ? 'currentColor' : 'none'} />
+          <Lock size={14} fill={recState === 'locked' || lockArmed ? 'currentColor' : 'none'} />
         </span>
       )}
     </div>
