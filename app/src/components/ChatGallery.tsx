@@ -10,6 +10,7 @@ import { computeMasonryLayout, galleryColumnCount, type MasonryLayout } from '..
 import { addTag, removeTag } from '../lib/tags';
 import { MediaViewer, TagEditor } from './MediaViewer';
 import { ScreenHeader } from './ScreenHeader';
+import { TagSearchInput } from './TagSearchInput';
 import { VoiceMessage } from './VoiceMessage';
 
 const GRID_GAP = 12; // px — mosaic-style presentation retune (stage 1 of the gallery visual rework), up from the original cramped 2px
@@ -170,11 +171,11 @@ export function ChatGallery({
       <ScreenHeader title={name} onBack={onBack} />
 
       <div className="border-b border-border px-3 py-2">
-        <input
+        <TagSearchInput
+          chatId={album.chatId}
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={setQuery}
           placeholder="Search tags — beach -screenshots"
-          className="w-full rounded-sm border border-border bg-surface-raised px-3 py-1.5 text-sm outline-none focus:border-accent"
         />
       </div>
 
