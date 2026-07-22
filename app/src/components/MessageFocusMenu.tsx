@@ -3,6 +3,7 @@ import { CheckSquare, Copy, Trash2 } from 'lucide-react';
 import type { MeResponse, Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
+import { useBackHandler } from '../lib/backStack';
 
 /**
  * iMessage-style "focus" action menu (UI-8d request F,
@@ -65,6 +66,9 @@ export function MessageFocusMenu({
   onDelete: (m: Message) => void;
 }) {
   const reducedMotion = useReducedMotion();
+  // System back gesture / browser back dismisses the menu (matches Escape and
+  // the backdrop tap), instead of unwinding the underlying view.
+  useBackHandler(true, onClose);
   const [revealed, setRevealed] = useState(reducedMotion);
   const [panelRevealed, setPanelRevealed] = useState(reducedMotion);
   const cloneHostRef = useRef<HTMLDivElement>(null);

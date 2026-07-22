@@ -11,6 +11,7 @@ import { useRealtime } from '../lib/realtime';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useIntroIds } from '../hooks/useIntroIds';
 import { useMediaTags } from '../hooks/useMediaTags';
+import { useBackHandler } from '../lib/backStack';
 import { Composer } from './Composer';
 import { MediaBubble } from './MediaBubble';
 import { MediaGridSheet, MediaStack } from './MediaStack';
@@ -91,6 +92,10 @@ export function ChatView({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
+  // System back gesture / browser back cancels selection mode (matches the X
+  // in the selection header) before it would unwind the chat → chat list.
+  // Registered after AuthedApp's view handler, so LIFO exits selection first.
+  useBackHandler(selectionMode, () => exitSelectionMode());
   // The message the focus menu (UI-8d — Copy/Select/Delete + send time) is
   // currently open for, plus what was captured at open time for the lift
   // animation. Was `Message | null` pre-UI-8, when this drove a plain

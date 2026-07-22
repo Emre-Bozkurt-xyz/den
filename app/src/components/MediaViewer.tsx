@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
 import type { MediaInfo, Tag } from '@den/shared';
 import { fetchTagAutocomplete } from '../lib/tags';
+import { useBackHandler } from '../lib/backStack';
 
 /** Full-screen viewer for a ready image/video. Voice messages render inline
  *  in the chat (§7: "row-style list items", not thumbnails) and never open
@@ -170,6 +171,10 @@ export function MediaViewer({
   const [videoTransform, setVideoTransform] = useState({ x: 0, y: 0 });
   const [videoInteracting, setVideoInteracting] = useState(false);
   const videoGestureRef = useRef<VideoGestureState | null>(null);
+
+  // System back gesture / browser back closes the viewer (matches the X button
+  // and swipe-down), instead of unwinding the underlying view.
+  useBackHandler(true, onClose);
 
   // Zoom/pan/gesture bookkeeping must never leak from one item to the next.
   // This component stays mounted across prev/next (only `media` changes), so

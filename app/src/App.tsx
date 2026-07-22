@@ -3,6 +3,7 @@ import type { ChatSummary, GalleryAlbum, MeResponse } from '@den/shared';
 import { Images, MessageCircle, User } from 'lucide-react';
 import { useMe } from './hooks/useMe';
 import { useIsMobile } from './hooks/useIsMobile';
+import { BackStackProvider, useBackHandler } from './lib/backStack';
 import { AuthScreen } from './components/AuthScreen';
 import { Profile } from './components/Profile';
 import { InstallInstructions } from './components/InstallInstructions';
@@ -40,7 +41,9 @@ export default function App() {
 
   return (
     <RealtimeProvider>
-      <AuthedApp me={me} />
+      <BackStackProvider>
+        <AuthedApp me={me} />
+      </BackStackProvider>
     </RealtimeProvider>
   );
 }
@@ -68,6 +71,27 @@ function tabOf(view: View): Tab {
   return 'chats';
 }
 
+/** Where the system back gesture should land from a given view — mirrors each
+ *  screen's own in-app back-button target so the hardware/gesture back and the
+ *  on-screen back arrow stay in lockstep. Chats is the true root (`null` → the
+ *  back-stack's base guard makes back there an in-app no-op, never a blank
+ *  page); Gallery/Profile fall back to Chats so only the home tab is inert.
+ *  Pure and module-level so its reference is stable across renders. */
+function parentOf(view: View): View | null {
+  switch (view.name) {
+    case 'chat':
+    case 'friends':
+    case 'newGroup':
+    case 'gallery':
+    case 'profile':
+      return { name: 'chats' };
+    case 'chatGallery':
+      return { name: 'gallery' };
+    case 'chats':
+      return null;
+  }
+}
+
 function AuthedApp({ me }: { me: MeResponse }) {
   const isMobile = useIsMobile();
   const [view, setView] = useState<View>({ name: 'chats' });
@@ -91,6 +115,15 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // docs/UI_REVAMP.md §8.
   const draftCacheRef = useRef(new Map<string, string>());
   const qc = useQueryClient();
+
+  // Make the device back gesture / browser back button pop one level up the
+  // view hierarchy instead of unwinding out of the PWA to a blank page. Open
+  // overlays (MediaViewer, focus menu) register their own handlers and, being
+  // registered later, intercept back first (LIFO).
+  useBackHandler(parentOf(view) !== null, () => {
+    const parent = parentOf(view);
+    if (parent) setView(parent);
+  });
 
   function openChat(chat: ChatSummary, jumpToMessageId?: string) {
     const next: ChatView_ = { name: 'chat', chat, jumpToMessageId };
