@@ -2,7 +2,7 @@ import { useRef } from 'react';
 import type { Message } from '@den/shared';
 
 /**
- * UI-8a (docs/UI8_CHAT_INSTAGRAM.md) — tracks which message ids should play
+ * UI-8a (docs/archive/UI8_CHAT_INSTAGRAM.md) — tracks which message ids should play
  * the "bubble-in" send/receive animation on the *current* render, as opposed
  * to already-known history that must render inert.
  *

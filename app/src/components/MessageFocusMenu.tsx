@@ -8,7 +8,7 @@ import { useBackHandler } from '../lib/backStack';
 
 /**
  * iMessage-style "focus" action menu (UI-8d request F,
- * docs/UI8_CHAT_INSTAGRAM.md) — replaces the old bottom-sheet action menu.
+ * docs/archive/UI8_CHAT_INSTAGRAM.md) — replaces the old bottom-sheet action menu.
  * The tapped/clicked bubble visually lifts in place, the rest of the screen
  * dims + blurs behind it, and an action panel drops in just below (or above,
  * near the bottom of the viewport) it. Opens from the three-dots (desktop,
@@ -33,7 +33,7 @@ const PANEL_SIDE_BIAS = 0.32; // 0 = dead center, 1 = centered on the bubble; a 
 // send-time header + Reply + up to 3 more action rows), used only to decide
 // whether it should drop *below* or *above* the lifted bubble. Not measured
 // against real content sizes or a real device — see the UI-8d notes in
-// docs/UI_REVAMP.md §5 for why this is a judgment call, same spirit as
+// docs/archive/UI_REVAMP.md §5 for why this is a judgment call, same spirit as
 // MediaViewer's VIDEO_CONTROLS_EXCLUSION_HEIGHT. Bumped from 200 when the
 // quick-emoji row and Reply row were added (post-MVP reactions/replies).
 const PANEL_ESTIMATED_HEIGHT = 300;

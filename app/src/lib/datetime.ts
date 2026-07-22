@@ -1,6 +1,6 @@
 /**
  * Shared `Intl`-based time/date formatting (UI-8b/8c,
- * docs/UI8_CHAT_INSTAGRAM.md) — the one place divider labels
+ * docs/archive/UI8_CHAT_INSTAGRAM.md) — the one place divider labels
  * (`lib/messageGroups.ts`'s `buildTimeline`) and the action-menu send-time
  * header (`ChatView`'s bottom sheet + `MessageFocusMenu`) compute "what does
  * this timestamp mean to a human" from a `Message.createdAt` ISO string. No

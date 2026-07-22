@@ -1,5 +1,5 @@
 /**
- * Hand-rolled shortest-column masonry packing (docs/UI_REVAMP.md UI-5,
+ * Hand-rolled shortest-column masonry packing (docs/archive/UI_REVAMP.md UI-5,
  * technique reference: Mosaic §3.3). Deliberately NOT CSS `column-count` —
  * that reflows items into reading order that doesn't match source order.
  * Predicts each item's rendered height from its already-known width/height

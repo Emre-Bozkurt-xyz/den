@@ -98,7 +98,7 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // Desktop-only: remembers the chat that was open in the right pane so
   // opening the Friends/NewGroup overlay (which changes `view.name`) doesn't
   // lose it — the overlay renders on top of the still-mounted dual pane
-  // rather than replacing it (docs/UI_REVAMP.md §4.2). `view` stays the
+  // rather than replacing it (docs/archive/UI_REVAMP.md §4.2). `view` stays the
   // single source of truth for "what's active on top"; this is purely a
   // rendering cache for "what's behind it", not a competing nav state.
   const [lastChatView, setLastChatView] = useState<ChatView_ | null>(null);
@@ -112,7 +112,7 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // must not trigger an `AuthedApp` re-render — `ChatView` already owns its
   // own render via its local `draft` state, this cache only needs to be
   // readable at the moment a fresh `ChatView` instance mounts. See
-  // docs/UI_REVAMP.md §8.
+  // docs/archive/UI_REVAMP.md §8.
   const draftCacheRef = useRef(new Map<string, string>());
   const qc = useQueryClient();
 
@@ -226,7 +226,7 @@ function AuthedApp({ me }: { me: MeResponse }) {
 
   // --- Desktop: left icon rail + content area. Chats tab is dual-pane (list
   // pane always mounted + right pane driven by `view`); Gallery/Profile stay
-  // single-pane (docs/UI_REVAMP.md §4.2/§4.3). ---
+  // single-pane (docs/archive/UI_REVAMP.md §4.2/§4.3). ---
   const tab = tabOf(view);
   const isChatsFamily = view.name === 'chats' || view.name === 'chat' || view.name === 'friends' || view.name === 'newGroup';
   const rightPaneChat: ChatView_ | null =

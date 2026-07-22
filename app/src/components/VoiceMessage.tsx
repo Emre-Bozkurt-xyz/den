@@ -4,7 +4,7 @@ import type { MediaInfo } from '@den/shared';
 import { cachedPeaks, loadPeaks, PEAK_COUNT, placeholderPeaks } from '../lib/waveform';
 
 /**
- * Custom voice-message player (docs/UI_REVAMP.md UI-7) — replaces the native
+ * Custom voice-message player (docs/archive/UI_REVAMP.md UI-7) — replaces the native
  * `<audio controls>` widget, which rendered as an opaque browser-chrome slab
  * that ignored the bubble's colors and looked different on every platform.
  *

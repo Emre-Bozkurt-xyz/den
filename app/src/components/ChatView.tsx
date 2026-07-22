@@ -109,7 +109,7 @@ export function ChatView({
    *  structurally different trees per `useIsMobile()`) — the latter used to
    *  silently drop in-progress draft text. Seeding from `initialDraft` and
    *  mirroring every change back via `onDraftChange` means the draft
-   *  survives either kind of remount. See docs/UI_REVAMP.md §8. */
+   *  survives either kind of remount. See docs/archive/UI_REVAMP.md §8. */
   initialDraft: string;
   onDraftChange: (draft: string) => void;
 }) {
@@ -170,7 +170,7 @@ export function ChatView({
   // that's waiting to see if a second one arrives — see `handleTap`.
   const pendingTapRef = useRef<{ id: string; timer: number } | null>(null);
 
-  // Multi-select + deletion (Stage 6 / §2 item 11, docs/MESSAGE_DELETE.md §4).
+  // Multi-select + deletion (Stage 6 / §2 item 11, docs/archive/MESSAGE_DELETE.md §4).
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
@@ -187,7 +187,7 @@ export function ChatView({
   const [undoIds, setUndoIds] = useState<string[] | null>(null);
   const undoTimerRef = useRef<number | null>(null);
   // Long-press bookkeeping: a plain 500ms timer with move-slop cancellation
-  // (docs/MESSAGE_DELETE.md §4 — deliberately NOT setPointerCapture, which
+  // (docs/archive/MESSAGE_DELETE.md §4 — deliberately NOT setPointerCapture, which
   // would swallow the list's own scrolling).
   const longPressTimerRef = useRef<number | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -316,7 +316,7 @@ export function ChatView({
     }
   }, [jumpToMessageId, messages, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  // Undo toast is purely client-side (~10s, docs/MESSAGE_DELETE.md §4) — make
+  // Undo toast is purely client-side (~10s, docs/archive/MESSAGE_DELETE.md §4) — make
   // sure navigating away from this chat can't leave a stray timer firing
   // setState on an unmounted component.
   useEffect(() => {
@@ -342,7 +342,7 @@ export function ChatView({
 
   /** Takes a list, not a single message, because long-pressing a fanned stack
    *  selects every message it covers — a stack is a drawing of N messages,
-   *  never an addressable unit of its own (docs/UI_REVAMP.md UI-7). Entering
+   *  never an addressable unit of its own (docs/archive/UI_REVAMP.md UI-7). Entering
    *  selection mode also un-stacks the run, so the user immediately sees the
    *  individual bubbles they just selected. */
   function enterSelectionMode(msgs: Message[]) {
@@ -381,7 +381,7 @@ export function ChatView({
     if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
     // A second delete while a toast is live replaces it, it doesn't stack —
     // the earlier deletion is still undoable via the API, just not via this
-    // toast anymore (docs/MESSAGE_DELETE.md §4).
+    // toast anymore (docs/archive/MESSAGE_DELETE.md §4).
     setUndoIds(ids);
     undoTimerRef.current = window.setTimeout(() => {
       setUndoIds(null);
@@ -485,7 +485,7 @@ export function ChatView({
   }
 
   // Long-press → focus menu (or, if already selecting, a direct toggle — see
-  // docs/MESSAGE_DELETE.md §4's "long-press when already in selection mode").
+  // docs/archive/MESSAGE_DELETE.md §4's "long-press when already in selection mode").
   // Never selectable/actionable while still an optimistic pending bubble —
   // there's nothing to delete server-side yet.
   //
@@ -1088,7 +1088,7 @@ function TimelineDivider({ label }: { label: string }) {
 
 /**
  * One run's column of blocks — same sender, grouped by `groupMessages`
- * (docs/UI_REVAMP.md UI-7). Factored out of `ChatView`'s render when UI-8b
+ * (docs/archive/UI_REVAMP.md UI-7). Factored out of `ChatView`'s render when UI-8b
  * added the interleaved timeline (dividers now sit between these, so the
  * per-run JSX needed a name to key/map over rather than living inline in a
  * single `runs.map`).
@@ -1170,7 +1170,7 @@ function RunGroup({
           // Hover bar (UI-8c) is desktop-only, single-message blocks only
           // (a stack has no addressable single-message action — see the
           // stack doc comment in lib/messageGroups.ts), and hidden entirely
-          // during multi-select (docs/UI8_CHAT_INSTAGRAM.md §4 cross-cutting
+          // during multi-select (docs/archive/UI8_CHAT_INSTAGRAM.md §4 cross-cutting
           // rule — selection mode owns bubble taps instead).
           showActionsButton={!isMobile && !selectionMode && block.kind === 'single'}
           registerRef={registerRef}
@@ -1194,7 +1194,7 @@ function RunGroup({
 }
 
 /**
- * One block within a run (docs/UI_REVAMP.md UI-7) — either a single message
+ * One block within a run (docs/archive/UI_REVAMP.md UI-7) — either a single message
  * or a fanned stack of adjacent bare photos/videos.
  *
  * Corner rounding follows the block's position within its run (UI-8b
@@ -1447,7 +1447,7 @@ function MessageBlockRow({
 }
 
 /** The small quoted-original block a reply renders above its content
- *  (docs/UI8_CHAT_INSTAGRAM.md-style "reply strip"). Two visual modes:
+ *  (docs/archive/UI8_CHAT_INSTAGRAM.md-style "reply strip"). Two visual modes:
  *  - **embedded** (`standalone=false`) — sits inline atop a bubble's
  *    content, tinted to read as part of that bubble (translucent white on
  *    the accent-filled `mine` bubble, a faint tint on the sunken "theirs"

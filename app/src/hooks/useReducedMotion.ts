@@ -5,7 +5,7 @@ const QUERY = '(prefers-reduced-motion: reduce)';
 /**
  * Live `prefers-reduced-motion` signal for the hand-rolled *JS-driven*
  * animations (UI-8d's focus-menu lift, UI-8e's composer↔recording-bar morph,
- * docs/UI8_CHAT_INSTAGRAM.md §4) — ones built from inline `transition`/
+ * docs/archive/UI8_CHAT_INSTAGRAM.md §4) — ones built from inline `transition`/
  * `transform` styles rather than a pure CSS `@keyframes` rule. UI-8a's
  * bubble-in doesn't need this: it degrades via a plain `@media
  * (prefers-reduced-motion: reduce)` override right next to the keyframe in

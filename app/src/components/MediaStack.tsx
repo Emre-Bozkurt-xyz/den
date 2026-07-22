@@ -3,7 +3,7 @@ import type { Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
 
 /**
- * Fanned photo/video stack (docs/UI_REVAMP.md UI-7).
+ * Fanned photo/video stack (docs/archive/UI_REVAMP.md UI-7).
  *
  * Several bare media messages sent back-to-back are drawn as a small pile of
  * cards rather than a vertical column of thumbnails — the top card at full

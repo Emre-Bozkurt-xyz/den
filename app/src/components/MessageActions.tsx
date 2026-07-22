@@ -2,7 +2,7 @@ import { MoreVertical, Reply, Smile } from 'lucide-react';
 
 /**
  * Desktop-only hover action bar next to a bubble (UI-8c request G,
- * docs/UI8_CHAT_INSTAGRAM.md) — replaces the old lone `MoreVertical` hover
+ * docs/archive/UI8_CHAT_INSTAGRAM.md) — replaces the old lone `MoreVertical` hover
  * button with a small three-icon row: More / Reply / React, matching the
  * reference screenshots. `ChatView` positions one of these outside each
  * side of the bubble (`mine` → left of it, others → right of it) exactly

@@ -96,7 +96,7 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
 
   // Single-media tag read. The gallery batches tags into its page response,
   // but the chat-side viewer opens straight off a message bubble with no
-  // gallery page behind it (docs/UI_REVAMP.md UI-7) — same membership gate,
+  // gallery page behind it (docs/archive/UI_REVAMP.md UI-7) — same membership gate,
   // same data, just addressable one media at a time.
   app.get<{ Params: { id: string } }>('/media/:id/tags', { preHandler: requireAuth }, async (req) => {
     const mediaId = parseId(req.params.id);

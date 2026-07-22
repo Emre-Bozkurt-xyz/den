@@ -18,7 +18,7 @@ import { VoiceMessage } from './VoiceMessage';
 const GRID_GAP = 12; // px — mosaic-style presentation retune (stage 1 of the gallery visual rework), up from the original cramped 2px
 
 // Multi-select (BACKBONE §15 2026-07-22, stage 5 of the gallery rework) reuses
-// ChatView's exact long-press timing/slop (docs/MESSAGE_DELETE.md §4) so the
+// ChatView's exact long-press timing/slop (docs/archive/MESSAGE_DELETE.md §4) so the
 // gesture feels identical across the app's two selection-mode surfaces.
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
@@ -93,7 +93,7 @@ function groupItemsByDay(items: GalleryItem[]): DaySection[] {
 }
 
 /** Per-chat gallery (BACKBONE §9): Media segment is a hand-rolled masonry
- *  grid (docs/UI_REVAMP.md UI-5 — shortest-column packing, aspect ratio
+ *  grid (docs/archive/UI_REVAMP.md UI-5 — shortest-column packing, aspect ratio
  *  predicted from MediaInfo.width/height so there's no image-load pop-in);
  *  Voice segment is a chat-skinned list reusing the same bubble the chat
  *  view renders (BACKBONE §15 2026-07-22) — never a thumbnail. Tap a grid
@@ -135,7 +135,7 @@ export function ChatGallery({
   // pattern and priority as ChatView's message multi-select.
   useBackHandler(selectionMode, () => exitSelectionMode());
   // Long-press bookkeeping — a plain timer with move-slop cancellation,
-  // identical shape to ChatView's (docs/MESSAGE_DELETE.md §4).
+  // identical shape to ChatView's (docs/archive/MESSAGE_DELETE.md §4).
   const longPressTimerRef = useRef<number | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
   // Set when the long-press timer fires, so the click that follows the

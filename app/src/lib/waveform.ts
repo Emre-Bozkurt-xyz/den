@@ -1,5 +1,5 @@
 /**
- * Voice-message waveform peaks (docs/UI_REVAMP.md UI-7).
+ * Voice-message waveform peaks (docs/archive/UI_REVAMP.md UI-7).
  *
  * Peaks are computed *client-side* — there is no `peaks` column and nothing
  * about this touches the schema, the API, or `MediaInfo`. The bubble renders

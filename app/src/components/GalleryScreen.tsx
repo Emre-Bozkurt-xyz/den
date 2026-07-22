@@ -7,7 +7,7 @@ import { albumColumnCount } from '../lib/masonry';
 /** Top-level Gallery tab: chats-as-albums grid, cover = latest ready media's
  *  thumb (BACKBONE §9). Chats with zero media are omitted server-side.
  *
- *  Deliberately square/uniform tiles, not masonry (docs/UI_REVAMP.md UI-5):
+ *  Deliberately square/uniform tiles, not masonry (docs/archive/UI_REVAMP.md UI-5):
  *  `GalleryAlbum` (shared/src/api.ts) carries no width/height for
  *  `coverThumbUrl` — unlike `GalleryItem.media`, an album cover has no real
  *  aspect ratio to predict, so masonry's entire point (packing real photo

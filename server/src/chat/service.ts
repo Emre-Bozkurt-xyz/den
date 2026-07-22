@@ -228,7 +228,7 @@ export async function sendTextMessage(
   return toMessage(row, null, replyTo, []);
 }
 
-// ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/MESSAGE_DELETE.md) ──
+// ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/archive/MESSAGE_DELETE.md) ──
 
 function parseMessageId(raw: string): bigint {
   try {
@@ -251,7 +251,7 @@ function parseMessageIdBatch(rawIds: string[]): bigint[] {
 /** Loads message rows by id and enforces "every id belongs to this chat and
  *  was sent by this caller" as a single all-or-nothing check — a missing id,
  *  a wrong-chat id, or someone else's message throws 403 for the *whole*
- *  batch and nothing is written (docs/MESSAGE_DELETE.md §3: "Partial success
+ *  batch and nothing is written (docs/archive/MESSAGE_DELETE.md §3: "Partial success
  *  is a worse UX than a clean refusal and leaks which ids exist"). */
 async function loadOwnMessagesOrThrow(chatId: bigint, senderId: bigint, ids: bigint[]) {
   const rows = await db.select().from(messages).where(inArray(messages.id, ids));

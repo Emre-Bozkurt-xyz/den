@@ -2,7 +2,7 @@ import { ArrowLeft } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 /**
- * Shared top-bar pattern (UI-1, docs/UI_REVAMP.md §5): optional back button,
+ * Shared top-bar pattern (UI-1, docs/archive/UI_REVAMP.md §5): optional back button,
  * title (+ optional subtitle line), optional trailing action slot, and the
  * safe-area-inset-top padding every screen previously hand-rolled. Pure
  * extraction of what `ChatList`/`ChatView`/`FriendsScreen`/`NewGroupScreen`/

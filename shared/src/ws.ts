@@ -124,7 +124,7 @@ export interface MediaReadyPayload {
 
 /** Server → client (room broadcast), Stage 6: these messages are gone for
  *  everyone. Ids only — the client already has the bodies and is removing
- *  them (§ docs/MESSAGE_DELETE.md §2). Batched by design: a bulk delete of
+ *  them (§ docs/archive/MESSAGE_DELETE.md §2). Batched by design: a bulk delete of
  *  30 messages is one frame, not 30. */
 export interface MessageDeletedPayload {
   chatId: string;

@@ -84,7 +84,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
   // body rather than `DELETE`-with-body, matching the `/read` convention
   // above. Membership + ownership are enforced inside softDeleteMessages/
   // restoreMessages (chat/service.ts) — mixed/invalid batches are rejected
-  // whole with 403, writing nothing (docs/MESSAGE_DELETE.md §3).
+  // whole with 403, writing nothing (docs/archive/MESSAGE_DELETE.md §3).
   app.post<{ Params: { id: string }; Body: MessageIdsRequest }>(
     '/chats/:id/messages/delete',
     { preHandler: requireAuth },

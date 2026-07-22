@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 // Keep in sync with the CSS media query below — Tailwind's own `md:` breakpoint
 // is also 768, so component-tree branching and any CSS-utility sizing line up
 // on the same pixel value instead of introducing a second magic number
-// (docs/UI_REVAMP.md §4.2).
+// (docs/archive/UI_REVAMP.md §4.2).
 const MOBILE_MAX_WIDTH = 768;
 const QUERY = `(max-width: ${MOBILE_MAX_WIDTH}px)`;
 

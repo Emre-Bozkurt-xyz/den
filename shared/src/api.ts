@@ -194,7 +194,7 @@ export interface MarkReadRequest {
 
 /** POST /chats/:id/messages/delete and .../restore (Stage 6 / §2 item 11).
  *  All ids must belong to this chat and be sent by the caller — mixed
- *  batches are rejected whole, nothing written (docs/MESSAGE_DELETE.md §3). */
+ *  batches are rejected whole, nothing written (docs/archive/MESSAGE_DELETE.md §3). */
 export interface MessageIdsRequest {
   messageIds: string[];
 }
@@ -310,7 +310,7 @@ export interface AddTagRequest {
 /** GET /media/:id/tags — the tags currently attached to one media item.
  *  The gallery gets tags batched into `GalleryItem`; this exists for the
  *  chat-side viewer, which opens straight from a message bubble and has no
- *  gallery page to inherit them from (docs/UI_REVAMP.md UI-7). */
+ *  gallery page to inherit them from (docs/archive/UI_REVAMP.md UI-7). */
 export interface MediaTagsResponse {
   tags: Tag[];
 }

@@ -3,7 +3,7 @@ import { useCallback, useRef, useState } from 'react';
 /**
  * Tracks an element's rendered content-box width via ResizeObserver.
  *
- * Used by the gallery masonry layouts (docs/UI_REVAMP.md UI-5), which need
+ * Used by the gallery masonry layouts (docs/archive/UI_REVAMP.md UI-5), which need
  * the actual measured container width — desktop's single-pane content area
  * and mobile full-screen width vary continuously, not just at the
  * `useIsMobile` breakpoint — rather than a device-class boolean.

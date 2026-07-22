@@ -64,7 +64,7 @@ function withFirstPage(cache: MessagesCache | undefined, update: (messages: Mess
 
 /** Like `withFirstPage`, but applies across every page — a bulk delete (or a
  *  reaction, post-MVP) can land on a message on any loaded page, not just the
- *  newest one (docs/MESSAGE_DELETE.md §4). Exported for `ChatView`'s
+ *  newest one (docs/archive/MESSAGE_DELETE.md §4). Exported for `ChatView`'s
  *  `toggleReaction`, which needs the exact same whole-cache update shape for
  *  its optimistic apply/rollback. */
 export function withAllPages(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
@@ -192,7 +192,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
             withAllPages(old, (messages) => messages.filter((m) => !ids.has(m.id))),
           );
           // Deleting the newest message changes the chat-list preview and
-          // unread count — not optional (docs/MESSAGE_DELETE.md §3).
+          // unread count — not optional (docs/archive/MESSAGE_DELETE.md §3).
           void qc.invalidateQueries({ queryKey: ['chats'] });
           break;
         }

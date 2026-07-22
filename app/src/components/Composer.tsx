@@ -3,7 +3,7 @@ import { Mic, Paperclip, Send, Square, X } from 'lucide-react';
 import { RecordingBar, type RecState } from './RecordingBar';
 
 /**
- * UI-8e (docs/UI8_CHAT_INSTAGRAM.md) — the chat composer, extracted out of
+ * UI-8e (docs/archive/UI8_CHAT_INSTAGRAM.md) — the chat composer, extracted out of
  * `ChatView` (which was pushing 900 lines) so the recording state machine
  * has somewhere to live that isn't the message-list component. Owns: text
  * input + attach + mic/send, and the full hold-to-record / slide-up-to-lock
@@ -24,7 +24,7 @@ import { RecordingBar, type RecState } from './RecordingBar';
 
 // Gesture thresholds — convention-based defaults, grouped here for later
 // real-device tuning (Samsung/iPhone pass), same posture as UI-6's
-// MediaViewer thresholds (docs/UI_REVAMP.md §8).
+// MediaViewer thresholds (docs/archive/UI_REVAMP.md §8).
 const LOCK_THRESHOLD_DY = -115; // px — slide up past this to lock (hands-free); raised from -80, which armed too early (user feedback)
 const CANCEL_THRESHOLD_DX = -120; // px — slide left past this to cancel
 
@@ -116,7 +116,7 @@ export function Composer({
   const elapsedTimerRef = useRef<number | null>(null);
 
   // Raw pointer-gesture bookkeeping for the mic button — same shape/spirit
-  // as MediaViewer's gestureRef (docs/UI_REVAMP.md UI-6): a plain ref, not
+  // as MediaViewer's gestureRef (docs/archive/UI_REVAMP.md UI-6): a plain ref, not
   // state, since it's read/written on every pointermove and doesn't itself
   // need to trigger a render (dragX/dragY, which do, are derived from it).
   const gestureRef = useRef<{ pointerId: number; startX: number; startY: number } | null>(null);

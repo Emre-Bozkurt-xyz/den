@@ -1,7 +1,7 @@
 import { ChevronUp, Lock, Square } from 'lucide-react';
 
 /**
- * UI-8e recording state machine (docs/UI8_CHAT_INSTAGRAM.md) — owned by
+ * UI-8e recording state machine (docs/archive/UI8_CHAT_INSTAGRAM.md) — owned by
  * `Composer`, rendered here only as a type so `RecordingBar` (purely
  * presentational, see below) and `Composer` (the state owner) share one
  * definition.

@@ -4,7 +4,7 @@
    `dark:` variant is prefers-color-scheme, which is exactly what we want. */
 
 /* ---------------------------------------------------------------------------
- * Design tokens (UI-1, docs/UI_REVAMP.md §4.1).
+ * Design tokens (UI-1, docs/archive/UI_REVAMP.md §4.1).
  *
  * Raw values live as plain custom properties so they can be read from either
  * Tailwind utilities (via the @theme block below) or inline styles/plain CSS.
@@ -104,7 +104,7 @@ label {
 }
 
 /* ---------------------------------------------------------------------------
- * UI-8a — send/receive bubble intro (docs/UI8_CHAT_INSTAGRAM.md). A freshly-
+ * UI-8a — send/receive bubble intro (docs/archive/UI8_CHAT_INSTAGRAM.md). A freshly-
  * sent or freshly-arrived message eases in with a small scale-up + slide-up +
  * fade; already-loaded history never gets this class (see
  * app/src/hooks/useIntroIds.ts for which ids qualify). Hand-rolled, no
@@ -132,7 +132,7 @@ label {
 }
 
 /* ---------------------------------------------------------------------------
- * UI-8e — composer ↔ recording-bar morph (docs/UI8_CHAT_INSTAGRAM.md). The
+ * UI-8e — composer ↔ recording-bar morph (docs/archive/UI8_CHAT_INSTAGRAM.md). The
  * text input and the live-waveform recording bar occupy the same flex slot
  * and swap via plain conditional rendering (their shapes are too different
  * for a literal FLIP-style width interpolation to be worth hand-rolling); this

@@ -11,7 +11,7 @@ import { useBackHandler } from '../lib/backStack';
  *  Tag list + add/remove UI (§9) only renders when `tags` is passed — the
  *  ChatView usage (tapping a bubble) doesn't wire it, only ChatGallery does.
  *
- *  Gestures (docs/UI_REVAMP.md UI-6): hand-rolled Pointer Events on the
+ *  Gestures (docs/archive/UI_REVAMP.md UI-6): hand-rolled Pointer Events on the
  *  *image* element — swipe left/right calls onPrev/onNext, swipe down
  *  closes, pinch and double-tap zoom/pan. The *video* element gets the same
  *  swipe-nav/swipe-close (no pinch, no double-tap-zoom — doesn't make sense
@@ -19,7 +19,7 @@ import { useBackHandler } from '../lib/backStack';
  *  zone reserved for the native `controls` bar (scrubber/play/fullscreen) —
  *  a pointerdown inside that zone is left completely untouched so native
  *  control behavior is unaffected. See the UI-6 implementation notes /
- *  video-gesture-gap follow-up in docs/UI_REVAMP.md for the reasoning and
+ *  video-gesture-gap follow-up in docs/archive/UI_REVAMP.md for the reasoning and
  *  the caveat that the exclusion-zone height is a best guess, unverified
  *  without real touch hardware. Desktop arrow buttons and the close/jump
  *  buttons are unrelated siblings, unaffected either way. */
@@ -38,7 +38,7 @@ const MAX_SCALE = 4;
 // entirely (no gesture tracking) so the native controls bar (scrubber/play/
 // fullscreen) keeps completely unmodified touch behavior. "Commonly 40-56px"
 // per typical browser UA stylesheets, but this varies by browser/OS and is
-// a best guess, not measured against real hardware — see docs/UI_REVAMP.md §8.
+// a best guess, not measured against real hardware — see docs/archive/UI_REVAMP.md §8.
 const VIDEO_CONTROLS_EXCLUSION_HEIGHT = 56;
 
 function clamp(value: number, min: number, max: number): number {
@@ -396,7 +396,7 @@ export function MediaViewer({
   // no double-tap-zoom (video doesn't need zoom — its own controls already
   // occupy the interaction budget). Gated on a bottom exclusion zone so the
   // native controls bar keeps completely untouched touch behavior — see the
-  // file-level comment and docs/UI_REVAMP.md §8 for the reasoning/caveats.
+  // file-level comment and docs/archive/UI_REVAMP.md §8 for the reasoning/caveats.
 
   function onVideoPointerDown(e: React.PointerEvent<HTMLVideoElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -561,7 +561,7 @@ export function MediaViewer({
           // is left completely alone (see onVideoPointerDown) so the native
           // `controls` bar (scrubber/play/fullscreen) keeps unmodified touch
           // behavior. No pinch-zoom, no double-tap-zoom — out of scope for
-          // video (see file-level comment / docs/UI_REVAMP.md §8).
+          // video (see file-level comment / docs/archive/UI_REVAMP.md §8).
           <video
             key={media.id}
             src={media.url}
@@ -629,7 +629,7 @@ export function TagEditor({
     setSuggestions([]);
   }
 
-  // Deliberately fixed-dark literal colors here, not app tokens (docs/UI_REVAMP.md
+  // Deliberately fixed-dark literal colors here, not app tokens (docs/archive/UI_REVAMP.md
   // UI-5 precedent, reconfirmed for UI-6): this panel sits inside MediaViewer's
   // always-black/90 backdrop regardless of the app's light/dark mode, so
   // `bg-surface-raised` (white in light mode) would break contrast against it.

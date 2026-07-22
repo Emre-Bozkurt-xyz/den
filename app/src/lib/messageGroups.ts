@@ -2,7 +2,7 @@ import type { Message } from '@den/shared';
 import { formatDateLabel, formatTime, isSameCalendarDay, isToday } from './datetime';
 
 /**
- * Presentation-only grouping of a chat's flat message list (docs/UI_REVAMP.md
+ * Presentation-only grouping of a chat's flat message list (docs/archive/UI_REVAMP.md
  * UI-7). Nothing here touches the wire format: the server still stores and
  * sends one message per media item — a "stack" is purely how several of them
  * are drawn.
@@ -103,7 +103,7 @@ export function blockMessages(block: MessageBlock): Message[] {
   return block.kind === 'single' ? [block.message] : block.messages;
 }
 
-// ─── UI-8b — date/time dividers (request D, docs/UI8_CHAT_INSTAGRAM.md) ────
+// ─── UI-8b — date/time dividers (request D, docs/archive/UI8_CHAT_INSTAGRAM.md) ────
 
 /** Same-day gap (ms) big enough to earn its own time divider even without a
  *  calendar-day change — Instagram's "quiet afternoon" break. */
