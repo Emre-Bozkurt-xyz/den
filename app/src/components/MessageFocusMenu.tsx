@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import { CheckSquare, Copy, Plus, Reply, Trash2 } from 'lucide-react';
 import { ReactionLimits, type MeResponse, type Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
@@ -154,7 +155,7 @@ export function MessageFocusMenu({
     width: rect.width,
     height: rect.height,
     transformOrigin: 'center',
-    transform: revealed ? `scale(${LIFT_SCALE})` : 'scale(1)',
+    transform: revealed ? `translateZ(0) scale(${LIFT_SCALE})` : 'translateZ(0) scale(1)',
     transition: reducedMotion ? 'none' : `transform ${TRANSITION_MS}ms cubic-bezier(0.22,1,0.36,1)`,
     zIndex: 61,
     pointerEvents: 'none',
@@ -183,13 +184,19 @@ export function MessageFocusMenu({
     width: panelW,
     maxHeight: `calc(100vh - ${VIEWPORT_MARGIN * 2}px)`,
     opacity: panelRevealed ? 1 : 0,
-    transform: panelRevealed ? 'translateY(0) scale(1)' : `translateY(${panelSide === 'below' ? -6 : 6}px) scale(0.98)`,
+    transform: panelRevealed ? 'translateZ(0) translateY(0) scale(1)' : `translateZ(0) translateY(${panelSide === 'below' ? -6 : 6}px) scale(0.98)`,
     transition: reducedMotion ? 'none' : `opacity ${TRANSITION_MS}ms ease-out, transform ${TRANSITION_MS}ms cubic-bezier(0.22,1,0.36,1)`,
     zIndex: 62,
     paddingBottom: 'env(safe-area-inset-bottom)',
   };
 
-  return (
+  // Portalled to `document.body` — mounting in place (inside the scrolling
+  // message list) let the list's own bubbles/media paint back over this
+  // `position: fixed` overlay despite its z-index (observed: long-press → a
+  // voice bubble elsewhere in the list rendered on top of the panel). A
+  // portal sidesteps whatever ancestor stacking context caused that instead
+  // of chasing it bubble-by-bubble.
+  return createPortal(
     <div className="fixed inset-0" style={{ touchAction: 'manipulation' }}>
       {/* Backdrop: dims + blurs the rest of the screen, click-to-dismiss.
           Falls back to a heavier flat dim (no blur) when backdrop-filter
@@ -202,6 +209,13 @@ export function MessageFocusMenu({
           backdropFilter: BACKDROP_FILTER_SUPPORTED ? 'blur(4px)' : undefined,
           WebkitBackdropFilter: BACKDROP_FILTER_SUPPORTED ? 'blur(4px)' : undefined,
           opacity: revealed ? 1 : 0,
+          // Forces its own compositing layer — without it, mobile browsers
+          // have been seen painting other composited layers (video/voice
+          // waveform bubbles, animated message bubbles) *above* a
+          // `backdrop-filter` + `position: fixed` overlay despite a much
+          // higher z-index, since z-index only orders layers reliably when
+          // every side of the comparison is actually promoted to one.
+          transform: 'translateZ(0)',
           transition: reducedMotion ? 'none' : `opacity ${TRANSITION_MS}ms ease-out`,
         }}
       />
@@ -290,6 +304,7 @@ export function MessageFocusMenu({
           </button>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

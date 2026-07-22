@@ -1236,11 +1236,18 @@ function MessageBlockRow({
       {swipeProgress > 0 && (
         <div
           className={
-            'pointer-events-none absolute top-1/2 z-0 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-pill transition-colors ' +
+            // `inset-y-0` + `my-auto` centers a fixed-height absolutely
+            // positioned box regardless of whether this wrapper's height is
+            // "definite" for percentage purposes — `top-1/2` + `-translate-y-1/2`
+            // was resolving `top: 50%` against the wrong box (an auto-height
+            // flex container), landing the icon well above the bubble's true
+            // center instead of centered on it (including bare media, which
+            // has no bubble padding to hide the miss).
+            'pointer-events-none absolute inset-y-0 z-0 my-auto grid h-8 w-8 place-items-center rounded-pill transition-colors ' +
             (mine ? 'right-0' : 'left-0') +
             (swipeArmed ? ' bg-accent text-white' : ' bg-surface-sunken text-text-muted')
           }
-          style={{ opacity: swipeProgress, transform: `translateY(-50%) scale(${0.7 + 0.3 * swipeProgress})` }}
+          style={{ opacity: swipeProgress, transform: `scale(${0.7 + 0.3 * swipeProgress})` }}
         >
           <ReplyIcon size={16} />
         </div>
@@ -1302,13 +1309,16 @@ function MessageBlockRow({
           </div>
         )}
 
-        {/* Reaction pills (post-MVP) — a row just below/overlapping the
-            bubble's bottom edge (iMessage/Instagram style), aligned to the
-            sender's side. Placed *inside* this flex-col so it stacks as an
-            extra row after the media/bubble rather than fighting the
-            run-corner layout above. */}
+        {/* Reaction pills (post-MVP) — a row just below the bubble's bottom
+            edge, aligned to the sender's side. Placed *inside* this flex-col
+            so it stacks as an extra row after the media/bubble rather than
+            fighting the run-corner layout above. A negative margin here used
+            to pull the row up onto the bubble/media's bottom edge — on bare
+            media especially, that covered real image pixels instead of just
+            grazing a rounded corner, so the pills now sit in the normal flow
+            with a small positive gap instead. */}
         {reactions.length > 0 && (
-          <div className={'z-10 -mt-1.5 flex flex-wrap gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
+          <div className={'z-10 mt-0.5 flex flex-wrap gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
             {reactions.map((r) => (
               <button
                 key={r.emoji}
