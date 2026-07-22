@@ -12,6 +12,9 @@ import {
   type MessageRestoredPayload,
   type MessagesResponse,
   type MeResponse,
+  type ReactionAddedPayload,
+  type ReactionRemovedPayload,
+  type ReactionSummary,
   type ReplyPreview,
 } from '@den/shared';
 import { connectSocket } from './socket';
@@ -25,15 +28,31 @@ interface RealtimeCtx {
    *  and the optimistic bubble shows `replyPreview` immediately, ahead of the
    *  server's authoritative `message.new` reconciling it. */
   sendMessage: (chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview) => void;
+  /** Post-MVP reactions: records that *this* client just optimistically
+   *  applied its own add/remove for `key` (see `reactionPendingKey`) so the
+   *  server's echo of that same event back to this socket is recognized as a
+   *  confirmation and skipped rather than double-applied. Call right before
+   *  (or as part of) the optimistic cache update — see `ChatView.toggleReaction`. */
+  notePendingReaction: (key: string) => void;
+  /** Clears a pending-reaction key without waiting for the echo — used when
+   *  the REST call itself fails, so no confirmation frame will ever arrive
+   *  (rolling back the optimistic change is the caller's job; this only
+   *  stops the key from leaking). */
+  clearPendingReaction: (key: string) => void;
 }
 
-const Ctx = createContext<RealtimeCtx>({ connected: false, sendMessage: () => {} });
+const Ctx = createContext<RealtimeCtx>({
+  connected: false,
+  sendMessage: () => {},
+  notePendingReaction: () => {},
+  clearPendingReaction: () => {},
+});
 
 export function useRealtime(): RealtimeCtx {
   return useContext(Ctx);
 }
 
-type MessagesCache = InfiniteData<MessagesResponse, string | null>;
+export type MessagesCache = InfiniteData<MessagesResponse, string | null>;
 
 function withFirstPage(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
   if (!cache || cache.pages.length === 0) return cache;
@@ -43,12 +62,46 @@ function withFirstPage(cache: MessagesCache | undefined, update: (messages: Mess
   return { ...cache, pages };
 }
 
-/** Like `withFirstPage`, but applies across every page — a bulk delete can
- *  span a page boundary, so removing ids has to check the whole cache, not
- *  just the newest page (docs/MESSAGE_DELETE.md §4). */
-function withAllPages(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
+/** Like `withFirstPage`, but applies across every page — a bulk delete (or a
+ *  reaction, post-MVP) can land on a message on any loaded page, not just the
+ *  newest one (docs/MESSAGE_DELETE.md §4). Exported for `ChatView`'s
+ *  `toggleReaction`, which needs the exact same whole-cache update shape for
+ *  its optimistic apply/rollback. */
+export function withAllPages(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
   if (!cache) return cache;
   return { ...cache, pages: cache.pages.map((p) => ({ ...p, messages: update(p.messages) })) };
+}
+
+/** Dedup key for the "did I just apply this myself" check described on
+ *  `RealtimeCtx.notePendingReaction` — shared by the optimistic apply
+ *  (`ChatView.toggleReaction`) and the WS reconciliation below so both sides
+ *  always agree on the exact same string. */
+export function reactionPendingKey(messageId: string, emoji: string, action: 'add' | 'remove'): string {
+  return `${messageId}:${emoji}:${action}`;
+}
+
+/** Pure reducer: one emoji's `ReactionSummary` after `userId` added a
+ *  reaction. Shared by the WS handler (`userId` = whoever reacted) and
+ *  `ChatView`'s optimistic apply (`userId` = `meId`) — a single source of
+ *  truth for "what does adding a reaction do to the list", so the two paths
+ *  can never drift out of sync with each other. */
+export function applyReactionAdded(reactions: ReactionSummary[], emoji: string, userId: string, meId: string): ReactionSummary[] {
+  const idx = reactions.findIndex((r) => r.emoji === emoji);
+  if (idx === -1) return [...reactions, { emoji, count: 1, mine: userId === meId }];
+  const r = reactions[idx]!;
+  const next: ReactionSummary = { ...r, count: r.count + 1, mine: r.mine || userId === meId };
+  return reactions.map((rr, i) => (i === idx ? next : rr));
+}
+
+/** Pure reducer: the inverse of `applyReactionAdded`. Drops the summary
+ *  entirely once its count hits 0 rather than leaving a `{count: 0}` husk. */
+export function applyReactionRemoved(reactions: ReactionSummary[], emoji: string, userId: string, meId: string): ReactionSummary[] {
+  const idx = reactions.findIndex((r) => r.emoji === emoji);
+  if (idx === -1) return reactions;
+  const r = reactions[idx]!;
+  const count = r.count - 1;
+  if (count <= 0) return reactions.filter((_, i) => i !== idx);
+  return reactions.map((rr, i) => (i === idx ? { ...rr, count, mine: userId === meId ? false : rr.mine } : rr));
 }
 
 /** Sort key for reinserting restored messages: numeric id descending
@@ -77,6 +130,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   // reqId -> the optimistic message id it should replace, so multiple tabs/
   // devices on the same account don't step on each other's pending sends.
   const pendingRef = useRef(new Map<string, { chatId: string; tempId: string }>());
+  // Post-MVP reactions: `reactionPendingKey`s this client just optimistically
+  // applied itself and is waiting to see echoed back — see
+  // `RealtimeCtx.notePendingReaction`'s doc comment for the double-count trap
+  // this exists to avoid.
+  const pendingReactionsRef = useRef(new Set<string>());
 
   useEffect(() => {
     const socket = connectSocket();
@@ -162,6 +220,39 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: ['gallery'] });
           void qc.invalidateQueries({ queryKey: ['mediaTags'] });
           break;
+        case WsType.ReactionAdded:
+        case WsType.ReactionRemoved: {
+          const isAdd = frame.type === WsType.ReactionAdded;
+          const { chatId, messageId, emoji, userId } = frame.payload as ReactionAddedPayload | ReactionRemovedPayload;
+          const meId = qc.getQueryData<MeResponse | null>(['me'])?.id;
+          const key = reactionPendingKey(messageId, emoji, isAdd ? 'add' : 'remove');
+
+          // This is the echo of our own optimistic toggle (see
+          // `ChatView.toggleReaction`) — already applied locally, so consume
+          // the pending marker and skip re-applying instead of double-counting.
+          // Frames from other users' sockets never match a key we set, so
+          // they always fall through to the apply below.
+          if (userId === meId && pendingReactionsRef.current.has(key)) {
+            pendingReactionsRef.current.delete(key);
+            break;
+          }
+
+          qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
+            withAllPages(old, (messages) =>
+              messages.map((m) =>
+                m.id === messageId
+                  ? {
+                      ...m,
+                      reactions: isAdd
+                        ? applyReactionAdded(m.reactions, emoji, userId, meId ?? '')
+                        : applyReactionRemoved(m.reactions, emoji, userId, meId ?? ''),
+                    }
+                  : m,
+              ),
+            ),
+          );
+          break;
+        }
         default:
           break;
       }
@@ -171,8 +262,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       socket.close();
       socketRef.current = null;
       pendingRef.current.clear();
+      pendingReactionsRef.current.clear();
     };
   }, [qc]);
+
+  function notePendingReaction(key: string): void {
+    pendingReactionsRef.current.add(key);
+  }
+
+  function clearPendingReaction(key: string): void {
+    pendingReactionsRef.current.delete(key);
+  }
 
   function sendMessage(chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview): void {
     const socket = socketRef.current;
@@ -199,5 +299,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     socket.emit('ws', makeEnvelope(WsType.MessageSend, { chatId, body: trimmed, ...(replyToId ? { replyToId } : {}) }, reqId));
   }
 
-  return <Ctx.Provider value={{ connected, sendMessage }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ connected, sendMessage, notePendingReaction, clearPendingReaction }}>{children}</Ctx.Provider>
+  );
 }
