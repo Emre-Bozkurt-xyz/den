@@ -307,7 +307,12 @@ function BottomNav({ view, setView }: { view: View; setView: (v: View) => void }
   return (
     <nav
       className="flex border-t border-black/10 bg-white dark:border-white/10 dark:bg-neutral-900"
-      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      // Feel-tuning: the full safe-area inset (~34px on a home-indicator
+      // iPhone) stacks on top of the TabButton's own py-2.5, which read as
+      // too tall — trim it back rather than dropping it (still clears the
+      // home indicator). ⚠️ iPhone device-gate: re-check the stacked height
+      // on a real home-indicator device.
+      style={{ paddingBottom: 'max(env(safe-area-inset-bottom) - 0.5rem, 0px)' }}
     >
       <TabButton label="Chats" active={view.name === 'chats'} onClick={() => setView({ name: 'chats' })} />
       <TabButton label="Gallery" active={view.name === 'gallery'} onClick={() => setView({ name: 'gallery' })} />
@@ -322,7 +327,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
       onClick={onClick}
       style={{ touchAction: 'manipulation' }}
       className={
-        'flex-1 py-3 text-sm font-medium ' +
+        'flex-1 py-2.5 text-sm font-medium ' +
         (active ? 'text-indigo-600 dark:text-indigo-400' : 'text-neutral-400')
       }
     >

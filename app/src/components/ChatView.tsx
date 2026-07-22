@@ -5,6 +5,7 @@ import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import { chatDisplayName, deleteMessages, markRead, restoreMessages } from '../lib/chats';
 import { kindForMime, uploadMedia } from '../lib/media';
+import { clearChatNotifications } from '../lib/push';
 import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
 import { addTag, removeTag } from '../lib/tags';
 import { useRealtime } from '../lib/realtime';
@@ -144,6 +145,18 @@ export function ChatView({
       void markRead(chat.id, lastMessageId).then(() => qc.invalidateQueries({ queryKey: ['chats'] }));
     }
   }, [chat.id, lastMessageId, qc]);
+
+  // Clear this chat's already-shown notifications when it becomes the active
+  // chat — on mount/chat switch, and again if the tab/PWA regains visibility
+  // while it's still open (returning to an already-open chat).
+  useEffect(() => {
+    clearChatNotifications(chat.id);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') clearChatNotifications(chat.id);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [chat.id]);
 
   useEffect(() => {
     if (!jumpToMessageId) bottomRef.current?.scrollIntoView({ block: 'end' });
