@@ -17,7 +17,7 @@ Private, self-hosted chat + media app (PWA) for a closed friend circle. Invite-o
 | Frontend | Vite + React 19 + TS, Tailwind v4 | No router — hand-rolled view stack in `App.tsx`. Design tokens in `app/src/index.css` `@theme`. Icons: `lucide-react` (bundled, no CDN). |
 | Server state | TanStack Query + thin WS layer writing into the Query cache | `app/src/lib/realtime.tsx` is that layer. |
 | Backend | Node + Fastify 5 + TS | REST + socket.io on one process; media processing inline (no queue — deliberate, see archive §15 2026-07-20). |
-| DB | Postgres + Drizzle | `server/src/db/schema.ts` is the schema source of truth. Migrations in `server/drizzle/` (5 so far). |
+| DB | Postgres + Drizzle | `server/src/db/schema.ts` is the schema source of truth. Migrations in `server/drizzle/` (6 so far). |
 | Media storage | Cloudflare R2 (prod) / MinIO (dev compose) | Same S3 client code; swap is env-only. Bucket private, presigned URLs only. |
 | Realtime | socket.io (rooms, reconnect) | Cookie-authed handshake. |
 | Push | `web-push` + VAPID | iOS ≥16.4 installed-PWA only; gesture-gated permission prompt. |
@@ -109,6 +109,7 @@ Modeling rules (locked):
 - **Replies:** `messages.reply_to_message_id` (nullable self-FK); API attaches a denormalized `ReplyPreview` (`{id, senderId, kind, preview, deleted}`) so clients render quotes without a second fetch and survive target deletion.
 - **Reactions:** one row per `(message_id, user_id, emoji)`; API returns aggregated `ReactionSummary[]` (`{emoji, count, mine}`). Arbitrary emoji ≤32 chars stored; `ReactionLimits.quickEmojis` is the quick palette.
 - **Auth is provider-ready by design:** `auth_identities` + `webauthn_credentials` exist from migration 001 but **nothing writes to them yet**. Invites authorize, providers authenticate; match OAuth users on `(provider, provider_user_id)`, never email; a user always keeps ≥1 login method.
+- **Message search** (migration 006, docs/MESSAGE_SEARCH.md): `pg_trgm` extension + `idx_messages_body_trgm` gin trigram index on `messages.body` — substring search (ILIKE), not tsvector FTS, so mixed-language/partial-word queries behave like Discord's search instead of a stemmer.
 
 ## 6. REST API surface (actual, all under `/api`, cookie-authed unless noted)
 
@@ -123,6 +124,7 @@ POST /friends/requests/:userId/accept | /decline    (addressed by the OTHER user
 GET  /chats
 POST /chats {memberIds[], name?}         (1 member → returns existing DM idempotently)
 GET  /chats/:id/messages?before=&limit=  (keyset, id DESC)
+GET  /chats/:id/messages/search?q=&from=&since=&until=&before=&limit=  (docs/MESSAGE_SEARCH.md; ≥1 filter required, else 400)
 POST /chats/:id/read {messageId}
 POST /chats/:id/messages/delete | /restore {messageIds[]}   (own messages only, batch all-or-nothing)
 POST /chats/:id/messages/:messageId/reactions {emoji}
@@ -216,8 +218,7 @@ Dev device: Samsung. Most users: iPhone. Anything likely to diverge on iOS Safar
 6. **Calls** — see §15 below.
 7. **Native wrappers** if PWA friction is real (Capacitor APK sideload / Tauri).
 8. Server-side waveform peaks, video transcode pipeline, per-chat export/backup.
-
-**In flight:** per-chat message search — `docs/MESSAGE_SEARCH.md`.
+9. ~~Per-chat message search~~ — shipped 2026-07-22 out of order, `docs/MESSAGE_SEARCH.md`.
 
 **Icebox (parked, with reasons — see archive §13 for full write-ups):**
 - Hard-wipe of deleted messages (needs first background job + Postgres↔R2 cascade with no shared transaction; contradicts the soft-delete invariant — explicit override required).
@@ -232,6 +233,7 @@ Historical log (2026-07-17 → 2026-07-22, ~60 entries): **`docs/archive/BACKBON
 | Date | Decision | Why |
 |---|---|---|
 | 2026-07-22 | MVP-era docs (BACKBONE, STAGE0, UI_REVAMP, UI8, MESSAGE_DELETE) archived to `docs/archive/`; this file becomes the living source of truth; CLAUDE.md rewritten to match | Owner's call: project matured past MVP framing. Stage gates and scope-freeze rules retired; invariants, platform reality, roadmap/icebox, and decision-log discipline carried forward |
+| 2026-07-22 | Per-chat message search shipped (`docs/MESSAGE_SEARCH.md`): `pg_trgm` + gin trigram index for substring `ILIKE` matching (not tsvector FTS — handles mixed-language/partial-word/substring queries the way Discord's search does); mobile renders search as a full-screen overlay, desktop as a ~360px right-side panel that pushes the message column (Discord's own split) | Substring search over an unbounded, growing `messages.body` needs an index that doesn't degrade with chat size; FTS's word/stemmer model is the wrong shape for substring/mixed-language matching. Overlay-vs-panel split follows the same mobile/desktop divergence already established for the gallery and message-focus UI |
 
 ## 15. 🔮 Call-readiness invariants (still binding)
 

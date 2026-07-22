@@ -1,6 +1,6 @@
 # Message Search (Discord-style, per-chat)
 
-**Status:** planned, owner-approved roadmap item — listed as "in flight" in `docs/PROJECT.md` §13.
+**Status:** shipped 2026-07-22 — see `docs/PROJECT.md` §13 (roadmap), §14 (decision log entry), §5/§6 (data model + API surface updates).
 **Executor note:** this doc is the brief. Read CLAUDE.md and the referenced PROJECT.md sections before starting. Work top-to-bottom; each phase leaves the app working. `npm run typecheck && npm run lint && npm run test` must be green before any commit.
 
 ## 1. What we're building
