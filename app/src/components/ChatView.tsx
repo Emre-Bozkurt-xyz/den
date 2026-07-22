@@ -54,6 +54,7 @@ const DOUBLE_TAP_MS = 250;
 const SWIPE_REPLY_ENGAGE_PX = 12; // px of horizontal travel before we commit to a horizontal swipe over a vertical scroll/long-press
 const SWIPE_REPLY_MAX_PX = 72; // clamp — how far the block can visually travel
 const SWIPE_REPLY_THRESHOLD_PX = 56; // release past this to fire the reply
+const SWIPE_SNAP_BACK_MS = 150; // must match the transition duration used in MessageBlockRow's style below
 // ⚠️ iOS: a rightward swipe starting near the LEFT screen edge collides with
 // the standalone PWA's back-edge-swipe gesture (same spirit as the existing
 // MediaViewer/Composer iOS gesture flags in this file's family) — flag for
@@ -143,6 +144,13 @@ export function ChatView({
   // live `translateX` to exactly that block. Only one gesture can be active
   // at a time (a single pointer), so this is a single slot, not a map.
   const [swipeState, setSwipeState] = useState<{ id: string; dx: number } | null>(null);
+  // Which block (if any) is currently animating its swipe-to-reply offset
+  // back to rest. `MessageBlockRow` only sets `transition: transform` on this
+  // one block — see the file-header note by its style object for why every
+  // *other* block must render with no `transition` property at all rather
+  // than an always-on `transition: transform` that happens to be a no-op
+  // when `swipeDx` is 0.
+  const [snappingBackId, setSnappingBackId] = useState<string | null>(null);
   // Per-gesture bookkeeping for the currently pressed block, set at
   // pointerdown and read/mutated on pointermove — a plain ref (like
   // Composer's `gestureRef`) since it doesn't itself need to trigger a
@@ -485,6 +493,15 @@ export function ChatView({
     if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > LONG_PRESS_SLOP_PX) clearLongPressTimer();
   }
 
+  /** Arms the one-block `transition: transform` for its snap-back-to-rest
+   *  animation, then clears it once the transition's had time to finish —
+   *  see `snappingBackId`'s doc comment for why this is scoped to a single
+   *  block instead of living on every block permanently. */
+  function armSnapBack(id: string) {
+    setSnappingBackId(id);
+    window.setTimeout(() => setSnappingBackId((cur) => (cur === id ? null : cur)), SWIPE_SNAP_BACK_MS + 50);
+  }
+
   function onBubblePointerUp() {
     clearLongPressTimer();
     longPressStartRef.current = null;
@@ -499,6 +516,7 @@ export function ChatView({
       suppressClickRef.current = true;
       const travel = swipeState && swipeState.id === swipe.msg.id ? Math.abs(swipeState.dx) : 0;
       if (travel >= SWIPE_REPLY_THRESHOLD_PX) startReply(swipe.msg);
+      if (travel > 0) armSnapBack(swipe.msg.id);
     }
     setSwipeState(null);
   }
@@ -508,7 +526,11 @@ export function ChatView({
     // with no side effects, same posture as MediaViewer's pointer-cancel handlers.
     clearLongPressTimer();
     longPressStartRef.current = null;
+    const swipe = swipeGestureRef.current;
     swipeGestureRef.current = null;
+    if (swipe?.engaged && swipeState && swipeState.id === swipe.msg.id && swipeState.dx !== 0) {
+      armSnapBack(swipe.msg.id);
+    }
     setSwipeState(null);
   }
 
@@ -837,6 +859,7 @@ export function ChatView({
                 onToggleReaction={toggleReaction}
                 onJumpToMessage={jumpToMessage}
                 swipeState={swipeState}
+                snappingBackId={snappingBackId}
                 onPointerDownBlock={onBubblePointerDown}
                 onPointerMoveBlock={onBubblePointerMove}
                 onPointerUpBlock={onBubblePointerUp}
@@ -1031,6 +1054,7 @@ function RunGroup({
   onToggleReaction,
   onJumpToMessage,
   swipeState,
+  snappingBackId,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -1060,6 +1084,9 @@ function RunGroup({
   /** Post-MVP: which block (if any) is mid swipe-to-reply and how far, so
    *  only that one block's `MessageBlockRow` applies a live translateX. */
   swipeState: { id: string; dx: number } | null;
+  /** Which block (if any) is currently animating its swipe offset back to
+   *  rest — see `ChatView.snappingBackId`'s doc comment. */
+  snappingBackId: string | null;
   onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
   onPointerUpBlock: () => void;
@@ -1098,6 +1125,7 @@ function RunGroup({
           onToggleReaction={onToggleReaction}
           onJumpToMessage={onJumpToMessage}
           swipeDx={swipeState?.id === blockMessages(block)[0]!.id ? swipeState.dx : 0}
+          snappingBack={snappingBackId === blockMessages(block)[0]!.id}
           onPointerDownBlock={onPointerDownBlock}
           onPointerMoveBlock={onPointerMoveBlock}
           onPointerUpBlock={onPointerUpBlock}
@@ -1157,6 +1185,7 @@ function MessageBlockRow({
   onToggleReaction,
   onJumpToMessage,
   swipeDx,
+  snappingBack,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -1189,6 +1218,10 @@ function MessageBlockRow({
    *  currently being dragged — see `RunGroup`'s `swipeState` lookup). Signed:
    *  negative for `mine` (dragged left), positive for others (dragged right). */
   swipeDx: number;
+  /** True only for the one block currently animating its swipe offset back
+   *  to rest — see `ChatView.snappingBackId`'s doc comment for why this
+   *  needs to be scoped this tightly rather than an always-on `transition`. */
+  snappingBack: boolean;
   onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
   onPointerUpBlock: () => void;
@@ -1277,7 +1310,16 @@ function MessageBlockRow({
           WebkitUserSelect: 'none',
           userSelect: 'none',
           transform: swipeDx ? `translateX(${swipeDx}px)` : undefined,
-          transition: swipeDx ? undefined : 'transform 150ms ease-out', // only snap-back animates; live drag tracks the pointer 1:1
+          // `transition` is declared *only* on the one block currently
+          // snapping back (`snappingBack`) — never as an always-on style,
+          // even though it'd be a no-op transform-wise whenever `swipeDx` is
+          // 0. An unconditional `transition: transform` on every bubble was
+          // exactly that "harmless no-op" until real Android PWA testing
+          // showed it was enough to promote every bubble onto its own
+          // compositor layer, which then ignored the focus menu's z-index
+          // entirely (2026-07-22 — see BACKBONE §15). Live drag still tracks
+          // the pointer 1:1 with no transition.
+          transition: snappingBack ? `transform ${SWIPE_SNAP_BACK_MS}ms ease-out` : undefined,
         }}
       >
         {/* Bare media's quote sits just above the media itself, as its own
