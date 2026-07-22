@@ -1,5 +1,6 @@
 import { Layers, Play, X } from 'lucide-react';
 import type { Message } from '@den/shared';
+import { useBackHandler } from '../lib/backStack';
 
 /**
  * Fanned photo/video stack (docs/UI_REVAMP.md UI-7).
@@ -76,6 +77,11 @@ export function MediaGridSheet({
   onPick: (index: number) => void;
   onClose: () => void;
 }) {
+  // System back gesture / browser back closes the sheet (matches the X and the
+  // backdrop tap), instead of unwinding the chat → chat list. Opening the
+  // viewer from a tile registers the viewer's own handler on top (LIFO), so
+  // back there closes the viewer first, then this sheet, then leaves the chat.
+  useBackHandler(true, onClose);
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col bg-black/90"
