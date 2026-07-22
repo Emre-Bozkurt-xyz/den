@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Copy, Hand, Images, Reply as ReplyIcon, Trash2, X } from 'lucide-react';
 import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type ReplyPreview } from '@den/shared';
@@ -131,9 +131,17 @@ export function ChatView({
   // not media, so picking a tile can seed the viewer in stack order.
   const [stackSheet, setStackSheet] = useState<Message[] | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
   const jumpedRef = useRef(false);
+  // Scroll metrics captured right before an older page is fetched, so the
+  // layout effect below can restore the visual position after the prepend
+  // (iOS Safari has no native scroll anchoring — manual restore is required).
+  const prependRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  // In-flight guard for scroll-triggered older-page fetches: `isFetchingNextPage`
+  // only flips true on the *next* render, so momentum-scroll events between the
+  // fetch call and that render would double-fire without it.
+  const loadingOlderRef = useRef(false);
   const name = chatDisplayName(chat, me.id);
 
   // Post-MVP: the message the composer is currently replying to (the reply
@@ -231,9 +239,66 @@ export function ChatView({
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [chat.id]);
 
+  // Restore the visual scroll position after an older page prepends — runs
+  // before paint so the list never visibly jumps. Only fires when
+  // `loadOlder` captured metrics; jump-to-message paging deliberately
+  // doesn't, since it ends in its own scrollIntoView.
+  useLayoutEffect(() => {
+    const saved = prependRef.current;
+    const el = scrollerRef.current;
+    if (saved && el && el.scrollHeight !== saved.scrollHeight) {
+      el.scrollTop = saved.scrollTop + (el.scrollHeight - saved.scrollHeight);
+      prependRef.current = null;
+    }
+  }, [messages.length]);
+
   useEffect(() => {
-    if (!jumpToMessageId) bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [chat.id, messages.length, jumpToMessageId]);
+    if (!isFetchingNextPage) {
+      loadingOlderRef.current = false;
+      // Restore (above) already consumed this if a page landed; clearing here
+      // covers a fetch that prepended nothing, so stale metrics can't shift
+      // the list on some later unrelated length change.
+      prependRef.current = null;
+    }
+  }, [isFetchingNextPage]);
+
+  /** Fetch the next (older) page, capturing scroll metrics first so the
+   *  layout effect above can keep the viewport visually anchored. */
+  function loadOlder() {
+    const el = scrollerRef.current;
+    if (!el || loadingOlderRef.current || !hasNextPage || isFetchingNextPage) return;
+    loadingOlderRef.current = true;
+    prependRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
+    void fetchNextPage();
+  }
+
+  // Infinite scroll upward: start fetching once the user is within a couple
+  // of screens of the top, so older history is usually there before they
+  // reach it.
+  function onScrollerScroll() {
+    const el = scrollerRef.current;
+    if (el && el.scrollTop < 300) loadOlder();
+  }
+
+  // Scroll the container itself to its full scrollHeight rather than
+  // scrollIntoView on a bottom sentinel — the sentinel sits above the
+  // container's own bottom padding, so aligning to it left that padding
+  // still scrollable (a dangling gap after every send). Keyed on the
+  // *newest* message id, not list length — older pages prepending must not
+  // yank the reader back to the bottom.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!jumpToMessageId && el) el.scrollTop = el.scrollHeight;
+  }, [chat.id, lastMessageId, jumpToMessageId]);
+
+  // Short chats: if the first page doesn't even fill the viewport there's no
+  // scrollbar, so the scroll handler alone could never trigger a fetch. Runs
+  // after the scroll-to-bottom effect above, so a full viewport is already
+  // scrolled down (scrollTop > 0) and won't fetch spuriously.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (el && hasNextPage && !isFetchingNextPage && el.scrollHeight <= el.clientHeight) loadOlder();
+  });
 
   // Keyset pagination is newest-first, so an older target message may not be
   // in the first page yet — keep paging back until it shows up (or we run
@@ -809,17 +874,9 @@ export function ChatView({
         </p>
       )}
 
-      <div className="flex-1 overflow-y-auto px-4 py-3">
-        {hasNextPage && (
-          <div className="mb-3 flex justify-center">
-            <button
-              onClick={() => void fetchNextPage()}
-              disabled={isFetchingNextPage}
-              className="rounded-sm border border-border px-3 py-1 text-xs text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-60"
-            >
-              {isFetchingNextPage ? 'Loading…' : 'Load older messages'}
-            </button>
-          </div>
+      <div ref={scrollerRef} onScroll={onScrollerScroll} className="flex-1 overflow-y-auto px-4 py-3">
+        {isFetchingNextPage && (
+          <p className="mb-3 text-center text-xs text-text-muted">Loading older messages…</p>
         )}
 
         {isLoading && <p className="text-center text-sm text-text-muted">Loading…</p>}
@@ -869,7 +926,6 @@ export function ChatView({
             ),
           )}
         </div>
-        <div ref={bottomRef} />
       </div>
 
       {undoIds && (
