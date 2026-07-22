@@ -3,8 +3,15 @@
  * handler (ws.ts message.send). Keeps DB access in one place; callers own the
  * realtime side effects (WS fanout, push) since those differ per entry point.
  */
-import { and, desc, eq, gt, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
-import { ChatLimits, type ChatSummary, type CreateChatRequest, type Message as MessageDto, type MessagesResponse } from '@den/shared';
+import { and, desc, eq, gt, gte, ilike, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
+import {
+  ChatLimits,
+  type ChatSummary,
+  type CreateChatRequest,
+  type Message as MessageDto,
+  type MessagesResponse,
+  type SearchMessagesResponse,
+} from '@den/shared';
 import { db } from '../db/index.js';
 import { chatMembers, chats, messages, users } from '../db/schema.js';
 import { toChatSummary, toMessage, type ChatRow, type UserRow } from '../mappers.js';
@@ -193,6 +200,97 @@ export async function getMessagesPage(
       ),
     ),
     nextCursor,
+  };
+}
+
+/** Parsed/validated search filters — the route (chats.ts) does the raw
+ *  querystring parsing + validation error throwing; this only shapes what it
+ *  hands off. `null` fields mean "not filtering on this". */
+export interface SearchFilters {
+  q: string | null;
+  from: bigint | null;
+  since: Date | null;
+  until: Date | null;
+}
+
+/** Escapes ILIKE's special characters so user input is matched as a literal
+ *  substring (docs/MESSAGE_SEARCH.md §3.3) — an unescaped `%`/`_` would turn
+ *  the pattern into a wildcard, which is both a correctness bug (surprise
+ *  matches) and a cheap way to force a full-table scan. Backslash is
+ *  Postgres's default ILIKE escape character, so escaping it first (so a
+ *  literal backslash in the input doesn't itself become an escape) then
+ *  escaping `%`/`_` is enough — no ESCAPE clause needed. */
+function escapeLikePattern(raw: string): string {
+  return raw.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
+
+/** GET /chats/:id/messages/search — keyset pagination on id DESC, same shape
+ *  as `getMessagesPage`. Deliberately does *not* add a blanket
+ *  `body IS NOT NULL`: when `q` is set, `ILIKE` against a NULL body is
+ *  already false (excluding captionless media naturally); when `q` is
+ *  absent (a filter-only search — "everything Alice sent in March",
+ *  docs/MESSAGE_SEARCH.md §1), captionless media messages must still be
+ *  eligible, and the client renders them with a kind label (§4.4). System
+ *  messages are always excluded — they're app-generated noise, not
+ *  something a user searched for. */
+export async function searchMessages(
+  chatId: bigint,
+  filters: SearchFilters,
+  before: bigint | null,
+  limit: number,
+  viewerId: bigint,
+): Promise<SearchMessagesResponse> {
+  const baseConditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), ne(messages.kind, 'system')];
+  if (filters.q) baseConditions.push(ilike(messages.body, `%${escapeLikePattern(filters.q)}%`));
+  if (filters.from !== null) baseConditions.push(eq(messages.senderId, filters.from));
+  if (filters.since) baseConditions.push(gte(messages.createdAt, filters.since));
+  if (filters.until) {
+    // `until` is a UTC day bound (inclusive) — the exclusive upper bound is
+    // the start of the *next* day (docs/MESSAGE_SEARCH.md §3.3).
+    const untilExclusive = new Date(filters.until.getTime() + 24 * 60 * 60 * 1000);
+    baseConditions.push(lt(messages.createdAt, untilExclusive));
+  }
+
+  const conditions = before !== null ? [...baseConditions, lt(messages.id, before)] : baseConditions;
+
+  const rows = await db
+    .select()
+    .from(messages)
+    .where(and(...conditions))
+    .orderBy(desc(messages.id))
+    .limit(limit + 1);
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  const replyToIds = page.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
+  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+    mediaInfoForMessages(page.map((r) => r.id)),
+    replyPreviewsForMessages(replyToIds),
+    reactionsForMessages(page.map((r) => r.id), viewerId),
+  ]);
+
+  // Total count only on the first page (§3.3) — repaginating the same query
+  // on every `before` page would be a wasted COUNT(*) the client never uses.
+  let totalCount: number | null = null;
+  if (before === null) {
+    const countRows = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(messages)
+      .where(and(...baseConditions));
+    totalCount = countRows[0]?.count ?? 0;
+  }
+
+  return {
+    messages: page.map((r) =>
+      toMessage(
+        r,
+        mediaMap.get(r.id.toString()) ?? null,
+        r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
+        reactionsMap.get(r.id.toString()) ?? [],
+      ),
+    ),
+    nextCursor: hasMore ? page[page.length - 1]!.id.toString() : null,
+    totalCount,
   };
 }
 

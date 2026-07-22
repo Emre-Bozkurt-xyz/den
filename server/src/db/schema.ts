@@ -17,6 +17,10 @@
  * Migration 005 (post-MVP): replies + reactions.
  *   messages.reply_to_message_id (self-FK) · message_reactions
  *
+ * Migration 006 (post-MVP, docs/MESSAGE_SEARCH.md): message search.
+ *   pg_trgm extension + gin trigram index on messages.body (substring
+ *   search, not tsvector FTS — see the plan doc for why).
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -215,6 +219,13 @@ export const messages = pgTable(
       sql`${t.kind} IN ('text','image','video','voice','system')`,
     ),
     index('idx_messages_chat').on(t.chatId, t.id.desc()),
+    // Substring search over body (text + captions), not word/stemmer-based
+    // FTS — pg_trgm handles mixed-language/partial-word matches the way
+    // Discord-style search is expected to (docs/MESSAGE_SEARCH.md §3.1).
+    // Requires `CREATE EXTENSION pg_trgm` (hand-added to the generated
+    // migration, same convention as citext in migration 001 — see
+    // CITEXT_EXTENSION below).
+    index('idx_messages_body_trgm').using('gin', t.body.op('gin_trgm_ops')),
   ],
 );
 
@@ -309,3 +320,9 @@ export const messageReactions = pgTable(
 
 /** Raw SQL run before the tables in migration 001 (citext type must exist). */
 export const CITEXT_EXTENSION = sql`CREATE EXTENSION IF NOT EXISTS citext`;
+
+/** Raw SQL hand-added to migration 006 (pg_trgm's gin index needs the
+ *  extension present first) — see idx_messages_body_trgm above. Standard
+ *  Postgres contrib module; present in the postgres:16-alpine compose image
+ *  and any normal VPS Postgres install. */
+export const PG_TRGM_EXTENSION = sql`CREATE EXTENSION IF NOT EXISTS pg_trgm`;

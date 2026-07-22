@@ -16,10 +16,21 @@ import {
   type MessageIdsRequest,
   type MessagesResponse,
   type ReactRequest,
+  type SearchMessagesQuery,
+  type SearchMessagesResponse,
 } from '@den/shared';
 import { requireAuth } from '../auth/session.js';
 import { assertMember } from '../chat/membership.js';
-import { createChat, getMessagesPage, listChatsForUser, markRead, restoreMessages, softDeleteMessages } from '../chat/service.js';
+import {
+  createChat,
+  getMessagesPage,
+  listChatsForUser,
+  markRead,
+  restoreMessages,
+  searchMessages,
+  softDeleteMessages,
+  type SearchFilters,
+} from '../chat/service.js';
 import { addReaction, removeReaction } from '../chat/reactions.js';
 import { chatRoom, userRoom } from '../realtime/rooms.js';
 import { validation } from '../errors.js';
@@ -63,6 +74,25 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       const limit = clampLimit(req.query.limit);
 
       const res: MessagesResponse = await getMessagesPage(chatId, before, limit, req.user!.id);
+      return res;
+    },
+  );
+
+  // Per-chat message search (docs/MESSAGE_SEARCH.md). Same auth shape as the
+  // plain history route above: assertMember before touching anything (hard
+  // invariant 1) — search must never widen visibility across chats.
+  app.get<{ Params: { id: string }; Querystring: SearchMessagesQuery }>(
+    '/chats/:id/messages/search',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      await assertMember(req.user!.id, chatId);
+
+      const filters = parseSearchFilters(req.query);
+      const before = req.query.before ? parseId(req.query.before) : null;
+      const limit = clampSearchLimit(req.query.limit);
+
+      const res: SearchMessagesResponse = await searchMessages(chatId, filters, before, limit, req.user!.id);
       return res;
     },
   );
@@ -185,4 +215,40 @@ function clampLimit(raw: string | undefined): number {
   const n = raw ? Number(raw) : ChatLimits.messagesPageDefault;
   if (!Number.isFinite(n) || n <= 0) return ChatLimits.messagesPageDefault;
   return Math.min(n, ChatLimits.messagesPageMax);
+}
+
+function clampSearchLimit(raw: string | undefined): number {
+  const n = raw ? Number(raw) : ChatLimits.searchPageDefault;
+  if (!Number.isFinite(n) || n <= 0) return ChatLimits.searchPageDefault;
+  return Math.min(n, ChatLimits.searchPageMax);
+}
+
+/** Parses a `since`/`until` querystring value (a bare `YYYY-MM-DD` date, no
+ *  time component — docs/MESSAGE_SEARCH.md §3.3 "keep it simple and document
+ *  it") into its UTC start-of-day instant. */
+function parseDateOnly(raw: string, label: 'since' | 'until'): Date {
+  const d = new Date(`${raw}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) throw validation(`invalid ${label} date`);
+  return d;
+}
+
+/** Validates the search querystring (docs/MESSAGE_SEARCH.md §3.3): at least
+ *  one of q/from/since/until required, `q` trimmed and length-capped, `from`
+ *  must parse as an id, dates must parse, and `since` can't be after
+ *  `until`. */
+function parseSearchFilters(query: SearchMessagesQuery): SearchFilters {
+  const q = typeof query.q === 'string' ? query.q.trim() : '';
+  const from = query.from ? parseId(query.from) : null;
+  const since = query.since ? parseDateOnly(query.since, 'since') : null;
+  const until = query.until ? parseDateOnly(query.until, 'until') : null;
+
+  if (!q && from === null && since === null && until === null) throw validation('empty search');
+  if (q.length > ChatLimits.searchQueryMax) {
+    throw validation(`search text too long (max ${ChatLimits.searchQueryMax} characters)`);
+  }
+  if (since !== null && until !== null && since.getTime() > until.getTime()) {
+    throw validation('since must not be after until');
+  }
+
+  return { q: q || null, from, since, until };
 }

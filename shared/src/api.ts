@@ -206,7 +206,33 @@ export const ChatLimits = {
   messagesPageMax: 100,
   maxGroupMembers: 50,
   deleteBatchMax: 100,
+  searchPageDefault: 25,
+  searchPageMax: 50,
+  searchQueryMax: 256,
 } as const;
+
+// ─── message search (post-MVP, docs/MESSAGE_SEARCH.md) ──────────────────────
+
+/** GET /chats/:id/messages/search?... — keyset-paginated, id DESC. Every
+ *  field is optional but at least one of `q`/`from`/`since`/`until` must be
+ *  present (server 400s otherwise) — a bare "list everything" search isn't
+ *  supported. `q` is a plain, case-insensitive substring match over
+ *  `messages.body` (text messages *and* media captions); no token parsing,
+ *  no fuzzy/stemmed ranking (docs/MESSAGE_SEARCH.md §1 icebox list). */
+export interface SearchMessagesQuery {
+  q?: string;
+  from?: string; // sender userId
+  since?: string; // ISO date (inclusive, start of day, UTC)
+  until?: string; // ISO date (inclusive, end of day, UTC)
+  before?: string; // keyset cursor (message id)
+  limit?: string;
+}
+
+export interface SearchMessagesResponse {
+  messages: Message[]; // reuses the Message DTO — replies/reactions/media come along free
+  nextCursor: string | null;
+  totalCount: number | null; // populated on the first page only (no `before`); null on later pages
+}
 
 // ─── reactions (post-MVP, BACKBONE §5/§6) ───────────────────────────────────
 
