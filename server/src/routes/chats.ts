@@ -15,10 +15,12 @@ import {
   type Message as MessageDto,
   type MessageIdsRequest,
   type MessagesResponse,
+  type ReactRequest,
 } from '@den/shared';
 import { requireAuth } from '../auth/session.js';
 import { assertMember } from '../chat/membership.js';
 import { createChat, getMessagesPage, listChatsForUser, markRead, restoreMessages, softDeleteMessages } from '../chat/service.js';
+import { addReaction, removeReaction } from '../chat/reactions.js';
 import { chatRoom, userRoom } from '../realtime/rooms.js';
 import { validation } from '../errors.js';
 
@@ -60,7 +62,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       const before = req.query.before ? parseId(req.query.before) : null;
       const limit = clampLimit(req.query.limit);
 
-      const res: MessagesResponse = await getMessagesPage(chatId, before, limit);
+      const res: MessagesResponse = await getMessagesPage(chatId, before, limit, req.user!.id);
       return res;
     },
   );
@@ -114,6 +116,59 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
           .emit('ws', makeEnvelope(WsType.MessageRestored, { chatId: chatId.toString(), messages: restored }));
       }
       return { messages: restored };
+    },
+  );
+
+  // Reactions (post-MVP). Membership is asserted before touching anything
+  // (CLAUDE.md hard invariant 1); add/remove are separate idempotent verbs,
+  // not a toggle — see ReactRequest in @den/shared.
+  app.post<{ Params: { id: string; messageId: string }; Body: ReactRequest }>(
+    '/chats/:id/messages/:messageId/reactions',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      await assertMember(req.user!.id, chatId);
+      const messageId = parseId(req.params.messageId);
+      const rawEmoji = req.body?.emoji;
+      if (typeof rawEmoji !== 'string') throw validation('emoji required');
+      const emoji = rawEmoji.trim();
+
+      await addReaction(chatId, messageId, req.user!.id, emoji);
+
+      app.io?.to(chatRoom(chatId)).emit(
+        'ws',
+        makeEnvelope(WsType.ReactionAdded, {
+          chatId: chatId.toString(),
+          messageId: messageId.toString(),
+          emoji,
+          userId: req.user!.id.toString(),
+        }),
+      );
+      return { ok: true };
+    },
+  );
+
+  app.delete<{ Params: { id: string; messageId: string; emoji: string } }>(
+    '/chats/:id/messages/:messageId/reactions/:emoji',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      await assertMember(req.user!.id, chatId);
+      const messageId = parseId(req.params.messageId);
+      const emoji = decodeURIComponent(req.params.emoji);
+
+      await removeReaction(chatId, messageId, req.user!.id, emoji);
+
+      app.io?.to(chatRoom(chatId)).emit(
+        'ws',
+        makeEnvelope(WsType.ReactionRemoved, {
+          chatId: chatId.toString(),
+          messageId: messageId.toString(),
+          emoji,
+          userId: req.user!.id.toString(),
+        }),
+      );
+      return { ok: true };
     },
   );
 }

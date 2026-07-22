@@ -55,6 +55,9 @@ export const WsType = {
   // message lifecycle (Stage 6 / §2 item 11)
   MessageDeleted: 'message.deleted',
   MessageRestored: 'message.restored',
+  // reactions (post-MVP)
+  ReactionAdded: 'reaction.added',
+  ReactionRemoved: 'reaction.removed',
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
@@ -67,6 +70,8 @@ export type WsTypeName = (typeof WsType)[keyof typeof WsType];
 export interface MessageSendPayload {
   chatId: string;
   body: string;
+  /** Post-MVP: id of the message this one replies to. */
+  replyToId?: string;
 }
 
 /** Server → client (room broadcast). */
@@ -133,6 +138,23 @@ export interface MessageDeletedPayload {
 export interface MessageRestoredPayload {
   chatId: string;
   messages: import('./api.js').Message[];
+}
+
+/** Server → client (room broadcast), post-MVP: someone reacted to a message.
+ *  `userId` lets every client recompute `mine` locally without a refetch. */
+export interface ReactionAddedPayload {
+  chatId: string;
+  messageId: string;
+  emoji: string;
+  userId: string;
+}
+
+/** Server → client (room broadcast), post-MVP: a reaction was removed. */
+export interface ReactionRemovedPayload {
+  chatId: string;
+  messageId: string;
+  emoji: string;
+  userId: string;
 }
 
 /** Build a server→client envelope with a fresh timestamp. */

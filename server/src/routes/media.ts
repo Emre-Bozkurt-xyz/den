@@ -54,7 +54,16 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       if (chatId === null) throw validation('media not found');
       await assertMember(req.user!.id, chatId);
 
-      const result = await completeUpload(mediaId, req.user!.id, req.body?.body);
+      let replyToId: bigint | undefined;
+      if (typeof req.body?.replyToId === 'string' && req.body.replyToId) {
+        try {
+          replyToId = BigInt(req.body.replyToId);
+        } catch {
+          throw validation('invalid replyToId');
+        }
+      }
+
+      const result = await completeUpload(mediaId, req.user!.id, req.body?.body, replyToId);
 
       // Placeholder fanout now (§7 step 4) — receivers see "processing", not silence.
       if (app.io) {

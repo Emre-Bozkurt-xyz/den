@@ -12,6 +12,8 @@ import { forbidden, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
 import { assertMember } from './membership.js';
 import { mediaInfoForMessages } from '../media/service.js';
+import { reactionsForMessages } from './reactions.js';
+import { assertReplyTarget, replyPreviewFor, replyPreviewsForMessages } from './replies.js';
 
 async function usersByIds(ids: bigint[]): Promise<UserRow[]> {
   if (ids.length === 0) return [];
@@ -35,8 +37,14 @@ async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  const mediaMap = await mediaInfoForMessages([row.id]);
-  return toMessage(row, mediaMap.get(row.id.toString()) ?? null);
+  // Single-row reads (media + reply preview) are cheap here — a chat-list
+  // preview is one row, not a page, so batching would be overkill. Reactions
+  // stay [] for the preview (chat-list rows don't render reaction chips).
+  const [mediaMap, replyTo] = await Promise.all([
+    mediaInfoForMessages([row.id]),
+    replyPreviewFor(row.replyToMessageId),
+  ]);
+  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, []);
 }
 
 async function unreadCountFor(chatId: bigint, viewerId: bigint, lastReadId: bigint | null): Promise<number> {
@@ -149,8 +157,14 @@ export async function createChat(creatorId: bigint, body: CreateChatRequest): Pr
   return { chat: await buildSummary(chat, creatorId, null), created: true, newMemberIds: memberIds };
 }
 
-/** GET /chats/:id/messages?before=&limit= — keyset pagination on id DESC. */
-export async function getMessagesPage(chatId: bigint, before: bigint | null, limit: number): Promise<MessagesResponse> {
+/** GET /chats/:id/messages?before=&limit= — keyset pagination on id DESC.
+ *  `viewerId` is needed to compute `reactions[].mine` per row. */
+export async function getMessagesPage(
+  chatId: bigint,
+  before: bigint | null,
+  limit: number,
+  viewerId: bigint,
+): Promise<MessagesResponse> {
   const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt)];
   if (before !== null) conditions.push(lt(messages.id, before));
 
@@ -161,9 +175,25 @@ export async function getMessagesPage(chatId: bigint, before: bigint | null, lim
     .orderBy(desc(messages.id))
     .limit(limit);
 
-  const mediaMap = await mediaInfoForMessages(rows.map((r) => r.id));
+  const replyToIds = rows.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
+  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+    mediaInfoForMessages(rows.map((r) => r.id)),
+    replyPreviewsForMessages(replyToIds),
+    reactionsForMessages(rows.map((r) => r.id), viewerId),
+  ]);
+
   const nextCursor = rows.length === limit ? rows[rows.length - 1]!.id.toString() : null;
-  return { messages: rows.map((r) => toMessage(r, mediaMap.get(r.id.toString()) ?? null)), nextCursor };
+  return {
+    messages: rows.map((r) =>
+      toMessage(
+        r,
+        mediaMap.get(r.id.toString()) ?? null,
+        r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
+        reactionsMap.get(r.id.toString()) ?? [],
+      ),
+    ),
+    nextCursor,
+  };
 }
 
 export async function markRead(chatId: bigint, userId: bigint, messageId: bigint): Promise<void> {
@@ -174,15 +204,28 @@ export async function markRead(chatId: bigint, userId: bigint, messageId: bigint
 }
 
 /** Persist a text message. Stage 2 only supports `kind: 'text'` — media kinds
- *  arrive in Stage 3 via the upload-complete flow, not this path. */
-export async function sendTextMessage(chatId: bigint, senderId: bigint, body: string): Promise<MessageDto> {
+ *  arrive in Stage 3 via the upload-complete flow, not this path. `replyToId`
+ *  is post-MVP; a brand-new message never has reactions yet. */
+export async function sendTextMessage(
+  chatId: bigint,
+  senderId: bigint,
+  body: string,
+  replyToId?: bigint,
+): Promise<MessageDto> {
   const trimmed = body.trim();
   if (!trimmed) throw validation('message body cannot be empty');
   if (trimmed.length > ChatLimits.messageBodyMax) {
     throw validation(`message too long (max ${ChatLimits.messageBodyMax} characters)`);
   }
-  const inserted = await db.insert(messages).values({ chatId, senderId, kind: 'text', body: trimmed }).returning();
-  return toMessage(inserted[0]!);
+  if (replyToId !== undefined) await assertReplyTarget(chatId, replyToId);
+
+  const inserted = await db
+    .insert(messages)
+    .values({ chatId, senderId, kind: 'text', body: trimmed, replyToMessageId: replyToId ?? null })
+    .returning();
+  const row = inserted[0]!;
+  const replyTo = await replyPreviewFor(row.replyToMessageId);
+  return toMessage(row, null, replyTo, []);
 }
 
 // ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/MESSAGE_DELETE.md) ──
@@ -251,6 +294,18 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
   await db.update(messages).set({ deletedAt: null }).where(inArray(messages.id, toRestore));
 
   const restoredRows = await db.select().from(messages).where(inArray(messages.id, toRestore));
-  const mediaMap = await mediaInfoForMessages(toRestore);
-  return restoredRows.map((r) => toMessage(r, mediaMap.get(r.id.toString()) ?? null));
+  const replyToIds = restoredRows.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
+  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+    mediaInfoForMessages(toRestore),
+    replyPreviewsForMessages(replyToIds),
+    reactionsForMessages(toRestore, viewerId),
+  ]);
+  return restoredRows.map((r) =>
+    toMessage(
+      r,
+      mediaMap.get(r.id.toString()) ?? null,
+      r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
+      reactionsMap.get(r.id.toString()) ?? [],
+    ),
+  );
 }

@@ -186,6 +186,8 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       body: trimmed,
       createdAt: new Date().toISOString(),
       media: null,
+      replyTo: null,
+      reactions: [],
     };
 
     pendingRef.current.set(reqId, { chatId, tempId });

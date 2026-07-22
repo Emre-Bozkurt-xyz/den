@@ -123,6 +123,24 @@ export interface SendFriendRequestBody {
 
 export type MessageKind = 'text' | 'image' | 'video' | 'voice' | 'system';
 
+/** Lightweight preview of the message a reply points at (post-MVP). Carried
+ *  inline on `Message.replyTo` so the client can render a reply strip without
+ *  a second fetch — the referenced message may be off-page or even deleted. */
+export interface ReplyPreview {
+  id: string; // referenced message id
+  senderId: string;
+  kind: MessageKind;
+  preview: string; // short text: body snippet (<=120 chars) or media label; '' if none
+  deleted: boolean; // referenced message is soft-deleted
+}
+
+/** One emoji's aggregate on a message (post-MVP reactions). */
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  mine: boolean; // does the requesting user have this emoji on this message
+}
+
 export interface Message {
   id: string;
   chatId: string;
@@ -132,6 +150,10 @@ export interface Message {
   createdAt: string; // ISO 8601
   /** Present iff kind is 'image'|'video'|'voice' (Stage 3). */
   media: MediaInfo | null;
+  /** Post-MVP: null when this message isn't a reply. */
+  replyTo: ReplyPreview | null;
+  /** Post-MVP: aggregated per-emoji counts; [] when the message has none. */
+  reactions: ReactionSummary[];
 }
 
 /** DMs are 2-member chats with isGroup=false — never special-cased (BACKBONE §5/§11). */
@@ -186,6 +208,20 @@ export const ChatLimits = {
   deleteBatchMax: 100,
 } as const;
 
+// ─── reactions (post-MVP, BACKBONE §5/§6) ───────────────────────────────────
+
+/** POST /chats/:id/messages/:messageId/reactions. Toggling off is a DELETE
+ *  to .../reactions/:emoji (emoji URL-encoded), not this body — add/remove
+ *  are two distinct idempotent verbs, not a toggle payload. */
+export interface ReactRequest {
+  emoji: string;
+}
+
+export const ReactionLimits = {
+  emojiMaxLength: 32,
+  quickEmojis: ['❤️', '😂', '👍', '😮', '😢', '🙏'],
+} as const;
+
 // ─── media (Stage 3, BACKBONE §5/§6/§7) ─────────────────────────────────────
 
 export type MediaKind = 'image' | 'video' | 'voice';
@@ -223,9 +259,13 @@ export interface CreateUploadResponse {
   requiredContentType: string;
 }
 
-/** POST /media/:id/complete. Optional `body` = caption text on the message. */
+/** POST /media/:id/complete. Optional `body` = caption text on the message.
+ *  Optional `replyToId` (post-MVP): the message this upload replies to —
+ *  applied here rather than at /media/uploads because the message row is
+ *  created before the client has a chance to set it (§7 upload flow). */
 export interface CompleteUploadRequest {
   body?: string;
+  replyToId?: string;
 }
 
 /** GET /media/:id/url response — fresh presigned GET pair, re-mintable any

@@ -14,6 +14,9 @@
  * Migration 004 (Stage 5): tags from BACKBONE §5.
  *   tags · media_tags
  *
+ * Migration 005 (post-MVP): replies + reactions.
+ *   messages.reply_to_message_id (self-FK) · message_reactions
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -31,6 +34,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 /** Case-insensitive text. Requires `CREATE EXTENSION citext` (in migration 001). */
@@ -198,6 +202,12 @@ export const messages = pgTable(
     body: text('body'), // text content or caption
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    // Post-MVP (migration 005): self-referencing FK for message replies.
+    // Nullable — most messages aren't replies. No ON DELETE behavior specified;
+    // soft-deletes mean the referenced row is never actually removed (§5/CLAUDE.md #8).
+    replyToMessageId: bigint('reply_to_message_id', { mode: 'bigint' }).references(
+      (): AnyPgColumn => messages.id,
+    ),
   },
   (t) => [
     check(
@@ -274,6 +284,26 @@ export const mediaTags = pgTable(
   (t) => [
     primaryKey({ columns: [t.mediaId, t.tagId] }),
     index('idx_media_tags_tag').on(t.tagId, t.mediaId), // the gallery-query index (§5)
+  ],
+);
+
+// ─── message reactions (post-MVP, migration 005) ────────────────────────
+
+export const messageReactions = pgTable(
+  'message_reactions',
+  {
+    messageId: bigint('message_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => messages.id),
+    userId: bigint('user_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => users.id),
+    emoji: text('emoji').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.messageId, t.userId, t.emoji] }),
+    index('idx_message_reactions_message').on(t.messageId), // aggregation query
   ],
 );
 
