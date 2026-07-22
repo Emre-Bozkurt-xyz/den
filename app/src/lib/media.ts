@@ -30,7 +30,9 @@ function putWithProgress(url: string, body: Blob, contentType: string, onProgres
 
 /** Full §7 upload flow: mint → PUT → complete. The resulting message (a
  *  'processing' placeholder) also arrives over WS to every member, including
- *  this tab — we don't need to hand-insert it into the query cache here. */
+ *  this tab — we don't need to hand-insert it into the query cache here.
+ *  `replyToId` (post-MVP) is threaded into the complete call the same way the
+ *  caption is — the message row doesn't exist yet at /media/uploads time. */
 export async function uploadMedia(
   chatId: string,
   file: Blob,
@@ -38,6 +40,7 @@ export async function uploadMedia(
   mime: string,
   caption: string | undefined,
   onProgress?: (pct: number) => void,
+  replyToId?: string,
 ): Promise<Message> {
   const createBody: CreateUploadRequest = { chatId, kind, mime, sizeBytes: file.size };
   const created = await api<CreateUploadResponse>('/api/media/uploads', {
@@ -47,7 +50,10 @@ export async function uploadMedia(
 
   await putWithProgress(created.presignedPutUrl, file, created.requiredContentType, onProgress);
 
-  const completeBody: CompleteUploadRequest = caption?.trim() ? { body: caption.trim() } : {};
+  const completeBody: CompleteUploadRequest = {
+    ...(caption?.trim() ? { body: caption.trim() } : {}),
+    ...(replyToId ? { replyToId } : {}),
+  };
   return api<Message>(`/api/media/${created.mediaId}/complete`, {
     method: 'POST',
     body: JSON.stringify(completeBody),

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { CheckSquare, Copy, Trash2 } from 'lucide-react';
+import { CheckSquare, Copy, Reply, Trash2 } from 'lucide-react';
 import type { MeResponse, Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
@@ -48,6 +48,7 @@ export function MessageFocusMenu({
   sourceEl,
   me,
   onClose,
+  onReply,
   onCopy,
   onSelect,
   onDelete,
@@ -61,6 +62,10 @@ export function MessageFocusMenu({
   sourceEl: HTMLElement;
   me: MeResponse;
   onClose: () => void;
+  /** Post-MVP: sets `ChatView`'s `replyingTo`. The caller (`ChatView`) also
+   *  closes the menu — this component doesn't call `onClose` itself, mirroring
+   *  how `onCopy`/`onSelect`/`onDelete` already work below. */
+  onReply: (m: Message) => void;
   onCopy: (m: Message) => void;
   onSelect: (m: Message) => void;
   onDelete: (m: Message) => void;
@@ -208,6 +213,14 @@ export function MessageFocusMenu({
         style={panelStyle}
       >
         <div className="px-4 py-2.5 text-center text-xs text-text-muted">{formatSendTime(message.createdAt)}</div>
+        <button
+          onClick={() => onReply(message)}
+          className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Reply size={16} />
+          Reply
+        </button>
         {message.body && (
           <button
             onClick={() => onCopy(message)}

@@ -11,19 +11,17 @@ import { MoreVertical, Reply, Smile } from 'lucide-react';
  * `group-hover`/`group-focus-within` like every other hover affordance in
  * this file's family.
  *
- * **Reply and React are inert placeholders.** Per BACKBONE §13's Icebox note
- * added in this stage, the reply/react *feature* (quoted messages,
- * reactions, a send path for either) isn't built yet — these buttons exist
- * only so the eventual feature has a UI seam to wire into, and so the
- * hover bar's layout matches the reference now rather than needing a second
- * pass later. Clicking either just flashes a small "Coming soon" tooltip;
- * there is no state, no send, no persisted anything behind them.
+ * Reply is real (post-MVP): `onReply` sets `ChatView`'s `replyingTo`.
+ *
+ * **React is still an inert placeholder** — wired up alongside the rest of
+ * the reactions feature (quick-emoji row, reaction pills) in a later change,
+ * so this button doesn't jump ahead of the reply-only stage it ships with.
  */
-export function MessageActions({ onMore }: { onMore: () => void }) {
+export function MessageActions({ onMore, onReply }: { onMore: () => void; onReply: () => void }) {
   return (
     <div className="flex shrink-0 items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <IconButton icon={MoreVertical} label="Message actions" onClick={onMore} />
-      <PlaceholderIconButton icon={Reply} label="Reply" />
+      <IconButton icon={Reply} label="Reply" onClick={onReply} />
       <PlaceholderIconButton icon={Smile} label="React" />
     </div>
   );

@@ -12,6 +12,7 @@ import {
   type MessageRestoredPayload,
   type MessagesResponse,
   type MeResponse,
+  type ReplyPreview,
 } from '@den/shared';
 import { connectSocket } from './socket';
 
@@ -19,8 +20,11 @@ interface RealtimeCtx {
   connected: boolean;
   /** Optimistic text send: inserts a pending bubble, emits message.send, and
    *  reconciles it (or rolls it back) when the server replies — matched by
-   *  the envelope's `reqId` (BACKBONE §4). */
-  sendMessage: (chatId: string, body: string) => void;
+   *  the envelope's `reqId` (BACKBONE §4). `replyToId`/`replyPreview`
+   *  (post-MVP) are optional: when set, the WS payload carries `replyToId`
+   *  and the optimistic bubble shows `replyPreview` immediately, ahead of the
+   *  server's authoritative `message.new` reconciling it. */
+  sendMessage: (chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview) => void;
 }
 
 const Ctx = createContext<RealtimeCtx>({ connected: false, sendMessage: () => {} });
@@ -170,7 +174,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     };
   }, [qc]);
 
-  function sendMessage(chatId: string, body: string): void {
+  function sendMessage(chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview): void {
     const socket = socketRef.current;
     const trimmed = body.trim();
     if (!socket || !trimmed) return;
@@ -186,13 +190,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       body: trimmed,
       createdAt: new Date().toISOString(),
       media: null,
-      replyTo: null,
+      replyTo: replyPreview ?? null,
       reactions: [],
     };
 
     pendingRef.current.set(reqId, { chatId, tempId });
     qc.setQueryData<MessagesCache>(['messages', chatId], (old) => withFirstPage(old, (messages) => [optimistic, ...messages]));
-    socket.emit('ws', makeEnvelope(WsType.MessageSend, { chatId, body: trimmed }, reqId));
+    socket.emit('ws', makeEnvelope(WsType.MessageSend, { chatId, body: trimmed, ...(replyToId ? { replyToId } : {}) }, reqId));
   }
 
   return <Ctx.Provider value={{ connected, sendMessage }}>{children}</Ctx.Provider>;
