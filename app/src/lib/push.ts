@@ -52,3 +52,13 @@ export async function enablePush(): Promise<PushSubscription> {
 export async function sendTestPush(): Promise<{ delivered: number; total: number }> {
   return api('/api/push/test', { method: 'POST' });
 }
+
+/**
+ * Tell the active service worker a chat is open so it can clear that chat's
+ * already-shown notifications from the phone (sw.ts `message` handler).
+ * Best-effort: no-op if there's no controlling SW yet (e.g. first load).
+ */
+export function clearChatNotifications(chatId: string): void {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.controller?.postMessage({ type: 'chat-opened', chatId });
+}

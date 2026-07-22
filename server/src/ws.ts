@@ -143,7 +143,18 @@ async function handleMessageSend(
     }
 
     await assertMember(userId, chatId);
-    const message = await sendTextMessage(chatId, userId, frame.payload?.body ?? '');
+
+    let replyToId: bigint | undefined;
+    const replyToIdRaw = frame.payload?.replyToId;
+    if (typeof replyToIdRaw === 'string' && replyToIdRaw) {
+      try {
+        replyToId = BigInt(replyToIdRaw);
+      } catch {
+        throw new AppError(400, 'validation', 'invalid replyToId');
+      }
+    }
+
+    const message = await sendTextMessage(chatId, userId, frame.payload?.body ?? '', replyToId);
 
     io.to(chatRoom(chatId)).emit('ws', makeEnvelope(WsType.MessageNew, { message }, frame.reqId));
     void notifyChatMembers(io, chatId, message);

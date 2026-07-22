@@ -41,3 +41,23 @@ export function deleteMessages(chatId: string, messageIds: string[]): Promise<{ 
 export function restoreMessages(chatId: string, messageIds: string[]): Promise<{ messages: Message[] }> {
   return api(`/api/chats/${chatId}/messages/restore`, { method: 'POST', body: JSON.stringify({ messageIds }) });
 }
+
+/** Adds the caller's reaction (post-MVP). Idempotent add — the server
+ *  broadcasts `reaction.added` to the chat room, including this socket; see
+ *  `lib/realtime.tsx`'s pending-reaction dedup for why the caller doesn't
+ *  double-apply its own echo. */
+export function addReaction(chatId: string, messageId: string, emoji: string): Promise<{ ok: true }> {
+  return api(`/api/chats/${chatId}/messages/${messageId}/reactions`, {
+    method: 'POST',
+    body: JSON.stringify({ emoji }),
+  });
+}
+
+/** Removes the caller's reaction (post-MVP) — a DELETE to the emoji itself
+ *  (URL-encoded), not a toggle body; see `ReactRequest`'s doc comment in
+ *  @den/shared for why add/remove are two distinct verbs. */
+export function removeReaction(chatId: string, messageId: string, emoji: string): Promise<{ ok: true }> {
+  return api(`/api/chats/${chatId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {
+    method: 'DELETE',
+  });
+}

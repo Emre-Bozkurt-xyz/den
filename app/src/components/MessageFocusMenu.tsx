@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { CheckSquare, Copy, Trash2 } from 'lucide-react';
-import type { MeResponse, Message } from '@den/shared';
+import { CheckSquare, Copy, Plus, Reply, Trash2 } from 'lucide-react';
+import { ReactionLimits, type MeResponse, type Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
 import { useBackHandler } from '../lib/backStack';
@@ -28,12 +28,14 @@ const TRANSITION_MS = 150;
 const PANEL_STAGGER_MS = 60; // panel starts easing in slightly after the bubble begins lifting — a small stagger, not a strict "wait for the bubble to finish"
 const VIEWPORT_MARGIN = 16; // px — keeps the panel off the screen edges; "clean margins", never edge-to-edge
 const PANEL_SIDE_BIAS = 0.32; // 0 = dead center, 1 = centered on the bubble; a gentle lean toward the message's side
-// Best-effort estimate of the panel's rendered height (send-time header +
-// up to 3 action rows), used only to decide whether it should drop *below*
-// or *above* the lifted bubble. Not measured against real content sizes or a
-// real device — see the UI-8d notes in docs/UI_REVAMP.md §5 for why this is
-// a judgment call, same spirit as MediaViewer's VIDEO_CONTROLS_EXCLUSION_HEIGHT.
-const PANEL_ESTIMATED_HEIGHT = 200;
+// Best-effort estimate of the panel's rendered height (quick-emoji row +
+// send-time header + Reply + up to 3 more action rows), used only to decide
+// whether it should drop *below* or *above* the lifted bubble. Not measured
+// against real content sizes or a real device — see the UI-8d notes in
+// docs/UI_REVAMP.md §5 for why this is a judgment call, same spirit as
+// MediaViewer's VIDEO_CONTROLS_EXCLUSION_HEIGHT. Bumped from 200 when the
+// quick-emoji row and Reply row were added (post-MVP reactions/replies).
+const PANEL_ESTIMATED_HEIGHT = 300;
 
 // Feature-detected once at module load — support doesn't change at runtime.
 // iOS Safari 16.4+ (our floor) has `backdrop-filter`, but it's flagged for a
@@ -48,6 +50,8 @@ export function MessageFocusMenu({
   sourceEl,
   me,
   onClose,
+  onReply,
+  onReact,
   onCopy,
   onSelect,
   onDelete,
@@ -61,6 +65,13 @@ export function MessageFocusMenu({
   sourceEl: HTMLElement;
   me: MeResponse;
   onClose: () => void;
+  /** Post-MVP: sets `ChatView`'s `replyingTo`. The caller (`ChatView`) also
+   *  closes the menu — this component doesn't call `onClose` itself, mirroring
+   *  how `onCopy`/`onSelect`/`onDelete` already work below. */
+  onReply: (m: Message) => void;
+  /** Post-MVP: toggles `emoji` on `m` (quick-emoji row). Same "caller closes
+   *  the menu" contract as `onReply`/`onCopy`/`onSelect`/`onDelete`. */
+  onReact: (m: Message, emoji: string) => void;
   onCopy: (m: Message) => void;
   onSelect: (m: Message) => void;
   onDelete: (m: Message) => void;
@@ -207,7 +218,49 @@ export function MessageFocusMenu({
         className="flex flex-col divide-y divide-border overflow-hidden rounded-md bg-surface-raised shadow-strong"
         style={panelStyle}
       >
+        {/* Quick-emoji row (post-MVP) — always the first row in the panel.
+            The trailing `+` is a disabled placeholder for the eventual full
+            emoji picker (out of scope here — see the task's Icebox note). */}
+        <div className="flex items-center justify-around gap-1 px-2 py-2">
+          {ReactionLimits.quickEmojis.map((emoji) => {
+            const mine = message.reactions.some((r) => r.emoji === emoji && r.mine);
+            return (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => onReact(message, emoji)}
+                aria-label={`React with ${emoji}`}
+                aria-pressed={mine}
+                className={
+                  'grid h-9 w-9 place-items-center rounded-pill text-lg transition-colors ' +
+                  (mine ? 'bg-accent/15 ring-1 ring-accent' : 'hover:bg-surface-sunken')
+                }
+                style={{ touchAction: 'manipulation' }}
+              >
+                {emoji}
+              </button>
+            );
+          })}
+          <button
+            type="button"
+            disabled
+            title="More reactions (coming soon)"
+            aria-label="More reactions (coming soon)"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-text-muted disabled:opacity-40"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <Plus size={16} />
+          </button>
+        </div>
         <div className="px-4 py-2.5 text-center text-xs text-text-muted">{formatSendTime(message.createdAt)}</div>
+        <button
+          onClick={() => onReply(message)}
+          className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Reply size={16} />
+          Reply
+        </button>
         {message.body && (
           <button
             onClick={() => onCopy(message)}

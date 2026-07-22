@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Copy, Hand, Images, Trash2, X } from 'lucide-react';
-import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
+import { Copy, Hand, Images, Reply as ReplyIcon, Trash2, X } from 'lucide-react';
+import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type ReplyPreview } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
-import { chatDisplayName, deleteMessages, markRead, restoreMessages } from '../lib/chats';
+import { addReaction, chatDisplayName, deleteMessages, markRead, removeReaction, restoreMessages } from '../lib/chats';
 import { kindForMime, uploadMedia } from '../lib/media';
+import { clearChatNotifications } from '../lib/push';
 import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
 import { addTag, removeTag } from '../lib/tags';
-import { useRealtime } from '../lib/realtime';
+import {
+  applyReactionAdded,
+  applyReactionRemoved,
+  reactionPendingKey,
+  useRealtime,
+  withAllPages,
+  type MessagesCache,
+} from '../lib/realtime';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useIntroIds } from '../hooks/useIntroIds';
 import { useMediaTags } from '../hooks/useMediaTags';
@@ -37,6 +45,45 @@ type ActionMenuState = { message: Message; rect: DOMRect; sourceEl: HTMLElement 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
 const UNDO_TOAST_MS = 10_000;
+// Post-MVP double-tap-to-react: how long a single tap waits to see if a
+// second one arrives before performing its normal action — see `handleTap`.
+const DOUBLE_TAP_MS = 250;
+
+// Swipe-to-reply gesture thresholds (mobile) — grouped here for later
+// real-device tuning, same convention as Composer.tsx's gesture constants.
+const SWIPE_REPLY_ENGAGE_PX = 12; // px of horizontal travel before we commit to a horizontal swipe over a vertical scroll/long-press
+const SWIPE_REPLY_MAX_PX = 72; // clamp — how far the block can visually travel
+const SWIPE_REPLY_THRESHOLD_PX = 56; // release past this to fire the reply
+// ⚠️ iOS: a rightward swipe starting near the LEFT screen edge collides with
+// the standalone PWA's back-edge-swipe gesture (same spirit as the existing
+// MediaViewer/Composer iOS gesture flags in this file's family) — flag for
+// the iPhone device-testing gate; nothing here can detect or avoid that
+// collision without a real device to verify against.
+
+/** Maps raw horizontal travel to the *visual* translateX distance: linear up
+ *  to the threshold, then rubber-banded (diminishing returns) up to the max —
+ *  so the bubble never just stops dead at the threshold, but also never
+ *  travels further than `SWIPE_REPLY_MAX_PX`. */
+function swipeTravel(absDx: number): number {
+  if (absDx <= SWIPE_REPLY_THRESHOLD_PX) return absDx;
+  const over = absDx - SWIPE_REPLY_THRESHOLD_PX;
+  return Math.min(SWIPE_REPLY_THRESHOLD_PX + over * 0.35, SWIPE_REPLY_MAX_PX);
+}
+
+const MEDIA_REPLY_LABEL: Record<'image' | 'video' | 'voice', string> = {
+  image: '📷 Photo',
+  video: '🎥 Video',
+  voice: '🎤 Voice message',
+};
+
+/** Builds the `ReplyPreview` carried on an outgoing reply — a short text
+ *  snippet for text messages, a media label otherwise. Mirrors the server's
+ *  own preview shape (`ReplyPreview.preview`, "<=120 chars") without a
+ *  second round-trip. */
+function buildReplyPreview(m: Message): ReplyPreview {
+  const preview = m.body ? m.body.slice(0, 120) : m.media ? MEDIA_REPLY_LABEL[m.media.kind] : '';
+  return { id: m.id, senderId: m.senderId, kind: m.kind, preview, deleted: false };
+}
 
 export function ChatView({
   chat,
@@ -66,7 +113,7 @@ export function ChatView({
   onDraftChange: (draft: string) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
-  const { sendMessage } = useRealtime();
+  const { sendMessage, notePendingReaction, clearPendingReaction } = useRealtime();
   const qc = useQueryClient();
   const isMobile = useIsMobile();
   const [draft, setDraftState] = useState(initialDraft);
@@ -87,6 +134,25 @@ export function ChatView({
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
   const jumpedRef = useRef(false);
   const name = chatDisplayName(chat, me.id);
+
+  // Post-MVP: the message the composer is currently replying to (the reply
+  // bar above `<Composer>` renders from this), null when not replying.
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  // Live swipe-to-reply drag state — which block (by its lead message id) is
+  // currently being dragged and how far, so `MessageBlockRow` can apply a
+  // live `translateX` to exactly that block. Only one gesture can be active
+  // at a time (a single pointer), so this is a single slot, not a map.
+  const [swipeState, setSwipeState] = useState<{ id: string; dx: number } | null>(null);
+  // Per-gesture bookkeeping for the currently pressed block, set at
+  // pointerdown and read/mutated on pointermove — a plain ref (like
+  // Composer's `gestureRef`) since it doesn't itself need to trigger a
+  // render; `swipeState` above is what drives the visual frame.
+  const swipeGestureRef = useRef<{ msg: Message; mine: boolean; startX: number; startY: number; engaged: boolean } | null>(
+    null,
+  );
+  // Post-MVP double-tap-to-react: the message id + pending timer for a tap
+  // that's waiting to see if a second one arrives — see `handleTap`.
+  const pendingTapRef = useRef<{ id: string; timer: number } | null>(null);
 
   // Multi-select + deletion (Stage 6 / §2 item 11, docs/MESSAGE_DELETE.md §4).
   const [selectionMode, setSelectionMode] = useState(false);
@@ -145,6 +211,18 @@ export function ChatView({
     }
   }, [chat.id, lastMessageId, qc]);
 
+  // Clear this chat's already-shown notifications when it becomes the active
+  // chat — on mount/chat switch, and again if the tab/PWA regains visibility
+  // while it's still open (returning to an already-open chat).
+  useEffect(() => {
+    clearChatNotifications(chat.id);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') clearChatNotifications(chat.id);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [chat.id]);
+
   useEffect(() => {
     if (!jumpToMessageId) bottomRef.current?.scrollIntoView({ block: 'end' });
   }, [chat.id, messages.length, jumpToMessageId]);
@@ -171,6 +249,15 @@ export function ChatView({
   useEffect(() => {
     return () => {
       if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+    };
+  }, []);
+
+  // Same reasoning, for the double-tap-to-react pending timer (`handleTap`)
+  // — a tap right before navigating away shouldn't fire its delayed action
+  // into an unmounted component.
+  useEffect(() => {
+    return () => {
+      if (pendingTapRef.current) window.clearTimeout(pendingTapRef.current.timer);
     };
   }, []);
 
@@ -302,11 +389,38 @@ export function ChatView({
     }
   }
 
+  /** Sets `replyingTo`, shared by every reply affordance (swipe, the
+   *  desktop hover bar, and the focus menu's Reply row) so they all funnel
+   *  through one place. */
+  function startReply(m: Message) {
+    setReplyingTo(m);
+  }
+
+  /** Scrolls a quoted message's original into view and highlights it —
+   *  reuses the exact `messageRefs`/`setHighlightId`/2s-timeout machinery the
+   *  `jumpToMessageId` effect (above) already drives for gallery "jump to
+   *  message". Unlike that effect, this doesn't page back through older
+   *  history looking for the target — it's a best-effort jump limited to
+   *  whatever's currently loaded (the quoted block already shows the
+   *  preview text, so a miss here isn't a dead end, just a no-op tap). */
+  function jumpToMessage(id: string) {
+    const el = messageRefs.current.get(id);
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    setHighlightId(id);
+    setTimeout(() => setHighlightId(null), 2000);
+  }
+
   // Long-press → focus menu (or, if already selecting, a direct toggle — see
   // docs/MESSAGE_DELETE.md §4's "long-press when already in selection mode").
   // Never selectable/actionable while still an optimistic pending bubble —
   // there's nothing to delete server-side yet.
-  function onBubblePointerDown(e: React.PointerEvent, msgs: Message[]) {
+  //
+  // Also arms the swipe-to-reply gesture (mobile only) on the same pointer
+  // sequence — see `onBubblePointerMove` for where it actually engages. Both
+  // gestures start from this one pointerdown so they never fight over which
+  // "owns" the touch; swipe engaging cancels the long-press timer below.
+  function onBubblePointerDown(e: React.PointerEvent, msgs: Message[], mine: boolean) {
     // Clear any stale suppression from a previous interaction whose click
     // never arrived (long-press fired, then the pointer lifted off the
     // bubble — no click event, so onBubbleClick never got to reset it).
@@ -327,9 +441,45 @@ export function ChatView({
       else if (msgs.length > 1) enterSelectionMode(msgs);
       else openActionMenu(m);
     }, LONG_PRESS_MS);
+
+    // Stacks are excluded — a stack has no single addressable message to
+    // attach a reply to (the same reason it skips the focus menu above).
+    // Mouse pointers skip it too: desktop already has the hover Reply
+    // button, and a mouse-drag swipe isn't a gesture users expect there.
+    swipeGestureRef.current =
+      !selectionMode && msgs.length === 1 && e.pointerType !== 'mouse'
+        ? { msg: m, mine, startX: e.clientX, startY: e.clientY, engaged: false }
+        : null;
   }
 
   function onBubblePointerMove(e: React.PointerEvent) {
+    const swipe = swipeGestureRef.current;
+    if (swipe) {
+      const dx = e.clientX - swipe.startX;
+      const dy = e.clientY - swipe.startY;
+      if (!swipe.engaged) {
+        // Toward-center direction: theirs (left-aligned) swipes right
+        // (dx > 0), mine (right-aligned) swipes left (dx < 0) — a swipe the
+        // wrong way is left alone entirely (no reply, no visual feedback),
+        // same as iMessage.
+        const towardCenter = swipe.mine ? dx < 0 : dx > 0;
+        if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_REPLY_ENGAGE_PX && towardCenter) {
+          swipe.engaged = true;
+          clearLongPressTimer();
+        } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > LONG_PRESS_SLOP_PX) {
+          // Reads as a vertical scroll instead — hand the gesture back to
+          // the list's own scrolling and the (still-running) long-press
+          // timer/slop check below, rather than keep re-testing every move.
+          swipeGestureRef.current = null;
+        }
+      }
+      if (swipe.engaged) {
+        const travel = swipeTravel(Math.abs(dx));
+        setSwipeState({ id: swipe.msg.id, dx: swipe.mine ? -travel : travel });
+        return; // engaged swipe owns this gesture — skip the long-press slop check below
+      }
+    }
+
     const start = longPressStartRef.current;
     if (!start || longPressTimerRef.current === null) return;
     if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > LONG_PRESS_SLOP_PX) clearLongPressTimer();
@@ -338,6 +488,19 @@ export function ChatView({
   function onBubblePointerUp() {
     clearLongPressTimer();
     longPressStartRef.current = null;
+
+    const swipe = swipeGestureRef.current;
+    swipeGestureRef.current = null;
+    if (swipe?.engaged) {
+      // A long-press can't have fired mid-swipe (engaging cancels its
+      // timer), but the click that follows this pointerup still needs
+      // swallowing — otherwise the tap-through would open the viewer/toggle
+      // selection right after the drag.
+      suppressClickRef.current = true;
+      const travel = swipeState && swipeState.id === swipe.msg.id ? Math.abs(swipeState.dx) : 0;
+      if (travel >= SWIPE_REPLY_THRESHOLD_PX) startReply(swipe.msg);
+    }
+    setSwipeState(null);
   }
 
   function onBubblePointerCancel() {
@@ -345,28 +508,46 @@ export function ChatView({
     // with no side effects, same posture as MediaViewer's pointer-cancel handlers.
     clearLongPressTimer();
     longPressStartRef.current = null;
+    swipeGestureRef.current = null;
+    setSwipeState(null);
   }
 
-  function onBubbleClick(e: React.MouseEvent, msgs: Message[]) {
+  /** @param hasMediaTap — true when this block's tap is already owned by
+   *  `openViewer`/`openStack` (bare media single blocks, and stacks) — those
+   *  fire from the inner `<img>`/stack `onClick`, which runs *before* this
+   *  wrapper's `onClick` (target before ancestor) and already runs its own
+   *  double-tap-to-react check (see `handleTap`). Without this flag, a tap on
+   *  bare media would double-count as two taps (inner + wrapper bubbling). */
+  function onBubbleClick(e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       return;
     }
+    const m = msgs[0];
+    if (!m || m.id.startsWith('pending:')) return;
     // Selection mode disables stacking, so a clickable block is always a
     // single message here.
-    const m = msgs[0];
-    if (!m || m.id.startsWith('pending:') || !selectionMode) return;
-    if (e.shiftKey && selectionAnchorId) {
-      selectRange(selectionAnchorId, m.id);
+    if (selectionMode) {
+      if (e.shiftKey && selectionAnchorId) {
+        selectRange(selectionAnchorId, m.id);
+        return;
+      }
+      toggleSelect(m.id);
       return;
     }
-    toggleSelect(m.id);
+    // Double-tap-to-react on plain text/voice blocks (no media tap already
+    // owns this click) — see `handleTap`'s file-header note on the
+    // deliberate ~250ms delay.
+    if (!hasMediaTap) handleTap(m, () => {});
   }
 
   function sendDraft() {
     if (!draft.trim()) return;
-    sendMessage(chat.id, draft);
+    const replyToId = replyingTo?.id;
+    const replyPreview = replyingTo ? buildReplyPreview(replyingTo) : undefined;
+    sendMessage(chat.id, draft, replyToId, replyPreview);
     setDraft('');
+    setReplyingTo(null);
   }
 
   /** Multi-pick (UI-7): each file is uploaded separately and becomes its own
@@ -388,11 +569,17 @@ export function ChatView({
     }
     if (files.length < picked.length) setUploadError('Skipped files that were not an image or video');
 
+    // Like the caption, a pending reply applies to the first uploaded item
+    // only — cleared up front (optimistic, matching how `sendDraft` clears
+    // the draft immediately rather than waiting on the upload to finish).
+    const replyToId = replyingTo?.id;
+    if (replyToId) setReplyingTo(null);
+
     let failed = 0;
     for (const [i, { file, kind }] of files.entries()) {
       // The composer's text rides along as a caption on the first item only —
       // repeating it on every message of a batch would read as spam.
-      const ok = await runUpload(file, kind, file.type, i === 0 ? draft : '', i + 1, files.length);
+      const ok = await runUpload(file, kind, file.type, i === 0 ? draft : '', i + 1, files.length, i === 0 ? replyToId : undefined);
       if (!ok) failed++;
     }
     if (failed > 0) {
@@ -407,11 +594,20 @@ export function ChatView({
     caption: string,
     index = 1,
     total = 1,
+    replyToId?: string,
   ): Promise<boolean> {
     if (index === 1) setUploadError('');
     setUpload({ kind, progress: 0, index, total });
     try {
-      await uploadMedia(chat.id, file, kind, mime, caption, (pct) => setUpload({ kind, progress: pct, index, total }));
+      await uploadMedia(
+        chat.id,
+        file,
+        kind,
+        mime,
+        caption,
+        (pct) => setUpload({ kind, progress: pct, index, total }),
+        replyToId,
+      );
       if (caption) setDraft('');
       return true;
     } catch {
@@ -427,7 +623,9 @@ export function ChatView({
    *  upload/transcode flow is not duplicated or rewritten. No caption: the
    *  mic/recording bar only exists while the composer's text is empty. */
   function handleRecordingComplete(blob: Blob, mime: string) {
-    void runUpload(blob, 'voice', mime, '').then((ok) => {
+    const replyToId = replyingTo?.id;
+    if (replyToId) setReplyingTo(null);
+    void runUpload(blob, 'voice', mime, '', 1, 1, replyToId).then((ok) => {
       if (!ok) setUploadError('Upload failed — try again');
     });
   }
@@ -449,13 +647,83 @@ export function ChatView({
   function openViewer(m: Message) {
     if (mediaTapSuppressed()) return;
     if (m.media?.status === 'ready' && (m.media.kind === 'image' || m.media.kind === 'video')) {
-      setViewer({ list: [m.media], index: 0 });
+      const media = m.media;
+      handleTap(m, () => setViewer({ list: [media], index: 0 }));
     }
   }
 
   function openStack(msgs: Message[]) {
     if (mediaTapSuppressed()) return;
-    setStackSheet(msgs);
+    const lead = msgs[0];
+    if (!lead) return;
+    // A double-tap on a stack reacts to its lead (top) message — there's no
+    // single "the stack" to attach a reaction to on the wire, same reasoning
+    // as excluding stacks from swipe-to-reply/the focus menu above.
+    handleTap(lead, () => setStackSheet(msgs));
+  }
+
+  /** Post-MVP double-tap-to-react: delays a bubble tap's normal single-tap
+   *  action (`performSingleAction` — opening the viewer, or nothing for a
+   *  plain text/voice bubble) by `DOUBLE_TAP_MS`. If a second tap on the same
+   *  message arrives before the delay elapses, it's read as a double-tap
+   *  instead — the single action is cancelled and `❤️` is toggled. Disabled
+   *  entirely in selection mode (callers gate that before calling this).
+   *  ⚠️ Deliberate UX cost: media taps now open ~250ms later than an instant
+   *  tap — the task explicitly accepts this latency in exchange for double-tap
+   *  working "anywhere on a bubble, including media". */
+  function handleTap(m: Message, performSingleAction: () => void) {
+    const pending = pendingTapRef.current;
+    if (pending && pending.id === m.id) {
+      window.clearTimeout(pending.timer);
+      pendingTapRef.current = null;
+      toggleReaction(m, ReactionLimits.quickEmojis[0]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      pendingTapRef.current = null;
+      performSingleAction();
+    }, DOUBLE_TAP_MS);
+    pendingTapRef.current = { id: m.id, timer };
+  }
+
+  function applyReactionToCache(messageId: string, emoji: string, action: 'add' | 'remove') {
+    qc.setQueryData<MessagesCache>(['messages', chat.id], (old) =>
+      withAllPages(old, (messages) =>
+        messages.map((mm) =>
+          mm.id === messageId
+            ? {
+                ...mm,
+                reactions:
+                  action === 'add'
+                    ? applyReactionAdded(mm.reactions, emoji, me.id, me.id)
+                    : applyReactionRemoved(mm.reactions, emoji, me.id, me.id),
+              }
+            : mm,
+        ),
+      ),
+    );
+  }
+
+  /** Optimistic reaction toggle (post-MVP) — mirrors how a failed send rolls
+   *  its optimistic bubble back. Marks the pending-dedup key *before* the
+   *  cache update so the WS echo of this exact call (see `lib/realtime.tsx`)
+   *  can never race ahead of it. */
+  function toggleReaction(m: Message, emoji: string) {
+    const mine = m.reactions.find((r) => r.emoji === emoji)?.mine ?? false;
+    const action: 'add' | 'remove' = mine ? 'remove' : 'add';
+    const key = reactionPendingKey(m.id, emoji, action);
+    notePendingReaction(key);
+    applyReactionToCache(m.id, emoji, action);
+
+    const rest = action === 'add' ? addReaction(chat.id, m.id, emoji) : removeReaction(chat.id, m.id, emoji);
+    rest.catch(() => {
+      // The REST call never succeeded, so no confirming WS frame is coming —
+      // drop the pending marker (nothing to dedup against) and undo the
+      // optimistic change by applying its inverse.
+      clearPendingReaction(key);
+      applyReactionToCache(m.id, emoji, action === 'add' ? 'remove' : 'add');
+      setActionError('Reaction failed — try again');
+    });
   }
 
   return (
@@ -565,6 +833,10 @@ export function ChatView({
                 onOpenActions={openActionMenu}
                 onOpenViewer={openViewer}
                 onOpenStack={openStack}
+                onReply={startReply}
+                onToggleReaction={toggleReaction}
+                onJumpToMessage={jumpToMessage}
+                swipeState={swipeState}
                 onPointerDownBlock={onBubblePointerDown}
                 onPointerMoveBlock={onBubblePointerMove}
                 onPointerUpBlock={onBubblePointerUp}
@@ -608,6 +880,10 @@ export function ChatView({
         <p className="border-t border-border bg-surface-raised px-4 py-2 text-xs text-red-600 dark:text-red-400">
           {uploadError}
         </p>
+      )}
+
+      {replyingTo && (
+        <ReplyPreviewBar message={replyingTo} chat={chat} meId={me.id} onCancel={() => setReplyingTo(null)} />
       )}
 
       <Composer
@@ -659,11 +935,59 @@ export function ChatView({
           sourceEl={actionMenuFor.sourceEl}
           me={me}
           onClose={() => setActionMenuFor(null)}
+          onReply={(m) => {
+            setActionMenuFor(null);
+            startReply(m);
+          }}
+          onReact={(m, emoji) => {
+            setActionMenuFor(null);
+            toggleReaction(m, emoji);
+          }}
           onCopy={handleMenuCopy}
           onSelect={(m) => enterSelectionMode([m])}
           onDelete={(m) => void handleMenuDelete(m)}
         />
       )}
+    </div>
+  );
+}
+
+/** Reply preview bar between the upload/error banners and `<Composer>` —
+ *  shows what the next send will reply to, with a cancel (X) button. Body
+ *  text gets a short truncated snippet; bare media falls back to the same
+ *  label used for the outgoing `ReplyPreview` (`buildReplyPreview`, above). */
+function ReplyPreviewBar({
+  message,
+  chat,
+  meId,
+  onCancel,
+}: {
+  message: Message;
+  chat: ChatSummary;
+  meId: string;
+  onCancel: () => void;
+}) {
+  const senderName =
+    message.senderId === meId ? 'You' : (chat.members.find((mem) => mem.id === message.senderId)?.displayName ?? 'Unknown');
+  const preview = message.body ? message.body : message.media ? MEDIA_REPLY_LABEL[message.media.kind] : '';
+  return (
+    <div
+      className="flex items-start gap-2 border-t border-border bg-surface-raised px-4 py-2"
+      style={{ touchAction: 'manipulation' }}
+    >
+      <div className="w-1 shrink-0 self-stretch rounded-full bg-accent" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-semibold text-accent">{senderName}</p>
+        <p className="truncate text-xs text-text-secondary">{preview}</p>
+      </div>
+      <button
+        onClick={onCancel}
+        aria-label="Cancel reply"
+        className="shrink-0 text-text-muted"
+        style={{ touchAction: 'manipulation' }}
+      >
+        <X size={16} />
+      </button>
     </div>
   );
 }
@@ -703,6 +1027,10 @@ function RunGroup({
   onOpenActions,
   onOpenViewer,
   onOpenStack,
+  onReply,
+  onToggleReaction,
+  onJumpToMessage,
+  swipeState,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -721,11 +1049,22 @@ function RunGroup({
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
   onOpenStack: (msgs: Message[]) => void;
-  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[]) => void;
+  /** Post-MVP: sets `ChatView`'s `replyingTo` — wired into the desktop hover
+   *  bar's Reply button here. */
+  onReply: (m: Message) => void;
+  /** Post-MVP: `ChatView.toggleReaction` — wired into reaction pills. */
+  onToggleReaction: (m: Message, emoji: string) => void;
+  /** Post-MVP: scroll+highlight a quoted message's original — see
+   *  `ChatView.jumpToMessage`. */
+  onJumpToMessage: (id: string) => void;
+  /** Post-MVP: which block (if any) is mid swipe-to-reply and how far, so
+   *  only that one block's `MessageBlockRow` applies a live translateX. */
+  swipeState: { id: string; dx: number } | null;
+  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
   onPointerUpBlock: () => void;
   onPointerCancelBlock: () => void;
-  onClickBlock: (e: React.MouseEvent, msgs: Message[]) => void;
+  onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
 }) {
   const mine = run.senderId === me.id;
   const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
@@ -737,6 +1076,7 @@ function RunGroup({
         <MessageBlockRow
           key={blockMessages(block)[0]!.id}
           block={block}
+          chat={chat}
           mine={mine}
           isRunHead={bi === 0}
           isRunTail={bi === run.blocks.length - 1}
@@ -754,6 +1094,10 @@ function RunGroup({
           onOpenActions={onOpenActions}
           onOpenViewer={onOpenViewer}
           onOpenStack={onOpenStack}
+          onReply={onReply}
+          onToggleReaction={onToggleReaction}
+          onJumpToMessage={onJumpToMessage}
+          swipeDx={swipeState?.id === blockMessages(block)[0]!.id ? swipeState.dx : 0}
           onPointerDownBlock={onPointerDownBlock}
           onPointerMoveBlock={onPointerMoveBlock}
           onPointerUpBlock={onPointerUpBlock}
@@ -796,6 +1140,7 @@ function RunGroup({
  */
 function MessageBlockRow({
   block,
+  chat,
   mine,
   isRunHead,
   isRunTail: _isRunTail,
@@ -808,6 +1153,10 @@ function MessageBlockRow({
   onOpenActions,
   onOpenViewer,
   onOpenStack,
+  onReply,
+  onToggleReaction,
+  onJumpToMessage,
+  swipeDx,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -815,6 +1164,7 @@ function MessageBlockRow({
   onClickBlock,
 }: {
   block: MessageBlock;
+  chat: ChatSummary;
   mine: boolean;
   isRunHead: boolean;
   /** Kept for callers' documentation/future use (see the corner-rounding
@@ -832,11 +1182,18 @@ function MessageBlockRow({
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
   onOpenStack: (msgs: Message[]) => void;
-  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[]) => void;
+  onReply: (m: Message) => void;
+  onToggleReaction: (m: Message, emoji: string) => void;
+  onJumpToMessage: (id: string) => void;
+  /** Live swipe-to-reply travel for *this* block only (0 unless it's the one
+   *  currently being dragged — see `RunGroup`'s `swipeState` lookup). Signed:
+   *  negative for `mine` (dragged left), positive for others (dragged right). */
+  swipeDx: number;
+  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
   onPointerUpBlock: () => void;
   onPointerCancelBlock: () => void;
-  onClickBlock: (e: React.MouseEvent, msgs: Message[]) => void;
+  onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
 }) {
   const msgs = blockMessages(block);
   const m = msgs[0]!;
@@ -850,25 +1207,57 @@ function MessageBlockRow({
   const bare = !isStack && m.media !== null && m.media.kind !== 'voice';
   const showBubble = !isStack && (!bare || !!m.body);
   const isVoice = m.media?.kind === 'voice';
+  // A stack has no single addressable message to quote (see the same
+  // exclusion on the swipe/focus-menu reply affordances above).
+  const quote = !isStack && m.replyTo ? m.replyTo : null;
+  // Bare media (and stacks) already own their tap via `onOpenViewer`/
+  // `onOpenStack` (each does its own double-tap-to-react check) — the
+  // wrapper's `onClick` skips redoing it for those so one physical tap
+  // doesn't get read as two (see `ChatView.onBubbleClick`'s doc comment).
+  const hasMediaTap = isStack || bare;
+  // A stack has no single addressable message for a pill row either — same
+  // exclusion as the quote above.
+  const reactions = !isStack ? m.reactions : [];
 
-  const actionsButton = showActionsButton && !pending && <MessageActions onMore={() => onOpenActions(m)} />;
+  const actionsButton = showActionsButton && !pending && (
+    <MessageActions onMore={() => onOpenActions(m)} onReply={() => onReply(m)} onReact={() => onOpenActions(m)} />
+  );
+
+  const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);
+  const swipeArmed = swipeProgress >= 1;
 
   return (
-    <div className={'group flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
+    <div className={'group relative flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
       {mine && actionsButton}
+      {/* Swipe-to-reply reveal icon — fades/scales in with drag progress and
+          "fills in" (muted → accent) once past the fire threshold. Sits in
+          the gutter behind the block's resting position (the side opposite
+          the drag direction, matching iMessage), so it never affects layout. */}
+      {swipeProgress > 0 && (
+        <div
+          className={
+            'pointer-events-none absolute top-1/2 z-0 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-pill transition-colors ' +
+            (mine ? 'right-0' : 'left-0') +
+            (swipeArmed ? ' bg-accent text-white' : ' bg-surface-sunken text-text-muted')
+          }
+          style={{ opacity: swipeProgress, transform: `translateY(-50%) scale(${0.7 + 0.3 * swipeProgress})` }}
+        >
+          <ReplyIcon size={16} />
+        </div>
+      )}
       <div
         ref={(el) => {
           // Every message the block covers points at the same element, so
           // jump-to-message can scroll to a photo inside a stack.
           for (const mm of msgs) registerRef(mm.id, el);
         }}
-        onPointerDown={(e) => onPointerDownBlock(e, msgs)}
+        onPointerDown={(e) => onPointerDownBlock(e, msgs, mine)}
         onPointerMove={onPointerMoveBlock}
         onPointerUp={onPointerUpBlock}
         onPointerCancel={onPointerCancelBlock}
-        onClick={(e) => onClickBlock(e, msgs)}
+        onClick={(e) => onClickBlock(e, msgs, hasMediaTap)}
         className={
-          'flex min-w-0 max-w-full flex-col gap-[2px] rounded-md ' +
+          'relative z-10 flex min-w-0 max-w-full flex-col gap-[2px] rounded-md ' +
           (mine ? 'items-end ' : 'items-start ') +
           (highlighted ? 'ring-2 ring-amber-400 ' : '') +
           (selected ? 'ring-2 ring-indigo-500 ' : '') +
@@ -880,8 +1269,13 @@ function MessageBlockRow({
           WebkitTouchCallout: 'none',
           WebkitUserSelect: 'none',
           userSelect: 'none',
+          transform: swipeDx ? `translateX(${swipeDx}px)` : undefined,
+          transition: swipeDx ? undefined : 'transform 150ms ease-out', // only snap-back animates; live drag tracks the pointer 1:1
         }}
       >
+        {/* Bare media's quote sits just above the media itself, as its own
+            small standalone card — there's no bubble to render it inside. */}
+        {quote && bare && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone onJump={onJumpToMessage} />}
         {isStack && <MediaStack messages={msgs} onOpen={() => onOpenStack(msgs)} />}
         {bare && <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />}
         {showBubble && (
@@ -898,14 +1292,100 @@ function MessageBlockRow({
                 : 'bg-surface-sunken text-text-primary ')
             }
           >
+            {/* Not `bare`, so this is a text and/or voice bubble — the quote
+                renders inline, above whatever the bubble already holds. */}
+            {quote && !bare && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone={false} onJump={onJumpToMessage} />}
             {!bare && m.media && (
               <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
             )}
             {m.body && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
           </div>
         )}
+
+        {/* Reaction pills (post-MVP) — a row just below/overlapping the
+            bubble's bottom edge (iMessage/Instagram style), aligned to the
+            sender's side. Placed *inside* this flex-col so it stacks as an
+            extra row after the media/bubble rather than fighting the
+            run-corner layout above. */}
+        {reactions.length > 0 && (
+          <div className={'z-10 -mt-1.5 flex flex-wrap gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
+            {reactions.map((r) => (
+              <button
+                key={r.emoji}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleReaction(m, r.emoji);
+                }}
+                aria-pressed={r.mine}
+                className={
+                  'flex items-center gap-1 rounded-pill border px-2 py-0.5 text-xs shadow-soft transition-colors ' +
+                  (r.mine
+                    ? 'border-accent bg-accent/15 text-accent'
+                    : 'border-border bg-surface-raised text-text-secondary hover:bg-surface-sunken')
+                }
+                style={{ touchAction: 'manipulation' }}
+              >
+                <span>{r.emoji}</span>
+                <span className="tabular-nums">{r.count}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       {!mine && actionsButton}
     </div>
+  );
+}
+
+/** The small quoted-original block a reply renders above its content
+ *  (docs/UI8_CHAT_INSTAGRAM.md-style "reply strip"). Two visual modes:
+ *  - **embedded** (`standalone=false`) — sits inline atop a bubble's
+ *    content, tinted to read as part of that bubble (translucent white on
+ *    the accent-filled `mine` bubble, a faint tint on the sunken "theirs"
+ *    bubble).
+ *  - **standalone** (`standalone=true`) — bare media has no bubble to sit
+ *    inside, so this renders as its own small card directly above the media.
+ *  Tapping jumps to the original via `onJump` (`ChatView.jumpToMessage`);
+ *  disabled when the original was deleted, since there's nothing to jump to. */
+function QuotedBlock({
+  replyTo,
+  chat,
+  mine,
+  standalone,
+  onJump,
+}: {
+  replyTo: NonNullable<Message['replyTo']>;
+  chat: ChatSummary;
+  mine: boolean;
+  standalone: boolean;
+  onJump: (id: string) => void;
+}) {
+  const senderName = chat.members.find((mem) => mem.id === replyTo.senderId)?.displayName ?? 'Unknown';
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!replyTo.deleted) onJump(replyTo.id);
+      }}
+      disabled={replyTo.deleted}
+      className={
+        'mb-1 flex max-w-full items-start gap-1.5 rounded-sm border-l-2 px-2 py-1 text-left text-xs ' +
+        (standalone
+          ? 'border-accent bg-surface-sunken text-text-secondary'
+          : mine
+            ? 'border-white/50 bg-white/10 text-white/90'
+            : 'border-accent/70 bg-black/[0.04] text-text-secondary dark:bg-white/[0.06]')
+      }
+      style={{ touchAction: 'manipulation' }}
+    >
+      <div className="min-w-0 flex-1">
+        <p className="truncate font-semibold">{senderName}</p>
+        <p className={'truncate ' + (replyTo.deleted ? 'italic opacity-80' : '')}>
+          {replyTo.deleted ? 'Original deleted' : replyTo.preview}
+        </p>
+      </div>
+    </button>
   );
 }

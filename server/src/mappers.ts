@@ -1,6 +1,16 @@
 /** Row → DTO mappers. Keep the BIGINT→string boundary here so ids never leak as
  *  JS numbers (precision) into the API (see @den/shared PublicUser). */
-import type { ChatSummary, MediaInfo, MediaKind, MediaStatus, Message as MessageDto, MessageKind, PublicUser } from '@den/shared';
+import type {
+  ChatSummary,
+  MediaInfo,
+  MediaKind,
+  MediaStatus,
+  Message as MessageDto,
+  MessageKind,
+  PublicUser,
+  ReactionSummary,
+  ReplyPreview,
+} from '@den/shared';
 
 export interface UserRow {
   id: bigint;
@@ -26,6 +36,7 @@ export interface MessageRow {
   kind: string;
   body: string | null;
   createdAt: Date;
+  replyToMessageId: bigint | null;
 }
 
 export interface MediaRow {
@@ -56,7 +67,12 @@ export function toMediaInfo(m: MediaRow, urls: { url: string; thumbUrl: string |
   };
 }
 
-export function toMessage(m: MessageRow, media: MediaInfo | null = null): MessageDto {
+export function toMessage(
+  m: MessageRow,
+  media: MediaInfo | null = null,
+  replyTo: ReplyPreview | null = null,
+  reactions: ReactionSummary[] = [],
+): MessageDto {
   return {
     id: m.id.toString(),
     chatId: m.chatId.toString(),
@@ -65,6 +81,8 @@ export function toMessage(m: MessageRow, media: MediaInfo | null = null): Messag
     body: m.body,
     createdAt: m.createdAt.toISOString(),
     media,
+    replyTo,
+    reactions,
   };
 }
 

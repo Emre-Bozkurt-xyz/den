@@ -22,6 +22,7 @@ self.addEventListener('activate', (event) => {
 });
 
 interface PushPayload {
+  chatId?: string;
   chatName?: string;
   senderName?: string;
   preview?: string;
@@ -43,8 +44,31 @@ self.addEventListener('push', (event) => {
       body,
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
-      data: { url: data.url ?? '/' },
+      // tag groups/replaces notifications per chat; data.chatId lets the
+      // message handler below address them for closing on chat-open.
+      tag: data.chatId ? `chat-${data.chatId}` : undefined,
+      data: { url: data.url ?? '/', chatId: data.chatId },
     }),
+  );
+});
+
+/**
+ * Client tells us a chat became active (ChatView mount / becoming visible)
+ * so we can clear that chat's already-shown notifications from the phone.
+ * ⚠️ iOS note: programmatic dismissal via getNotifications() is historically
+ * unreliable in installed iOS PWAs — this is best-effort; flag for the
+ * iPhone device gate.
+ */
+self.addEventListener('message', (event) => {
+  const data = event.data as { type?: string; chatId?: string } | undefined;
+  if (data?.type !== 'chat-opened' || !data.chatId) return;
+  const chatId = data.chatId;
+  event.waitUntil(
+    self.registration.getNotifications().then((ns) =>
+      ns
+        .filter((n) => (n.data as { chatId?: string } | undefined)?.chatId === chatId || n.tag === `chat-${chatId}`)
+        .forEach((n) => n.close()),
+    ),
   );
 });
 

@@ -30,6 +30,8 @@ import { toMediaInfo, toMessage, type MediaRow, type MessageRow } from '../mappe
 import { notFound, validation } from '../errors.js';
 import { getObjectHead, headObject, mediaKey, maxBytesFor, presignGet, presignPut } from './r2.js';
 import { processMedia } from './process.js';
+import { reactionsForMessages } from '../chat/reactions.js';
+import { assertReplyTarget, replyPreviewFor } from '../chat/replies.js';
 
 /** Containers MediaRecorder emits (webm, mp4) don't always let magic-number
  *  sniffing distinguish "video with no video track" from "actual video" —
@@ -159,8 +161,19 @@ export interface CompleteUploadResult {
 /** Verifies the object landed, applies an optional caption, and returns the
  *  message with a 'processing' media placeholder. Does not run the
  *  sharp/ffmpeg pipeline itself — call finalizeProcessing after fanning out
- *  the placeholder so members see it immediately (§7 step 4/5). */
-export async function completeUpload(mediaId: bigint, userId: bigint, caption: string | undefined): Promise<CompleteUploadResult> {
+ *  the placeholder so members see it immediately (§7 step 4/5).
+ *
+ *  `replyToId` (post-MVP): the message row is created up front in
+ *  `createUpload` (before the client PUTs bytes), so a reply can only be
+ *  attached here, at complete-time, once the client actually has one to set
+ *  (CompleteUploadRequest.replyToId) — set via an UPDATE after validating it
+ *  references a non-deleted message in the same chat. */
+export async function completeUpload(
+  mediaId: bigint,
+  userId: bigint,
+  caption: string | undefined,
+  replyToId?: bigint,
+): Promise<CompleteUploadResult> {
   const row = await mediaRowById(mediaId);
   if (!row) throw notFound('media not found');
   if (row.uploaderId !== userId) throw notFound('media not found'); // don't leak existence to non-uploaders
@@ -195,10 +208,16 @@ export async function completeUpload(mediaId: bigint, userId: bigint, caption: s
     await db.update(messages).set({ body: trimmed }).where(eq(messages.id, row.messageId));
   }
 
+  if (replyToId !== undefined) {
+    await assertReplyTarget(row.chatId, replyToId);
+    await db.update(messages).set({ replyToMessageId: replyToId }).where(eq(messages.id, row.messageId));
+  }
+
   const messageRow = await messageById(row.messageId);
   const mediaInfo = toMediaInfo(row, null); // still 'processing' — no URLs yet
+  const replyTo = await replyPreviewFor(messageRow.replyToMessageId);
   return {
-    message: toMessage(messageRow, mediaInfo),
+    message: toMessage(messageRow, mediaInfo, replyTo, []), // brand-new message: no reactions yet
     chatId: row.chatId,
     mediaId: row.id,
     mediaKind: row.kind as MediaKind,
@@ -250,7 +269,17 @@ export async function finalizeProcessing(mediaId: bigint): Promise<MessageDto> {
     updated.status === 'ready'
       ? { url: await presignGet(updated.r2Key), thumbUrl: updated.thumbKey ? await presignGet(updated.thumbKey) : null }
       : null;
-  return toMessage(messageRow, toMediaInfo(updated, urls));
+
+  // Room broadcast, not per-viewer — there's no single "viewer" for `mine`
+  // here, so it resolves as false for everyone; each client's own
+  // reaction.added/removed frames (ws.ts) keep `mine` accurate afterward.
+  // A reaction landing during the processing window is a rare race, not a
+  // reason to skip resolving replyTo for every media.ready frame.
+  const [replyTo, reactionsMap] = await Promise.all([
+    replyPreviewFor(messageRow.replyToMessageId),
+    reactionsForMessages([messageRow.id], 0n),
+  ]);
+  return toMessage(messageRow, toMediaInfo(updated, urls), replyTo, reactionsMap.get(messageRow.id.toString()) ?? []);
 }
 
 /** Caller must assertMember on the chat before calling this (chatIdForMedia

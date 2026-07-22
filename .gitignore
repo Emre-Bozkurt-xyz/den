@@ -26,6 +26,9 @@ server/tmp/
 .playwright-mcp/
 minio-data/
 
+# agent worktrees (transient isolation for background subagents)
+.claude/worktrees/
+
 # editor / OS
 .DS_Store
 .idea/
