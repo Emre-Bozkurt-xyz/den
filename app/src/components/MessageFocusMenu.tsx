@@ -38,12 +38,14 @@ const PANEL_SIDE_BIAS = 0.32; // 0 = dead center, 1 = centered on the bubble; a 
 // quick-emoji row and Reply row were added (post-MVP reactions/replies).
 const PANEL_ESTIMATED_HEIGHT = 300;
 
-// Feature-detected once at module load — support doesn't change at runtime.
-// iOS Safari 16.4+ (our floor) has `backdrop-filter`, but it's flagged for a
-// real-device perf/quirk check per the stage's iOS notes; the no-support path
-// (older/other browsers) falls back to a heavier flat dim, no blur.
-const BACKDROP_FILTER_SUPPORTED =
-  typeof CSS !== 'undefined' && (CSS.supports('backdrop-filter', 'blur(4px)') || CSS.supports('-webkit-backdrop-filter', 'blur(4px)'));
+// Deliberately no `backdrop-filter` here even though it's supported: on a
+// real Android PWA it was observed compositing incorrectly against the
+// scrolling message list underneath — everything above the focused bubble
+// dimmed correctly, everything below (still updating/repainting) rendered
+// through the blur layer at full opacity, on top of the panel. A known
+// Android Chrome/WebView backdrop-filter-vs-scrolling-content bug, not
+// something feature-detection catches. Flat dim only, no blur — see the
+// Decision Log (BACKBONE §15) for the writeup (2026-07-22).
 
 export function MessageFocusMenu({
   message,
@@ -198,23 +200,20 @@ export function MessageFocusMenu({
   // of chasing it bubble-by-bubble.
   return createPortal(
     <div className="fixed inset-0" style={{ touchAction: 'manipulation' }}>
-      {/* Backdrop: dims + blurs the rest of the screen, click-to-dismiss.
-          Falls back to a heavier flat dim (no blur) when backdrop-filter
-          isn't supported — see BACKDROP_FILTER_SUPPORTED above. */}
+      {/* Backdrop: dims the rest of the screen, click-to-dismiss. Flat dim
+          only — no `backdrop-filter` blur, see the file-header note above. */}
       <div
         className="fixed inset-0 z-50"
         onClick={onClose}
         style={{
-          background: BACKDROP_FILTER_SUPPORTED ? 'rgb(0 0 0 / 0.3)' : 'rgb(0 0 0 / 0.5)',
-          backdropFilter: BACKDROP_FILTER_SUPPORTED ? 'blur(4px)' : undefined,
-          WebkitBackdropFilter: BACKDROP_FILTER_SUPPORTED ? 'blur(4px)' : undefined,
+          background: 'rgb(0 0 0 / 0.5)',
           opacity: revealed ? 1 : 0,
           // Forces its own compositing layer — without it, mobile browsers
           // have been seen painting other composited layers (video/voice
-          // waveform bubbles, animated message bubbles) *above* a
-          // `backdrop-filter` + `position: fixed` overlay despite a much
-          // higher z-index, since z-index only orders layers reliably when
-          // every side of the comparison is actually promoted to one.
+          // waveform bubbles, animated message bubbles) *above* this
+          // `position: fixed` overlay despite a much higher z-index, since
+          // z-index only orders layers reliably when every side of the
+          // comparison is actually promoted to one.
           transform: 'translateZ(0)',
           transition: reducedMotion ? 'none' : `opacity ${TRANSITION_MS}ms ease-out`,
         }}
