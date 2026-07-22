@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Copy, Hand, Images, Reply as ReplyIcon, Trash2, X } from 'lucide-react';
+import { Copy, Hand, Images, Reply as ReplyIcon, Search, Trash2, X } from 'lucide-react';
 import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type ReplyPreview } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
+import type { SearchFormState } from '../hooks/useMessageSearch';
 import { addReaction, chatDisplayName, deleteMessages, markRead, removeReaction, restoreMessages } from '../lib/chats';
 import { kindForMime, uploadMedia } from '../lib/media';
 import { clearChatNotifications } from '../lib/push';
@@ -26,6 +27,7 @@ import { MediaGridSheet, MediaStack } from './MediaStack';
 import { MediaViewer } from './MediaViewer';
 import { MessageActions } from './MessageActions';
 import { MessageFocusMenu } from './MessageFocusMenu';
+import { MessageSearchOverlay, MessageSearchPanel } from './MessageSearchPanel';
 import { ScreenHeader } from './ScreenHeader';
 
 /** `index`/`total` are 1-based positions within one multi-file pick — each
@@ -94,6 +96,8 @@ export function ChatView({
   jumpToMessageId,
   initialDraft,
   onDraftChange,
+  initialSearchState,
+  onSearchStateChange,
 }: {
   chat: ChatSummary;
   me: MeResponse;
@@ -112,6 +116,13 @@ export function ChatView({
    *  survives either kind of remount. See docs/archive/UI_REVAMP.md §8. */
   initialDraft: string;
   onDraftChange: (draft: string) => void;
+  /** Same App-level per-chat cache pattern as `initialDraft`/`onDraftChange`
+   *  above, for the search panel's query text/filters/open-flag
+   *  (docs/MESSAGE_SEARCH.md §4.1) — surviving the mobile overlay's
+   *  close/reopen cycle is the point; this is what makes that possible
+   *  across a genuine `ChatView` remount too. */
+  initialSearchState: SearchFormState;
+  onSearchStateChange: (state: SearchFormState) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
   const { sendMessage, notePendingReaction, clearPendingReaction } = useRealtime();
@@ -124,6 +135,16 @@ export function ChatView({
     setDraftState(value);
     onDraftChange(value);
   }
+  // Search panel state (docs/MESSAGE_SEARCH.md §4.1) — same mirror-into-cache
+  // shape as `draft`/`setDraft` above, for the same remount-survival reason.
+  const [searchState, setSearchStateRaw] = useState(initialSearchState);
+  function setSearchState(updater: (prev: SearchFormState) => SearchFormState) {
+    setSearchStateRaw((prev) => {
+      const next = updater(prev);
+      onSearchStateChange(next);
+      return next;
+    });
+  }
   const [upload, setUpload] = useState<UploadState>(null);
   const [uploadError, setUploadError] = useState('');
   const [viewer, setViewer] = useState<ViewerState>(null);
@@ -133,6 +154,13 @@ export function ChatView({
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
+  // Search results' own jump target (docs/MESSAGE_SEARCH.md §4.2) — the
+  // gallery's jump uses `jumpToMessageId` (a prop, set once at mount via
+  // `App.openChat`); search lives *inside* an already-open ChatView, with no
+  // App round-trip, so it needs a settable-from-within target instead. Both
+  // feed the same auto-paging effect below via `effectiveJumpId`.
+  const [jumpTarget, setJumpTarget] = useState<string | undefined>(undefined);
+  const effectiveJumpId = jumpTarget ?? jumpToMessageId;
   const jumpedRef = useRef(false);
   // Scroll metrics captured right before an older page is fetched, so the
   // layout effect below can restore the visual position after the prepend
@@ -300,21 +328,32 @@ export function ChatView({
     if (el && hasNextPage && !isFetchingNextPage && el.scrollHeight <= el.clientHeight) loadOlder();
   });
 
+  // One jump per *target*, not per mount (docs/MESSAGE_SEARCH.md §4.2) — a
+  // search-result tap can set a brand-new `jumpTarget` several times across
+  // one ChatView mount (gallery's `jumpToMessageId` only ever changes via a
+  // remount, so this used to be equivalent to "once per mount"). Resetting
+  // the guard whenever the effective target changes lets a second, third,
+  // etc. search-jump in the same session still fire.
+  useEffect(() => {
+    jumpedRef.current = false;
+  }, [effectiveJumpId]);
+
   // Keyset pagination is newest-first, so an older target message may not be
   // in the first page yet — keep paging back until it shows up (or we run
-  // out of history). Runs once per jump target.
+  // out of history). Runs once per jump target (see the guard-reset effect
+  // above).
   useEffect(() => {
-    if (!jumpToMessageId || jumpedRef.current) return;
-    const found = messages.some((m) => m.id === jumpToMessageId);
+    if (!effectiveJumpId || jumpedRef.current) return;
+    const found = messages.some((m) => m.id === effectiveJumpId);
     if (found) {
       jumpedRef.current = true;
-      messageRefs.current.get(jumpToMessageId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      setHighlightId(jumpToMessageId);
+      messageRefs.current.get(effectiveJumpId)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setHighlightId(effectiveJumpId);
       setTimeout(() => setHighlightId(null), 2000);
     } else if (hasNextPage && !isFetchingNextPage) {
       void fetchNextPage();
     }
-  }, [jumpToMessageId, messages, hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [effectiveJumpId, messages, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Undo toast is purely client-side (~10s, docs/archive/MESSAGE_DELETE.md §4) — make
   // sure navigating away from this chat can't leave a stray timer firing
@@ -482,6 +521,17 @@ export function ChatView({
     el.scrollIntoView({ block: 'center', behavior: 'smooth' });
     setHighlightId(id);
     setTimeout(() => setHighlightId(null), 2000);
+  }
+
+  /** A search result was tapped (docs/MESSAGE_SEARCH.md §4.2). Sets the jump
+   *  target (which drives the auto-paging effect above, same as the
+   *  gallery's `jumpToMessageId`) and, on mobile only, closes the overlay in
+   *  the same interaction — search state itself is untouched either way, so
+   *  reopening shows exactly what was there. Desktop's panel stays open
+   *  (Discord behavior): the tap just scrolls/highlights beside it. */
+  function jumpFromSearchResult(id: string) {
+    setJumpTarget(id);
+    if (isMobile) setSearchState((s) => ({ ...s, panelOpen: false }));
   }
 
   // Long-press → focus menu (or, if already selecting, a direct toggle — see
@@ -814,8 +864,14 @@ export function ChatView({
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {selectionMode ? (
+    // Desktop's search panel is a flex sibling of the message column, not an
+    // overlay (docs/MESSAGE_SEARCH.md §4.3) — the outer row only matters when
+    // it's open; with it closed (or on mobile, where search is a `fixed`
+    // overlay instead, unaffected by this row) the single child just fills
+    // the width as before.
+    <div className="flex h-full">
+      <div className="flex h-full min-w-0 flex-1 flex-col">
+        {selectionMode ? (
         <header
           className="flex items-center gap-3 border-b border-border bg-surface-raised px-4 py-3"
           style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.75rem)' }}
@@ -855,15 +911,25 @@ export function ChatView({
           subtitle={chat.isGroup ? `${chat.members.length} members` : undefined}
           onBack={onBack}
           trailing={
-            <button
-              onClick={onOpenGallery}
-              aria-label="Gallery"
-              className="flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400"
-              style={{ touchAction: 'manipulation' }}
-            >
-              <Images size={16} />
-              Gallery
-            </button>
+            <>
+              <button
+                onClick={() => setSearchState((s) => ({ ...s, panelOpen: true }))}
+                aria-label="Search messages"
+                className="flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Search size={16} />
+              </button>
+              <button
+                onClick={onOpenGallery}
+                aria-label="Gallery"
+                className="flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Images size={16} />
+                Gallery
+              </button>
+            </>
           }
         />
       )}
@@ -1025,6 +1091,29 @@ export function ChatView({
           onCopy={handleMenuCopy}
           onSelect={(m) => enterSelectionMode([m])}
           onDelete={(m) => void handleMenuDelete(m)}
+        />
+      )}
+      </div>
+
+      {!isMobile && searchState.panelOpen && (
+        <MessageSearchPanel
+          chatId={chat.id}
+          members={chat.members}
+          searchState={searchState}
+          onChangeSearchState={setSearchState}
+          onClose={() => setSearchState((s) => ({ ...s, panelOpen: false }))}
+          onJumpToMessage={jumpFromSearchResult}
+        />
+      )}
+
+      {isMobile && searchState.panelOpen && (
+        <MessageSearchOverlay
+          chatId={chat.id}
+          members={chat.members}
+          searchState={searchState}
+          onChangeSearchState={setSearchState}
+          onClose={() => setSearchState((s) => ({ ...s, panelOpen: false }))}
+          onJumpToMessage={jumpFromSearchResult}
         />
       )}
     </div>

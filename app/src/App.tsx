@@ -3,6 +3,7 @@ import type { ChatSummary, GalleryAlbum, MeResponse } from '@den/shared';
 import { Images, MessageCircle, User } from 'lucide-react';
 import { useMe } from './hooks/useMe';
 import { useIsMobile } from './hooks/useIsMobile';
+import { INITIAL_SEARCH_STATE, type SearchFormState } from './hooks/useMessageSearch';
 import { BackStackProvider, useBackHandler } from './lib/backStack';
 import { AuthScreen } from './components/AuthScreen';
 import { Profile } from './components/Profile';
@@ -114,6 +115,9 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // readable at the moment a fresh `ChatView` instance mounts. See
   // docs/archive/UI_REVAMP.md §8.
   const draftCacheRef = useRef(new Map<string, string>());
+  // Same pattern, same reason, for the search panel's per-chat state
+  // (query text, filters, open/closed) — docs/MESSAGE_SEARCH.md §4.1.
+  const searchStateCacheRef = useRef(new Map<string, SearchFormState>());
   const qc = useQueryClient();
 
   // Make the device back gesture / browser back button pop one level up the
@@ -183,6 +187,8 @@ function AuthedApp({ me }: { me: MeResponse }) {
           jumpToMessageId={view.jumpToMessageId}
           initialDraft={draftCacheRef.current.get(view.chat.id) ?? ''}
           onDraftChange={(draft) => draftCacheRef.current.set(view.chat.id, draft)}
+          initialSearchState={searchStateCacheRef.current.get(view.chat.id) ?? INITIAL_SEARCH_STATE}
+          onSearchStateChange={(state) => searchStateCacheRef.current.set(view.chat.id, state)}
         />
       );
     } else if (view.name === 'chatGallery') {
@@ -264,6 +270,8 @@ function AuthedApp({ me }: { me: MeResponse }) {
                   jumpToMessageId={rightPaneChat.jumpToMessageId}
                   initialDraft={draftCacheRef.current.get(rightPaneChat.chat.id) ?? ''}
                   onDraftChange={(draft) => draftCacheRef.current.set(rightPaneChat.chat.id, draft)}
+                  initialSearchState={searchStateCacheRef.current.get(rightPaneChat.chat.id) ?? INITIAL_SEARCH_STATE}
+                  onSearchStateChange={(state) => searchStateCacheRef.current.set(rightPaneChat.chat.id, state)}
                 />
               ) : (
                 <EmptyChatState />

@@ -1,4 +1,11 @@
-import type { ChatSummary, ChatsResponse, CreateChatRequest, Message, MessagesResponse } from '@den/shared';
+import type {
+  ChatSummary,
+  ChatsResponse,
+  CreateChatRequest,
+  Message,
+  MessagesResponse,
+  SearchMessagesResponse,
+} from '@den/shared';
 import { api } from './api';
 
 /** DMs derive their display name from the other member; groups fall back to
@@ -22,6 +29,24 @@ export function createChat(body: CreateChatRequest): Promise<ChatSummary> {
 export function fetchMessages(chatId: string, before: string | null): Promise<MessagesResponse> {
   const qs = before ? `?before=${encodeURIComponent(before)}` : '';
   return api<MessagesResponse>(`/api/chats/${chatId}/messages${qs}`);
+}
+
+/** GET /chats/:id/messages/search (docs/MESSAGE_SEARCH.md §3/4.1). `filters`
+ *  mirrors the search panel's committed form state — empty strings mean "no
+ *  filter", omitted from the querystring entirely rather than sent blank. */
+export function fetchMessageSearch(
+  chatId: string,
+  filters: { q: string; from: string; since: string; until: string },
+  before: string | null,
+): Promise<SearchMessagesResponse> {
+  const params = new URLSearchParams();
+  if (filters.q.trim()) params.set('q', filters.q.trim());
+  if (filters.from) params.set('from', filters.from);
+  if (filters.since) params.set('since', filters.since);
+  if (filters.until) params.set('until', filters.until);
+  if (before) params.set('before', before);
+  const qs = params.toString();
+  return api<SearchMessagesResponse>(`/api/chats/${chatId}/messages/search${qs ? `?${qs}` : ''}`);
 }
 
 export function markRead(chatId: string, messageId: string): Promise<{ ok: true }> {
