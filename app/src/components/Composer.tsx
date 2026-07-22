@@ -25,7 +25,7 @@ import { RecordingBar, type RecState } from './RecordingBar';
 // Gesture thresholds — convention-based defaults, grouped here for later
 // real-device tuning (Samsung/iPhone pass), same posture as UI-6's
 // MediaViewer thresholds (docs/UI_REVAMP.md §8).
-const LOCK_THRESHOLD_DY = -80; // px — slide up past this to lock (hands-free)
+const LOCK_THRESHOLD_DY = -115; // px — slide up past this to lock (hands-free); raised from -80, which armed too early (user feedback)
 const CANCEL_THRESHOLD_DX = -120; // px — slide left past this to cancel
 
 const LEVEL_BAR_COUNT = 32; // rolling window length for the live waveform
