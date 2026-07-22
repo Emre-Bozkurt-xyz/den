@@ -5,6 +5,10 @@
  * header (`ChatView`'s bottom sheet + `MessageFocusMenu`) compute "what does
  * this timestamp mean to a human" from a `Message.createdAt` ISO string. No
  * date library — `Intl.DateTimeFormat` covers everything this needs.
+ *
+ * `ChatGallery`'s always-on date sections (BACKBONE §15 2026-07-22) use
+ * `formatDayLabel` from here too, so the gallery's day headers/dividers and
+ * the chat's UI-8b dividers share one vocabulary and can't drift apart.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -44,6 +48,16 @@ export function formatTime(iso: string): string {
   return timeFormatter.format(new Date(iso));
 }
 
+/** Shared "how far back is this day" vocabulary for `diff >= 1` (yesterday /
+ *  weekday / "MMM D" / "MMM D, YYYY") — factored out so `formatDateLabel`
+ *  (chat dividers) and `formatDayLabel` (gallery day sections) can't drift
+ *  apart on wording; they differ only in what they print for `diff <= 0`. */
+function pastDayLabel(d: Date, now: Date, diff: number): string {
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7) return weekdayFormatter.format(d);
+  return d.getFullYear() === now.getFullYear() ? monthDayFormatter.format(d) : monthDayYearFormatter.format(d);
+}
+
 /** The date-divider label for a run boundary (UI-8b request D): "Yesterday",
  *  a weekday name within the last 7 days, else "MMM D" (or "MMM D, YYYY" if
  *  not this year).
@@ -61,9 +75,25 @@ export function formatDateLabel(iso: string): string {
   const now = new Date();
   const diff = daysBetween(d, now);
   if (diff <= 0) return formatTime(iso);
-  if (diff === 1) return 'Yesterday';
-  if (diff < 7) return weekdayFormatter.format(d);
-  return d.getFullYear() === now.getFullYear() ? monthDayFormatter.format(d) : monthDayYearFormatter.format(d);
+  return pastDayLabel(d, now, diff);
+}
+
+/** Day-granularity label for the gallery's always-on date sections (BACKBONE
+ *  §15 2026-07-22): "Today", "Yesterday", a weekday name within the last ~6
+ *  days, else "MMM D" (or "MMM D, YYYY" if not this year) — same vocabulary
+ *  as `formatDateLabel` via `pastDayLabel`, so the chat's UI-8b dividers and
+ *  the gallery's day headers/dividers can't say different things for the
+ *  same day. Unlike `formatDateLabel`, this *does* print "Today": a gallery
+ *  section header has no per-item time fallback the way a chat divider
+ *  does, so every day — including today — needs an explicit label. A
+ *  (clock-skew) future date also collapses to "Today" rather than a
+ *  negative/nonsense label. */
+export function formatDayLabel(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = daysBetween(d, now);
+  if (diff <= 0) return 'Today';
+  return pastDayLabel(d, now, diff);
 }
 
 /** Action-/focus-menu send-time header (UI-8c request E): full time, plus
