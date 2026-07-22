@@ -10,6 +10,14 @@
 
 const FALLBACK_ASPECT_RATIO = 4 / 3; // for still-processing media with null width/height
 
+/** Hard cap on a single tile's computed height (mosaic-style presentation
+ *  retune, stage 1 of the gallery visual rework). Without this, an extreme
+ *  portrait aspect ratio (e.g. a tall screenshot) can produce a tile several
+ *  screens tall in a narrow column, dominating the whole grid. Images render
+ *  `object-cover`, so cropping a capped tile to the container's declared
+ *  height is visually seamless — no letterboxing, no distortion. */
+export const MAX_TILE_HEIGHT = 600;
+
 export interface MasonryInput {
   id: string;
   width: number | null;
@@ -57,7 +65,7 @@ export function computeMasonryLayout(
 
   for (const item of items) {
     const ratio = item.width && item.height ? item.width / item.height : FALLBACK_ASPECT_RATIO;
-    const tileHeight = columnWidth / ratio;
+    const tileHeight = Math.min(columnWidth / ratio, MAX_TILE_HEIGHT);
 
     let shortest = 0;
     for (let c = 1; c < columnCount; c++) {
@@ -78,26 +86,27 @@ export function computeMasonryLayout(
  * *measured* container width (not `useIsMobile`'s device-class boolean) —
  * desktop's single-pane content area ranges continuously from ~500px to
  * well over 1400px depending on window size, not just "mobile vs desktop",
- * so column count needs its own finer-grained breakpoints. Tuned to keep
- * individual tiles roughly 110-160px wide. The <480px bucket reproduces the
- * original fixed 3-column mobile grid.
+ * so column count needs its own finer-grained breakpoints. Retuned (mosaic-
+ * style presentation pass, stage 1 of the gallery visual rework) to target
+ * individual tiles roughly 200-300px wide, up from the original cramped
+ * 110-160px — fewer, larger columns at every breakpoint.
  */
 export function galleryColumnCount(containerWidth: number): number {
-  if (containerWidth < 480) return 3;
-  if (containerWidth < 700) return 4;
-  if (containerWidth < 960) return 5;
-  return 6;
+  if (containerWidth < 480) return 2;
+  if (containerWidth < 768) return 3;
+  if (containerWidth < 1100) return 4;
+  return 5;
 }
 
 /**
  * Column count for the top-level album grid. Album tiles are a cover thumb
  * *plus* a name/count footer, so they read best a bit larger than an
- * individual media tile — fewer columns at the same width. The <480px
- * bucket reproduces the original fixed 2-column mobile grid.
+ * individual media tile — fewer columns at the same width. Retuned alongside
+ * `galleryColumnCount` (mosaic-style presentation pass, stage 1 of the
+ * gallery visual rework).
  */
 export function albumColumnCount(containerWidth: number): number {
   if (containerWidth < 480) return 2;
-  if (containerWidth < 700) return 3;
-  if (containerWidth < 960) return 4;
-  return 5;
+  if (containerWidth < 900) return 3;
+  return 4;
 }

@@ -159,3 +159,58 @@ label {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Gallery card polish (mosaic-style presentation retune, stage 1 of the
+ * gallery visual rework). Shared by the per-chat media masonry tiles
+ * (ChatGallery) and the top-level album covers (GalleryScreen) — same card
+ * language: fade+rise on mount, subtle raise-on-hover.
+ *
+ * The hover rule is strictly gated behind `(hover: hover) and (pointer:
+ * fine)`. This is load-bearing, not decorative: on touch devices (iOS
+ * Safari in particular) a bare `:hover` rule triggers on tap and then
+ * "sticks" until the user taps elsewhere, reading as a stuck/broken tile.
+ * Gating on real-hover-capable pointers keeps touch taps instant with zero
+ * lingering state, and gives mouse/trackpad users the raised feedback.
+ * ------------------------------------------------------------------------ */
+@keyframes gallery-tile-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-gallery-tile-in {
+  animation: gallery-tile-in 240ms ease-out;
+}
+
+.gallery-tile {
+  transition:
+    transform 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .gallery-tile:hover {
+    transform: scale(1.02);
+    box-shadow: var(--shadow-soft);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-gallery-tile-in {
+    animation: none;
+  }
+
+  .gallery-tile {
+    transition: none;
+  }
+
+  .gallery-tile:hover {
+    transform: none;
+  }
+}

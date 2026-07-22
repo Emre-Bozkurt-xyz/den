@@ -10,7 +10,7 @@ import { addTag, removeTag } from '../lib/tags';
 import { MediaViewer, TagEditor } from './MediaViewer';
 import { ScreenHeader } from './ScreenHeader';
 
-const GRID_GAP = 2; // px — matches the original grid's `gap-0.5`
+const GRID_GAP = 12; // px — mosaic-style presentation retune (stage 1 of the gallery visual rework), up from the original cramped 2px
 
 type TypeFilter = 'all' | MediaKind;
 
@@ -20,6 +20,13 @@ const TABS: { value: TypeFilter; label: string }[] = [
   { value: 'video', label: 'Videos' },
   { value: 'voice', label: 'Voice' },
 ];
+
+function formatDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
 
 /** Per-chat gallery (BACKBONE §9): hand-rolled masonry grid for images/videos
  *  (docs/UI_REVAMP.md UI-5 — shortest-column packing, aspect ratio predicted
@@ -112,39 +119,51 @@ export function ChatGallery({
         )}
 
         {gridItems.length > 0 && (
-          <div ref={gridRef} className="relative p-0.5" style={{ height: containerHeight }}>
-            {gridItems.map((item, i) => {
-              const tile = tileById.get(item.media.id);
-              if (!tile) return null;
-              return (
-                <button
-                  key={item.media.id}
-                  onClick={() => setViewerIndex(i)}
-                  className="absolute overflow-hidden bg-surface-sunken"
-                  style={{
-                    left: tile.left,
-                    top: tile.top,
-                    width: tile.width,
-                    height: tile.height,
-                    touchAction: 'manipulation',
-                  }}
-                >
-                  <img
-                    src={item.media.thumbUrl ?? item.media.url ?? undefined}
-                    alt=""
-                    loading="lazy"
-                    className="h-full w-full object-cover"
-                  />
-                  {item.media.kind === 'video' && (
-                    <span className="absolute inset-0 grid place-items-center bg-black/10">
-                      <span className="grid h-8 w-8 place-items-center rounded-pill bg-black/50 text-white">
-                        <Play size={14} fill="currentColor" />
-                      </span>
-                    </span>
-                  )}
-                </button>
-              );
-            })}
+          // Padding lives on this wrapper, outside the `gridRef`-measured div below,
+          // so `useElementWidth` reports exactly the width tiles are laid out into —
+          // padding here would otherwise be double-counted against the masonry math.
+          <div className="p-3">
+            <div ref={gridRef} className="relative" style={{ height: containerHeight }}>
+              {gridItems.map((item, i) => {
+                const tile = tileById.get(item.media.id);
+                if (!tile) return null;
+                return (
+                  <button
+                    key={item.media.id}
+                    onClick={() => setViewerIndex(i)}
+                    className="gallery-tile animate-gallery-tile-in absolute overflow-hidden rounded-xl border border-border bg-surface-sunken"
+                    style={{
+                      left: tile.left,
+                      top: tile.top,
+                      width: tile.width,
+                      height: tile.height,
+                      touchAction: 'manipulation',
+                    }}
+                  >
+                    <img
+                      src={item.media.thumbUrl ?? item.media.url ?? undefined}
+                      alt=""
+                      loading="lazy"
+                      className="h-full w-full object-cover"
+                    />
+                    {item.media.kind === 'video' && (
+                      <>
+                        <span className="absolute inset-0 grid place-items-center bg-black/10">
+                          <span className="grid h-8 w-8 place-items-center rounded-pill bg-black/50 text-white">
+                            <Play size={14} fill="currentColor" />
+                          </span>
+                        </span>
+                        {item.media.durationMs != null && (
+                          <span className="absolute bottom-1.5 right-1.5 rounded-sm bg-black/60 px-1.5 py-0.5 text-xs text-white">
+                            {formatDuration(item.media.durationMs)}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
 

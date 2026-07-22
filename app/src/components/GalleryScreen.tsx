@@ -12,10 +12,14 @@ import { albumColumnCount } from '../lib/masonry';
  *  `coverThumbUrl` — unlike `GalleryItem.media`, an album cover has no real
  *  aspect ratio to predict, so masonry's entire point (packing real photo
  *  proportions without pop-in) doesn't apply here. An album tile is also a
- *  cover + name + item-count footer, i.e. more like a consistent app/folder
- *  icon than organic photo content, so forcing every cover to one shape
- *  keeps the grid scannable. Only the column count is responsive, tracking
- *  the same measured-container-width approach as the masonry grid. */
+ *  cover (with an item-count chip overlaid) plus a name footer, i.e. more
+ *  like a consistent app/folder icon than organic photo content, so forcing
+ *  every cover to one shape keeps the grid scannable. Only the column count
+ *  is responsive, tracking the same measured-container-width approach as the
+ *  masonry grid. Card language (rounded/bordered, hover raise, entrance
+ *  fade) matches the media grid — see `.gallery-tile` and
+ *  `.animate-gallery-tile-in` in index.css (mosaic-style presentation
+ *  retune, stage 1 of the gallery visual rework). */
 export function GalleryScreen({ me, onOpenAlbum }: { me: MeResponse; onOpenAlbum: (album: GalleryAlbum) => void }) {
   const { data, isLoading } = useAlbums();
   const [gridRef, gridWidth] = useElementWidth<HTMLDivElement>();
@@ -42,19 +46,19 @@ export function GalleryScreen({ me, onOpenAlbum }: { me: MeResponse; onOpenAlbum
               <button
                 key={album.chatId}
                 onClick={() => onOpenAlbum(album)}
-                className="overflow-hidden rounded-lg border border-border text-left transition-colors hover:bg-surface-sunken active:bg-surface-sunken"
+                className="gallery-tile animate-gallery-tile-in overflow-hidden rounded-xl border border-border bg-surface-raised text-left"
                 style={{ touchAction: 'manipulation' }}
               >
-                <div className="aspect-square bg-surface-sunken">
+                <div className="relative aspect-square bg-surface-sunken">
                   {album.coverThumbUrl && (
                     <img src={album.coverThumbUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
                   )}
+                  <span className="absolute bottom-1.5 right-1.5 rounded-sm bg-black/60 px-1.5 py-0.5 text-xs text-white">
+                    {album.mediaCount} item{album.mediaCount === 1 ? '' : 's'}
+                  </span>
                 </div>
                 <div className="p-2">
                   <p className="truncate text-sm font-semibold text-text-primary">{name}</p>
-                  <p className="text-xs text-text-secondary">
-                    {album.mediaCount} item{album.mediaCount === 1 ? '' : 's'}
-                  </p>
                 </div>
               </button>
             );
