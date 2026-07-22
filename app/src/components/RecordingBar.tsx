@@ -1,4 +1,4 @@
-import { Lock, Square } from 'lucide-react';
+import { ChevronUp, Lock, Square } from 'lucide-react';
 
 /**
  * UI-8e recording state machine (docs/UI8_CHAT_INSTAGRAM.md) — owned by
@@ -113,22 +113,31 @@ export function RecordingBar({
         ))}
       </div>
 
-      {/* Lock chevron — grows and shifts toward the accent as a mobile drag
-          approaches the lock threshold, snapping to a filled accent lock once
-          armed/locked. A static filled lock while hands-free (locked). */}
+      {/* Lock affordance — an up-chevron above a lock, in a soft pill so it
+          reads as a control rather than a stray glyph (user feedback: the old
+          14px muted lock was too easy to miss). As the drag rises it travels
+          *upward* (translateY tracks the finger), grows, and shifts to the
+          accent, snapping to a solid accent lock once armed/locked. Origin is
+          the bottom so the growth pushes it up toward where the finger is
+          headed. `overflow-visible` on the bar (default) lets it rise above
+          the composer edge, WhatsApp-style. */}
       {isMobile && (recState === 'locked' || showDragHints) && (
         <span
           className={
-            'flex shrink-0 items-center transition-colors ' +
-            (recState === 'locked' || lockArmed ? 'text-accent' : 'text-text-muted')
+            'flex shrink-0 flex-col items-center gap-0.5 rounded-pill px-1.5 py-1 transition-colors ' +
+            (recState === 'locked' || lockArmed ? 'bg-accent/15 text-accent' : 'bg-current/10 text-text-secondary')
           }
           style={{
-            opacity: recState === 'locked' ? 1 : 0.35 + lockProgress * 0.65,
-            transform: `scale(${recState === 'locked' ? 1 : 1 + lockProgress * 0.4})`,
-            transformOrigin: 'center',
+            opacity: recState === 'locked' ? 1 : 0.6 + lockProgress * 0.4,
+            transform: `translateY(${recState === 'locked' ? 0 : -lockProgress * 22}px) scale(${recState === 'locked' ? 1 : 1 + lockProgress * 0.55})`,
+            transformOrigin: 'bottom center',
           }}
+          aria-hidden
         >
-          <Lock size={14} fill={recState === 'locked' || lockArmed ? 'currentColor' : 'none'} />
+          {recState !== 'locked' && (
+            <ChevronUp size={12} className="animate-pulse" style={{ opacity: 0.4 + lockProgress * 0.6 }} />
+          )}
+          <Lock size={18} fill={recState === 'locked' || lockArmed ? 'currentColor' : 'none'} />
         </span>
       )}
     </div>
