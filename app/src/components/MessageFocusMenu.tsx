@@ -192,14 +192,25 @@ export function MessageFocusMenu({
     paddingBottom: 'env(safe-area-inset-bottom)',
   };
 
-  // Portalled to `document.body` — mounting in place (inside the scrolling
-  // message list) let the list's own bubbles/media paint back over this
-  // `position: fixed` overlay despite its z-index (observed: long-press → a
-  // voice bubble elsewhere in the list rendered on top of the panel). A
-  // portal sidesteps whatever ancestor stacking context caused that instead
-  // of chasing it bubble-by-bubble.
+  // Portalled to `document.body`, and — this is the part that actually
+  // matters — given an explicit `zIndex` on this outermost wrapper itself,
+  // not just on its children. `position: fixed` always creates a new
+  // stacking context (CSS2.1 spec), even at `z-index: auto`; but an "auto"
+  // stacking context is painted at its parent's z-index:0 layer, same
+  // layer as any other unpositioned content. Meanwhile every message block
+  // (`MessageBlockRow`) sets `position: relative; z-index: 10` on itself —
+  // a plain positive z-index in the SAME parent (body-level) stacking
+  // context this wrapper lives in. z-index:10 paints later than an
+  // z-index:auto context regardless of what z-index values exist *inside*
+  // that auto context (the backdrop/clone/panel's 50/61/62 only order
+  // things relative to each other, never against this wrapper's siblings)
+  // — so every message bubble on the page won automatically, confirmed via
+  // `elementsFromPoint` in real testing (Chromium and reported in Firefox
+  // too — this is spec-correct behavior, not a browser bug). Fixed by
+  // giving the wrapper itself a z-index higher than any z-index used
+  // elsewhere in the app.
   return createPortal(
-    <div className="fixed inset-0" style={{ touchAction: 'manipulation' }}>
+    <div className="fixed inset-0" style={{ touchAction: 'manipulation', zIndex: 100 }}>
       {/* Backdrop: dims the rest of the screen, click-to-dismiss. Flat dim
           only — no `backdrop-filter` blur, see the file-header note above. */}
       <div

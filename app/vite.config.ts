@@ -47,4 +47,12 @@ export default defineConfig({
       '/socket.io': { target: API_TARGET, ws: true, changeOrigin: true },
     },
   },
+  preview: {
+    port: 4300,
+    proxy: {
+      '/api': { target: API_TARGET, changeOrigin: true },
+      '/health': { target: API_TARGET, changeOrigin: true },
+      '/socket.io': { target: API_TARGET, ws: true, changeOrigin: true },
+    },
+  },
 });
