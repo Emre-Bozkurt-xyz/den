@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { CheckSquare, Copy, Hand, Images, Mic, MoreVertical, Paperclip, Square, Trash2, X } from 'lucide-react';
+import { Copy, Hand, Images, Trash2, X } from 'lucide-react';
 import type { ChatSummary, MediaInfo, MeResponse, Message } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import { chatDisplayName, deleteMessages, markRead, restoreMessages } from '../lib/chats';
 import { kindForMime, uploadMedia } from '../lib/media';
-import { blockMessages, groupMessages, type MessageBlock } from '../lib/messageGroups';
+import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
 import { addTag, removeTag } from '../lib/tags';
 import { useRealtime } from '../lib/realtime';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { useIntroIds } from '../hooks/useIntroIds';
 import { useMediaTags } from '../hooks/useMediaTags';
+import { Composer } from './Composer';
 import { MediaBubble } from './MediaBubble';
 import { MediaGridSheet, MediaStack } from './MediaStack';
 import { MediaViewer } from './MediaViewer';
+import { MessageActions } from './MessageActions';
+import { MessageFocusMenu } from './MessageFocusMenu';
 import { ScreenHeader } from './ScreenHeader';
 
 /** `index`/`total` are 1-based positions within one multi-file pick — each
@@ -23,6 +27,11 @@ type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number; index:
  *  so prev/next works when the viewer was opened from a stack's grid sheet,
  *  with the exact same component the gallery uses. */
 type ViewerState = { list: MediaInfo[]; index: number } | null;
+
+/** The focus menu's (UI-8d) target — the message plus what was captured at
+ *  the moment it opened: the bubble's on-screen rect (the lift animates from
+ *  it) and the live DOM node (cloned for the lift — see MessageFocusMenu). */
+type ActionMenuState = { message: Message; rect: DOMRect; sourceEl: HTMLElement } | null;
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
@@ -72,12 +81,7 @@ export function ChatView({
   // Messages of the stack whose grid sheet is open (UI-7). Held as messages,
   // not media, so picking a tile can seed the viewer in stack order.
   const [stackSheet, setStackSheet] = useState<Message[] | null>(null);
-  const [recording, setRecording] = useState(false);
   const [highlightId, setHighlightId] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const streamRef = useRef<MediaStream | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
   const jumpedRef = useRef(false);
@@ -87,8 +91,11 @@ export function ChatView({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
-  // The message the action sheet (Copy/Select/Delete) is currently open for.
-  const [actionMenuFor, setActionMenuFor] = useState<Message | null>(null);
+  // The message the focus menu (UI-8d — Copy/Select/Delete + send time) is
+  // currently open for, plus what was captured at open time for the lift
+  // animation. Was `Message | null` pre-UI-8, when this drove a plain
+  // bottom-sheet with no shared-element animation to feed.
+  const [actionMenuFor, setActionMenuFor] = useState<ActionMenuState>(null);
   const [actionError, setActionError] = useState('');
   const [undoIds, setUndoIds] = useState<string[] | null>(null);
   const undoTimerRef = useRef<number | null>(null);
@@ -107,6 +114,13 @@ export function ChatView({
   // Stacking is off during multi-select so every message stays individually
   // selectable — see lib/messageGroups.ts.
   const runs = groupMessages(messages, { stack: !selectionMode });
+  // Date/time dividers interleaved between runs (UI-8b request D) — purely
+  // derived over whatever's currently loaded, recomputed every render.
+  const timeline = buildTimeline(runs);
+  // Which message ids should play the send/receive bubble-in animation on
+  // this render (UI-8a) — see the hook's doc for why this has to be more
+  // than "is this id new".
+  const introIds = useIntroIds(messages, me.id);
   const lastMessageId = messages[messages.length - 1]?.id;
   const viewerMedia = viewer ? (viewer.list[viewer.index] ?? null) : null;
   // Tags for whatever the viewer is showing. Per the UI-7 decision, tagging
@@ -265,6 +279,17 @@ export function ChatView({
     await performDelete([m.id]);
   }
 
+  /** Opens the UI-8d focus menu for a message, capturing its current
+   *  on-screen rect + DOM node from `messageRefs` — both are needed for the
+   *  lift animation (see `MessageFocusMenu`). No-ops if the message isn't
+   *  currently rendered with a ref (shouldn't happen — every visible block
+   *  registers one before it's interactive). */
+  function openActionMenu(m: Message) {
+    const el = messageRefs.current.get(m.id);
+    if (!el) return;
+    setActionMenuFor({ message: m, rect: el.getBoundingClientRect(), sourceEl: el });
+  }
+
   function clearLongPressTimer() {
     if (longPressTimerRef.current !== null) {
       window.clearTimeout(longPressTimerRef.current);
@@ -272,10 +297,10 @@ export function ChatView({
     }
   }
 
-  // Long-press → action menu (or, if already selecting, a direct toggle —
-  // see docs/MESSAGE_DELETE.md §4's "long-press when already in selection
-  // mode"). Never selectable/actionable while still an optimistic pending
-  // bubble — there's nothing to delete server-side yet.
+  // Long-press → focus menu (or, if already selecting, a direct toggle — see
+  // docs/MESSAGE_DELETE.md §4's "long-press when already in selection mode").
+  // Never selectable/actionable while still an optimistic pending bubble —
+  // there's nothing to delete server-side yet.
   function onBubblePointerDown(e: React.PointerEvent, msgs: Message[]) {
     // Clear any stale suppression from a previous interaction whose click
     // never arrived (long-press fired, then the pointer lifted off the
@@ -290,12 +315,12 @@ export function ChatView({
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       suppressClickRef.current = true;
-      // Stacks (msgs.length > 1) skip the single-message action sheet: Copy
+      // Stacks (msgs.length > 1) skip the single-message focus menu: Copy
       // and Delete are per-message, so the useful gesture is "select all of
       // these", which also expands the stack back into individual bubbles.
       if (selectionMode) toggleSelect(m.id);
       else if (msgs.length > 1) enterSelectionMode(msgs);
-      else setActionMenuFor(m);
+      else openActionMenu(m);
     }, LONG_PRESS_MS);
   }
 
@@ -333,8 +358,7 @@ export function ChatView({
     toggleSelect(m.id);
   }
 
-  function submit(e: React.FormEvent) {
-    e.preventDefault();
+  function sendDraft() {
     if (!draft.trim()) return;
     sendMessage(chat.id, draft);
     setDraft('');
@@ -346,9 +370,7 @@ export function ChatView({
    *  in parallel: the media pipeline is per-item anyway and a serial queue
    *  keeps the progress bar honest and phone radios/CPU from being hammered
    *  by N concurrent PUTs. */
-  async function handleFilePicked(e: React.ChangeEvent<HTMLInputElement>) {
-    const picked = Array.from(e.target.files ?? []);
-    e.target.value = ''; // allow picking the same file(s) again
+  async function handleFilesPicked(picked: File[]) {
     if (picked.length === 0) return;
 
     const files = picked.flatMap((file) => {
@@ -394,33 +416,15 @@ export function ChatView({
     }
   }
 
-  async function startRecording() {
-    setUploadError('');
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-      const rec = new MediaRecorder(stream); // platform picks its native container; server normalizes to m4a
-      chunksRef.current = [];
-      rec.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
-      rec.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: rec.mimeType || 'audio/webm' });
-        // No caption: the mic button only exists while the composer is empty.
-        void runUpload(blob, 'voice', blob.type, '').then((ok) => {
-          if (!ok) setUploadError('Upload failed — try again');
-        });
-      };
-      recorderRef.current = rec;
-      rec.start();
-      setRecording(true);
-    } catch {
-      setUploadError('Microphone access failed');
-    }
-  }
-
-  function stopRecording() {
-    recorderRef.current?.stop();
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    setRecording(false);
+  /** Hands a finished recording (UI-8e — `Composer`'s state machine) off to
+   *  the same `runUpload` path every other media kind already uses; this
+   *  function is the entire bridge between the two, so the actual
+   *  upload/transcode flow is not duplicated or rewritten. No caption: the
+   *  mic/recording bar only exists while the composer's text is empty. */
+  function handleRecordingComplete(blob: Blob, mime: string) {
+    void runUpload(blob, 'voice', mime, '').then((ok) => {
+      if (!ok) setUploadError('Upload failed — try again');
+    });
   }
 
   /** True when a tap on media should be ignored because it belongs to the
@@ -532,48 +536,38 @@ export function ChatView({
 
         {/* Runs are separated by a real gap; bubbles *inside* a run sit 2px
             apart so a burst of messages reads as one connected block, with
-            the tail drawn only on the run's last bubble (UI-7). */}
+            the tail drawn only on the run's last bubble (UI-7). Date/time
+            dividers (UI-8b) interleave between runs. */}
         <div className="flex flex-col gap-3">
-          {runs.map((run) => {
-            const mine = run.senderId === me.id;
-            const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
-            return (
-              <div
-                key={run.key}
-                className={
-                  'flex max-w-[78%] flex-col gap-[2px] ' + (mine ? 'items-end self-end' : 'items-start self-start')
-                }
-              >
-                {chat.isGroup && !mine && (
-                  <p className="px-1 pb-0.5 text-xs font-semibold text-text-secondary">{senderName}</p>
-                )}
-                {run.blocks.map((block, bi) => (
-                  <MessageBlockRow
-                    key={blockMessages(block)[0]!.id}
-                    block={block}
-                    mine={mine}
-                    isRunTail={bi === run.blocks.length - 1}
-                    selectedIds={selectedIds}
-                    highlightId={highlightId}
-                    selectionMode={selectionMode}
-                    showActionsButton={!isMobile && block.kind === 'single'}
-                    registerRef={(id, el) => {
-                      if (el) messageRefs.current.set(id, el);
-                      else messageRefs.current.delete(id);
-                    }}
-                    onOpenActions={setActionMenuFor}
-                    onOpenViewer={openViewer}
-                    onOpenStack={openStack}
-                    onPointerDownBlock={onBubblePointerDown}
-                    onPointerMoveBlock={onBubblePointerMove}
-                    onPointerUpBlock={onBubblePointerUp}
-                    onPointerCancelBlock={onBubblePointerCancel}
-                    onClickBlock={onBubbleClick}
-                  />
-                ))}
-              </div>
-            );
-          })}
+          {timeline.map((item) =>
+            item.kind === 'divider' ? (
+              <TimelineDivider key={item.id} label={item.label} />
+            ) : (
+              <RunGroup
+                key={item.run.key}
+                run={item.run}
+                chat={chat}
+                me={me}
+                introIds={introIds}
+                selectedIds={selectedIds}
+                highlightId={highlightId}
+                selectionMode={selectionMode}
+                isMobile={isMobile}
+                registerRef={(id, el) => {
+                  if (el) messageRefs.current.set(id, el);
+                  else messageRefs.current.delete(id);
+                }}
+                onOpenActions={openActionMenu}
+                onOpenViewer={openViewer}
+                onOpenStack={openStack}
+                onPointerDownBlock={onBubblePointerDown}
+                onPointerMoveBlock={onBubblePointerMove}
+                onPointerUpBlock={onBubblePointerUp}
+                onPointerCancelBlock={onBubblePointerCancel}
+                onClickBlock={onBubbleClick}
+              />
+            ),
+          )}
         </div>
         <div ref={bottomRef} />
       </div>
@@ -611,59 +605,16 @@ export function ChatView({
         </p>
       )}
 
-      <form
-        onSubmit={submit}
-        className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
-        style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,video/*"
-          multiple
-          hidden
-          onChange={(e) => void handleFilePicked(e)}
-        />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!!upload || recording}
-          aria-label="Attach photo or video"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
-          style={{ touchAction: 'manipulation' }}
-        >
-          <Paperclip size={18} />
-        </button>
-        <input
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="Message"
-          className="h-11 min-w-0 flex-1 rounded-pill border border-border bg-surface px-4 text-base text-text-primary outline-none transition-colors focus:border-accent"
-        />
-        {draft.trim() ? (
-          <button
-            type="submit"
-            className="flex h-11 shrink-0 items-center rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
-            style={{ touchAction: 'manipulation' }}
-          >
-            Send
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => (recording ? stopRecording() : void startRecording())}
-            disabled={!!upload}
-            aria-label={recording ? 'Stop recording' : 'Record voice message'}
-            className={
-              'grid h-11 w-11 shrink-0 place-items-center rounded-pill text-white transition-colors disabled:opacity-40 ' +
-              (recording ? 'bg-rose-600 hover:bg-rose-700 active:bg-rose-700' : 'bg-accent hover:bg-accent-hover active:bg-accent-hover')
-            }
-            style={{ touchAction: 'manipulation' }}
-          >
-            {recording ? <Square size={18} /> : <Mic size={18} />}
-          </button>
-        )}
-      </form>
+      <Composer
+        draft={draft}
+        onDraftChange={setDraft}
+        onSend={sendDraft}
+        onPickFiles={(files) => void handleFilesPicked(files)}
+        uploading={!!upload}
+        onRecordingComplete={handleRecordingComplete}
+        onRecordingError={setUploadError}
+        isMobile={isMobile}
+      />
 
       {stackSheet && (
         <MediaGridSheet
@@ -696,56 +647,115 @@ export function ChatView({
       )}
 
       {actionMenuFor && (
-        <div
-          className="fixed inset-0 z-50 flex items-end bg-black/40"
-          onClick={() => setActionMenuFor(null)}
-          style={{ touchAction: 'manipulation' }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full rounded-t-lg bg-surface-raised"
-            style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
-          >
-            <div className="flex flex-col divide-y divide-border">
-              {actionMenuFor.body && (
-                <button
-                  onClick={() => handleMenuCopy(actionMenuFor)}
-                  className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary"
-                  style={{ touchAction: 'manipulation' }}
-                >
-                  <Copy size={16} />
-                  Copy
-                </button>
-              )}
-              <button
-                onClick={() => enterSelectionMode([actionMenuFor])}
-                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary"
-                style={{ touchAction: 'manipulation' }}
-              >
-                <CheckSquare size={16} />
-                Select
-              </button>
-              {actionMenuFor.senderId === me.id && (
-                <button
-                  onClick={() => void handleMenuDelete(actionMenuFor)}
-                  className="flex items-center gap-3 px-4 py-3 text-left text-sm text-red-600 dark:text-red-400"
-                  style={{ touchAction: 'manipulation' }}
-                >
-                  <Trash2 size={16} />
-                  Delete
-                </button>
-              )}
-            </div>
-            <button
-              onClick={() => setActionMenuFor(null)}
-              className="w-full border-t border-border px-4 py-3 text-center text-sm font-semibold text-text-secondary"
-              style={{ touchAction: 'manipulation' }}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+        <MessageFocusMenu
+          key={actionMenuFor.message.id}
+          message={actionMenuFor.message}
+          rect={actionMenuFor.rect}
+          sourceEl={actionMenuFor.sourceEl}
+          me={me}
+          onClose={() => setActionMenuFor(null)}
+          onCopy={handleMenuCopy}
+          onSelect={(m) => enterSelectionMode([m])}
+          onDelete={(m) => void handleMenuDelete(m)}
+        />
       )}
+    </div>
+  );
+}
+
+/** Centered muted date/time label between runs (UI-8b request D) — "4:23 PM"
+ *  for a same-day gap, a date ("Yesterday" / weekday / "MMM D") at a
+ *  calendar-day boundary. Sentence case, not uppercase (a judgment call —
+ *  the reference showed an uppercase treatment; this repo's other
+ *  micro-copy, e.g. the bottom-sheet's "Copy"/"Select"/"Delete", is
+ *  sentence-case throughout, so this follows that instead of introducing a
+ *  one-off ALL-CAPS style). */
+function TimelineDivider({ label }: { label: string }) {
+  return (
+    <div className="flex justify-center py-1">
+      <span className="text-xs text-text-muted">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * One run's column of blocks — same sender, grouped by `groupMessages`
+ * (docs/UI_REVAMP.md UI-7). Factored out of `ChatView`'s render when UI-8b
+ * added the interleaved timeline (dividers now sit between these, so the
+ * per-run JSX needed a name to key/map over rather than living inline in a
+ * single `runs.map`).
+ */
+function RunGroup({
+  run,
+  chat,
+  me,
+  introIds,
+  selectedIds,
+  highlightId,
+  selectionMode,
+  isMobile,
+  registerRef,
+  onOpenActions,
+  onOpenViewer,
+  onOpenStack,
+  onPointerDownBlock,
+  onPointerMoveBlock,
+  onPointerUpBlock,
+  onPointerCancelBlock,
+  onClickBlock,
+}: {
+  run: MessageRun;
+  chat: ChatSummary;
+  me: MeResponse;
+  introIds: Set<string>;
+  selectedIds: Set<string>;
+  highlightId: string | null;
+  selectionMode: boolean;
+  isMobile: boolean;
+  registerRef: (id: string, el: HTMLDivElement | null) => void;
+  onOpenActions: (m: Message) => void;
+  onOpenViewer: (m: Message) => void;
+  onOpenStack: (msgs: Message[]) => void;
+  onPointerDownBlock: (e: React.PointerEvent, msgs: Message[]) => void;
+  onPointerMoveBlock: (e: React.PointerEvent) => void;
+  onPointerUpBlock: () => void;
+  onPointerCancelBlock: () => void;
+  onClickBlock: (e: React.MouseEvent, msgs: Message[]) => void;
+}) {
+  const mine = run.senderId === me.id;
+  const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
+
+  return (
+    <div className={'flex max-w-[78%] flex-col gap-[2px] ' + (mine ? 'items-end self-end' : 'items-start self-start')}>
+      {chat.isGroup && !mine && <p className="px-1 pb-0.5 text-xs font-semibold text-text-secondary">{senderName}</p>}
+      {run.blocks.map((block, bi) => (
+        <MessageBlockRow
+          key={blockMessages(block)[0]!.id}
+          block={block}
+          mine={mine}
+          isRunHead={bi === 0}
+          isRunTail={bi === run.blocks.length - 1}
+          intro={blockMessages(block).some((m) => introIds.has(m.id))}
+          selectedIds={selectedIds}
+          highlightId={highlightId}
+          selectionMode={selectionMode}
+          // Hover bar (UI-8c) is desktop-only, single-message blocks only
+          // (a stack has no addressable single-message action — see the
+          // stack doc comment in lib/messageGroups.ts), and hidden entirely
+          // during multi-select (docs/UI8_CHAT_INSTAGRAM.md §4 cross-cutting
+          // rule — selection mode owns bubble taps instead).
+          showActionsButton={!isMobile && !selectionMode && block.kind === 'single'}
+          registerRef={registerRef}
+          onOpenActions={onOpenActions}
+          onOpenViewer={onOpenViewer}
+          onOpenStack={onOpenStack}
+          onPointerDownBlock={onPointerDownBlock}
+          onPointerMoveBlock={onPointerMoveBlock}
+          onPointerUpBlock={onPointerUpBlock}
+          onPointerCancelBlock={onPointerCancelBlock}
+          onClickBlock={onClickBlock}
+        />
+      ))}
     </div>
   );
 }
@@ -754,24 +764,37 @@ export function ChatView({
  * One block within a run (docs/UI_REVAMP.md UI-7) — either a single message
  * or a fanned stack of adjacent bare photos/videos.
  *
- * Two rules do most of the visual work here:
- *  - **Only the run's last bubble gets a tail.** Every bubble is otherwise
- *    uniformly `rounded-lg`; the tail is the tightened bottom corner on the
- *    sender's side, applied only when `isRunTail`. Earlier bubbles in a run
- *    stay fully rounded so a burst reads as one connected block.
+ * Corner rounding follows the block's position within its run (UI-8b
+ * request B — "cleaner run corners"), on the *sender's* side only (right for
+ * `mine`, left for others; the opposite side always stays fully
+ * `rounded-lg`):
+ *  - **head** (first block): top rounded (nothing sits above it), bottom
+ *    tightened (a connector into the next block).
+ *  - **middle**: both corners tightened.
+ *  - **tail** (last block): top tightened, bottom tightened — the same
+ *    small nub corner runs always had.
+ *  A single-message run is both head and tail simultaneously, which
+ *  resolves to exactly the pre-UI-8b behavior (top rounded, bottom
+ *  tightened) — no special case needed. In other words: the sender-side
+ *  bottom corner is *always* tightened (either as an inner connector or the
+ *  run's tail nub — same 4px value either way), and the sender-side top
+ *  corner is tightened for every block except the run's head.
+ *
+ * Two rules do the rest of the visual work here, unchanged since UI-7:
  *  - **Photos and videos get no bubble at all.** They're drawn bare,
  *    Instagram-style; a caption (if any) becomes its own small bubble
  *    underneath rather than a padded strip inside a container around the
  *    image. Voice is the exception — it stays in a bubble and inherits its
  *    color via `currentColor`.
- *
- * The whole block is one pointer target (long-press/selection), so a stack's
- * long-press can select all of the messages it covers at once.
+ *  - The whole block is one pointer target (long-press/selection), so a
+ *    stack's long-press can select all of the messages it covers at once.
  */
 function MessageBlockRow({
   block,
   mine,
-  isRunTail,
+  isRunHead,
+  isRunTail: _isRunTail,
+  intro,
   selectedIds,
   highlightId,
   selectionMode,
@@ -788,7 +811,14 @@ function MessageBlockRow({
 }: {
   block: MessageBlock;
   mine: boolean;
+  isRunHead: boolean;
+  /** Kept for callers' documentation/future use (see the corner-rounding
+   *  doc above — every block's bottom sender-side corner is tightened
+   *  regardless of tail-ness, so this isn't read directly here), not
+   *  because the position concept doesn't matter. */
   isRunTail: boolean;
+  /** UI-8a — plays the bubble-in animation once, on first render as "new". */
+  intro: boolean;
   selectedIds: Set<string>;
   highlightId: string | null;
   selectionMode: boolean;
@@ -816,19 +846,7 @@ function MessageBlockRow({
   const showBubble = !isStack && (!bare || !!m.body);
   const isVoice = m.media?.kind === 'voice';
 
-  const actionsButton = showActionsButton && !pending && (
-    <button
-      onClick={(e) => {
-        e.stopPropagation();
-        onOpenActions(m);
-      }}
-      aria-label="Message actions"
-      className="shrink-0 self-start rounded-pill p-1 text-text-muted opacity-0 transition-opacity hover:bg-surface-sunken group-hover:opacity-100"
-      style={{ touchAction: 'manipulation' }}
-    >
-      <MoreVertical size={14} />
-    </button>
-  );
+  const actionsButton = showActionsButton && !pending && <MessageActions onMore={() => onOpenActions(m)} />;
 
   return (
     <div className={'group flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
@@ -849,7 +867,8 @@ function MessageBlockRow({
           (mine ? 'items-end ' : 'items-start ') +
           (highlighted ? 'ring-2 ring-amber-400 ' : '') +
           (selected ? 'ring-2 ring-indigo-500 ' : '') +
-          (pending && bare ? 'opacity-60 ' : '')
+          (pending && bare ? 'opacity-60 ' : '') +
+          (intro ? 'animate-bubble-in ' : '')
         }
         style={{
           touchAction: 'manipulation',
@@ -865,9 +884,10 @@ function MessageBlockRow({
             className={
               'max-w-full rounded-lg text-sm ' +
               (isVoice ? 'px-2 py-1.5 ' : 'px-3.5 py-2 ') +
-              // The tail: a tightened bottom corner on the sender's side,
-              // drawn only on the last bubble of a run.
-              (isRunTail ? (mine ? 'rounded-br-[4px] ' : 'rounded-bl-[4px] ') : '') +
+              // Run-position corner rounding (UI-8b) — see the file-level
+              // doc comment above for the head/middle/tail derivation.
+              (isRunHead ? '' : mine ? 'rounded-tr-[4px] ' : 'rounded-tl-[4px] ') +
+              (mine ? 'rounded-br-[4px] ' : 'rounded-bl-[4px] ') +
               (mine
                 ? 'bg-accent text-white ' + (pending ? 'opacity-60 ' : '')
                 : 'bg-surface-sunken text-text-primary ')

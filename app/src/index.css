@@ -102,3 +102,60 @@ input,
 label {
   touch-action: manipulation;
 }
+
+/* ---------------------------------------------------------------------------
+ * UI-8a — send/receive bubble intro (docs/UI8_CHAT_INSTAGRAM.md). A freshly-
+ * sent or freshly-arrived message eases in with a small scale-up + slide-up +
+ * fade; already-loaded history never gets this class (see
+ * app/src/hooks/useIntroIds.ts for which ids qualify). Hand-rolled, no
+ * animation library — matches the rest of the app's gesture/animation code.
+ * ------------------------------------------------------------------------ */
+@keyframes bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-bubble-in {
+  animation: bubble-in 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-bubble-in {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * UI-8e — composer ↔ recording-bar morph (docs/UI8_CHAT_INSTAGRAM.md). The
+ * text input and the live-waveform recording bar occupy the same flex slot
+ * and swap via plain conditional rendering (their shapes are too different
+ * for a literal FLIP-style width interpolation to be worth hand-rolling); this
+ * keyframe softens the swap into a quick cross-fade + settle instead of a
+ * hard cut. Applied to whichever side just mounted.
+ * ------------------------------------------------------------------------ */
+@keyframes composer-morph-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-composer-morph {
+  animation: composer-morph-in 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-composer-morph {
+    animation: none;
+  }
+}
