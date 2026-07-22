@@ -1,4 +1,4 @@
-import type { GalleryAlbumsResponse, GalleryResponse, MediaKind } from '@den/shared';
+import type { GalleryAlbumsResponse, GalleryKindFilter, GalleryResponse } from '@den/shared';
 import { api } from './api';
 
 export function fetchAlbums(): Promise<GalleryAlbumsResponse> {
@@ -7,7 +7,7 @@ export function fetchAlbums(): Promise<GalleryAlbumsResponse> {
 
 export function fetchGalleryPage(
   chatId: string,
-  kind: MediaKind | null,
+  kind: GalleryKindFilter | null,
   query: string,
   before: string | null,
 ): Promise<GalleryResponse> {

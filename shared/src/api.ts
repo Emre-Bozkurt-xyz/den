@@ -277,14 +277,29 @@ export interface MediaTagsResponse {
 
 // ─── gallery (Stage 4, BACKBONE §5/§6/§9) ───────────────────────────────────
 
-/** One tile in a per-chat gallery grid. `messageId` powers "jump to message". */
+/** One tile in a per-chat gallery grid. `messageId` powers "jump to message".
+ *  `senderId`/`createdAt` mirror the owning message (BACKBONE §15
+ *  2026-07-22) — the client uses `senderId` to pick mine/theirs bubble
+ *  colors for the voice segment's chat-skinned list, and `createdAt` for
+ *  the caption's short date/time and future date grouping. */
 export interface GalleryItem {
   media: MediaInfo;
   messageId: string;
   chatId: string;
+  senderId: string;
   createdAt: string; // ISO 8601, the message's createdAt (gallery sort key)
   tags: Tag[];
 }
+
+/** `GET /chats/:id/gallery`'s `kind` filter. The bare `MediaKind`s still
+ *  filter to exactly one kind (the Voice segment uses `voice`); `'visual'`
+ *  is image OR video — the Media segment's grid (BACKBONE §15 2026-07-22,
+ *  supersedes the old All/Images/Videos/Voice tabs). */
+export type GalleryKindFilter = MediaKind | 'visual';
+
+/** Every value the route accepts for `kind` — shared so server validation
+ *  and any client-side checks stay in lockstep. */
+export const GALLERY_KIND_FILTERS: readonly GalleryKindFilter[] = ['image', 'video', 'voice', 'visual'];
 
 /** GET /chats/:id/gallery?kind=&q=&before=&limit= — keyset pagination on
  *  media id DESC, matching the messages-page pattern (BACKBONE §6). `q` is
@@ -302,7 +317,7 @@ export interface GalleryAlbum {
   name: string | null; // null for DMs; client derives via chatDisplayName like ChatSummary
   isGroup: boolean;
   members: PublicUser[];
-  coverThumbUrl: string | null; // latest ready media's thumb (voice has none → null)
+  coverThumbUrl: string | null; // latest ready media *with a thumbnail* (image/video); null if none has one
   mediaCount: number;
 }
 

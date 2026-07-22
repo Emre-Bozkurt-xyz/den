@@ -10,8 +10,8 @@
  * documented reference query and is kept visible here per CLAUDE.md
  * ("raw SQL allowed only for the gallery tag query... keep the SQL visible").
  */
-import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm';
-import { parseTagQuery, type GalleryAlbum, type GalleryItem, type GalleryResponse, type MediaKind } from '@den/shared';
+import { and, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { parseTagQuery, type GalleryAlbum, type GalleryItem, type GalleryKindFilter, type GalleryResponse } from '@den/shared';
 import { db } from '../db/index.js';
 import { media, messages } from '../db/schema.js';
 import { toMediaInfo } from '../mappers.js';
@@ -32,6 +32,7 @@ const gallerySelectShape = {
   thumbKey: media.thumbKey,
   status: media.status,
   messageChatId: messages.chatId,
+  messageSenderId: messages.senderId,
   messageCreatedAt: messages.createdAt,
 } as const;
 
@@ -43,13 +44,17 @@ const gallerySelectShape = {
  *  running the media query at all (§5 booru behavior). */
 export async function getGalleryPage(
   chatId: bigint,
-  kind: MediaKind | null,
+  kind: GalleryKindFilter | null,
   rawQuery: string | null,
   before: bigint | null,
   limit: number,
 ): Promise<GalleryResponse> {
   const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready')];
-  if (kind) conditions.push(eq(media.kind, kind));
+  // 'visual' = image OR video — the Media segment's grid (BACKBONE §15
+  // 2026-07-22); any other value is a single MediaKind (Voice segment uses
+  // 'voice').
+  if (kind === 'visual') conditions.push(inArray(media.kind, ['image', 'video']));
+  else if (kind) conditions.push(eq(media.kind, kind));
   if (before !== null) conditions.push(lt(media.id, before));
 
   if (rawQuery?.trim()) {
@@ -94,6 +99,7 @@ export async function getGalleryPage(
         media: toMediaInfo(row, urls),
         messageId: row.messageId.toString(),
         chatId: row.messageChatId.toString(),
+        senderId: row.messageSenderId.toString(),
         createdAt: row.messageCreatedAt.toISOString(),
         tags: tagMap.get(row.id.toString()) ?? [],
       };
@@ -106,33 +112,39 @@ export async function getGalleryPage(
 
 interface ChatMediaSummary {
   coverThumbKey: string | null;
-  coverKey: string | null;
-  coverKind: MediaKind | null;
   count: number;
 }
 
 async function mediaSummaryFor(chatId: bigint): Promise<ChatMediaSummary> {
-  const [countRows, latestRows] = await Promise.all([
+  const [countRows, latestWithThumbRows] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
       .from(media)
       .innerJoin(messages, eq(messages.id, media.messageId))
       .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready'))),
+    // Cover = latest ready media *that has a thumbnail* (BACKBONE §15
+    // 2026-07-22), not just the latest ready item overall — voice never has
+    // a thumb_key, so picking the bare-latest item previously left the album
+    // tile blank whenever the newest upload in a chat was a voice message.
     db
-      .select({ thumbKey: media.thumbKey, r2Key: media.r2Key, kind: media.kind })
+      .select({ thumbKey: media.thumbKey })
       .from(media)
       .innerJoin(messages, eq(messages.id, media.messageId))
-      .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready')))
+      .where(
+        and(
+          eq(messages.chatId, chatId),
+          isNull(messages.deletedAt),
+          eq(media.status, 'ready'),
+          isNotNull(media.thumbKey),
+        ),
+      )
       .orderBy(desc(media.id))
       .limit(1),
   ]);
 
-  const latest = latestRows[0];
   return {
     count: countRows[0]?.count ?? 0,
-    coverThumbKey: latest?.thumbKey ?? null,
-    coverKey: latest?.r2Key ?? null,
-    coverKind: (latest?.kind as MediaKind | undefined) ?? null,
+    coverThumbKey: latestWithThumbRows[0]?.thumbKey ?? null,
   };
 }
 
@@ -150,18 +162,12 @@ export async function getAlbumsForUser(userId: bigint): Promise<GalleryAlbum[]> 
     const chat = chats[i]!;
     const summary = summaries[i]!;
     if (summary.count === 0) continue;
-    // Voice covers have no thumb (§9: voice is a list item, never a
-    // thumbnail) — fall back to the full media key only for non-voice so an
-    // image/video album never shows a blank tile.
-    const coverKey =
-      summary.coverThumbKey ??
-      (summary.coverKind && summary.coverKind !== 'voice' ? summary.coverKey : null);
     albums.push({
       chatId: chat.id,
       name: chat.name,
       isGroup: chat.isGroup,
       members: chat.members,
-      coverThumbUrl: coverKey ? await presignGet(coverKey) : null,
+      coverThumbUrl: summary.coverThumbKey ? await presignGet(summary.coverThumbKey) : null,
       mediaCount: summary.count,
     });
   }
