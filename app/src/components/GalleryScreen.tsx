@@ -3,6 +3,7 @@ import { useAlbums } from '../hooks/useGallery';
 import { useElementWidth } from '../hooks/useElementWidth';
 import { chatDisplayName } from '../lib/chats';
 import { albumColumnCount } from '../lib/masonry';
+import { suppressTouchContextMenu } from '../lib/nativeMenu';
 
 /** Top-level Gallery tab: chats-as-albums grid, cover = latest ready media's
  *  thumb (BACKBONE §9). Chats with zero media are omitted server-side.
@@ -46,7 +47,8 @@ export function GalleryScreen({ me, onOpenAlbum }: { me: MeResponse; onOpenAlbum
               <button
                 key={album.chatId}
                 onClick={() => onOpenAlbum(album)}
-                className="gallery-tile animate-gallery-tile-in overflow-hidden rounded-xl border border-border bg-surface-raised text-left"
+                onContextMenu={suppressTouchContextMenu}
+                className="media-preview gallery-tile animate-gallery-tile-in overflow-hidden rounded-xl border border-border bg-surface-raised text-left"
                 style={{ touchAction: 'manipulation' }}
               >
                 <div className="relative aspect-square bg-surface-sunken">

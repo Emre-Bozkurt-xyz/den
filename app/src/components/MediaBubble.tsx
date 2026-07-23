@@ -1,5 +1,6 @@
 import { Loader2, Play, TriangleAlert, Video } from 'lucide-react';
 import type { Message } from '@den/shared';
+import { suppressTouchContextMenu } from '../lib/nativeMenu';
 import { VoiceMessage } from './VoiceMessage';
 
 const LABEL: Record<'image' | 'video' | 'voice', string> = { image: 'photo', video: 'video', voice: 'voice message' };
@@ -56,8 +57,9 @@ export function MediaBubble({
       <img
         src={media.thumbUrl ?? media.url ?? undefined}
         onClick={onOpen}
+        onContextMenu={suppressTouchContextMenu}
         alt=""
-        className="max-h-72 max-w-full cursor-pointer rounded-md object-cover"
+        className="media-preview max-h-72 max-w-full cursor-pointer rounded-md object-cover"
         style={{ touchAction: 'manipulation' }}
       />
     );
@@ -65,7 +67,12 @@ export function MediaBubble({
 
   if (media.kind === 'video') {
     return (
-      <div onClick={onOpen} className="relative cursor-pointer" style={{ touchAction: 'manipulation' }}>
+      <div
+        onClick={onOpen}
+        onContextMenu={suppressTouchContextMenu}
+        className="media-preview relative cursor-pointer"
+        style={{ touchAction: 'manipulation' }}
+      >
         {media.thumbUrl ? (
           <img src={media.thumbUrl} alt="" className="max-h-72 max-w-full rounded-md object-cover" />
         ) : (

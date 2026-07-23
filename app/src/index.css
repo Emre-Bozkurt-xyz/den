@@ -214,3 +214,20 @@ label {
     transform: none;
   }
 }
+
+/* Media *previews* — gallery tiles, chat photo/video thumbnails, media
+   stacks — where a long-press is an app gesture (multi-select / focus menu),
+   so the browser's own long-press behavior has to stand down: the iOS
+   save/share callout, the text-selection loupe, and image dragging. Android
+   Chrome expresses its long-press menu as a `contextmenu` event instead,
+   swallowed by suppressTouchContextMenu (lib/nativeMenu.ts) — the class and
+   the handler always ship together. The full-screen MediaViewer deliberately
+   gets neither: full display is where native save/share belongs
+   (PROJECT.md §14 2026-07-22). */
+.media-preview,
+.media-preview img {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}

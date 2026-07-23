@@ -9,6 +9,7 @@ import { chatDisplayName } from '../lib/chats';
 import { formatDayLabel, formatTime, isSameCalendarDay } from '../lib/datetime';
 import { useBackHandler } from '../lib/backStack';
 import { computeMasonryLayout, galleryColumnCount, type MasonryLayout } from '../lib/masonry';
+import { suppressTouchContextMenu } from '../lib/nativeMenu';
 import { addTag, removeTag } from '../lib/tags';
 import { MediaViewer, TagEditor } from './MediaViewer';
 import { ScreenHeader } from './ScreenHeader';
@@ -449,8 +450,9 @@ export function ChatGallery({
                             onPointerMove={onTilePointerMove}
                             onPointerUp={onTilePointerUp}
                             onPointerCancel={onTilePointerCancel}
+                            onContextMenu={suppressTouchContextMenu}
                             className={
-                              'gallery-tile animate-gallery-tile-in absolute overflow-hidden rounded-xl border bg-surface-sunken ' +
+                              'media-preview gallery-tile animate-gallery-tile-in absolute overflow-hidden rounded-xl border bg-surface-sunken ' +
                               (isSelected ? 'border-accent ring-2 ring-accent' : 'border-border')
                             }
                             style={{
@@ -657,7 +659,8 @@ function SelectionThumb({ item, onRemove }: { item: GalleryItem; onRemove: () =>
     <button
       onClick={onRemove}
       aria-label="Remove from selection"
-      className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border bg-surface-sunken"
+      onContextMenu={suppressTouchContextMenu}
+      className="media-preview relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border bg-surface-sunken"
       style={{ touchAction: 'manipulation' }}
     >
       <img src={item.media.thumbUrl ?? item.media.url ?? undefined} alt="" className="h-full w-full object-cover" />

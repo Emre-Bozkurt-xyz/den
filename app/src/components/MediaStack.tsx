@@ -1,6 +1,7 @@
 import { Layers, Play, X } from 'lucide-react';
 import type { Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
+import { suppressTouchContextMenu } from '../lib/nativeMenu';
 
 /**
  * Fanned photo/video stack (docs/archive/UI_REVAMP.md UI-7).
@@ -39,7 +40,12 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
   const backs = rest.slice(0, BACK_CARDS.length);
 
   return (
-    <div className="relative w-fit cursor-pointer" onClick={onOpen} style={{ touchAction: 'manipulation' }}>
+    <div
+      className="media-preview relative w-fit cursor-pointer"
+      onClick={onOpen}
+      onContextMenu={suppressTouchContextMenu}
+      style={{ touchAction: 'manipulation' }}
+    >
       {backs.map((m, i) => (
         <img
           key={m.id}
@@ -106,7 +112,8 @@ export function MediaGridSheet({
           <button
             key={m.id}
             onClick={() => onPick(i)}
-            className="relative aspect-square overflow-hidden rounded-sm bg-white/5"
+            onContextMenu={suppressTouchContextMenu}
+            className="media-preview relative aspect-square overflow-hidden rounded-sm bg-white/5"
             style={{ touchAction: 'manipulation' }}
           >
             <img src={thumbOf(m)} alt="" className="h-full w-full object-cover" />
