@@ -4,7 +4,16 @@ import { Copy, Hand, Images, Reply as ReplyIcon, Search, Trash2, X } from 'lucid
 import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type ReplyPreview } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import type { SearchFormState } from '../hooks/useMessageSearch';
-import { addReaction, chatDisplayName, deleteMessages, markRead, removeReaction, restoreMessages } from '../lib/chats';
+import {
+  addReaction,
+  chatDisplayName,
+  deleteMessages,
+  editMessage,
+  markRead,
+  removeReaction,
+  restoreMessages,
+} from '../lib/chats';
+import { formatSendTime } from '../lib/datetime';
 import { kindForMime, uploadMedia } from '../lib/media';
 import { clearChatNotifications } from '../lib/push';
 import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
@@ -175,6 +184,15 @@ export function ChatView({
   // Post-MVP: the message the composer is currently replying to (the reply
   // bar above `<Composer>` renders from this), null when not replying.
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  // docs/MESSAGE_EDIT.md — the message currently being edited (the edit bar
+  // above `<Composer>` renders from this), null when not editing. Mutually
+  // exclusive with `replyingTo`: starting one clears the other (see
+  // `startReply`/`startEdit`). `preEditDraftRef` stashes whatever was in the
+  // composer *before* entering edit mode so Cancel/successful-submit can put
+  // it back, exactly like `runUpload`'s caption clearing has no equivalent
+  // need to restore — this is closer to a "swap the draft out and back".
+  const [editing, setEditing] = useState<Message | null>(null);
+  const preEditDraftRef = useRef('');
   // Live swipe-to-reply drag state — which block (by its lead message id) is
   // currently being dragged and how far, so `MessageBlockRow` can apply a
   // live `translateX` to exactly that block. Only one gesture can be active
@@ -373,6 +391,26 @@ export function ChatView({
     };
   }, []);
 
+  // docs/MESSAGE_EDIT.md §4.2 edge case: a `message.deleted` frame (this
+  // client's own bulk-select delete, another tab, etc.) removed the message
+  // currently being edited out from under the composer — cancel edit mode
+  // rather than let Update fire against a message that no longer exists.
+  useEffect(() => {
+    if (editing && !messages.some((m) => m.id === editing.id)) cancelEdit();
+  }, [editing, messages]);
+
+  // Escape cancels an in-progress edit (desktop; mirrors the X on the edit
+  // bar) — same "Escape dismisses the transient thing on top" convention as
+  // `MessageFocusMenu`'s own Escape handler.
+  useEffect(() => {
+    if (!editing) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') cancelEdit();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [editing]);
+
   function exitSelectionMode() {
     setSelectionMode(false);
     setSelectedIds(new Set());
@@ -503,9 +541,60 @@ export function ChatView({
 
   /** Sets `replyingTo`, shared by every reply affordance (swipe, the
    *  desktop hover bar, and the focus menu's Reply row) so they all funnel
-   *  through one place. */
+   *  through one place. Cancels an in-progress edit first — the two modes
+   *  are mutually exclusive (docs/MESSAGE_EDIT.md §4.2). */
   function startReply(m: Message) {
+    if (editing) cancelEdit();
     setReplyingTo(m);
+  }
+
+  /** Enters edit mode for `m` (docs/MESSAGE_EDIT.md §4.2) — the focus menu's
+   *  Edit row is the only entry point. Stashes the current draft (restored
+   *  on cancel/submit), clears any in-progress reply (mutual exclusion), and
+   *  seeds the composer with the message's current body. */
+  function startEdit(m: Message) {
+    if (!m.body) return;
+    setReplyingTo(null);
+    preEditDraftRef.current = draft;
+    setEditing(m);
+    setDraft(m.body);
+  }
+
+  /** Exits edit mode without submitting, restoring whatever draft was there
+   *  before — shared by the edit bar's ✕, Escape, and the "target got
+   *  deleted out from under us" effect below. */
+  function cancelEdit() {
+    setEditing(null);
+    setDraft(preEditDraftRef.current);
+  }
+
+  /** Submits the in-progress edit (docs/MESSAGE_EDIT.md §4.2): trimmed,
+   *  non-empty, and different from the original → PATCH via POST .../edit,
+   *  patch the cache from the response (REST-first — the `message.edited` WS
+   *  frame that follows is just an idempotent replace, see
+   *  `lib/realtime.tsx`), exit edit mode, restore the stashed draft.
+   *  Unchanged body just cancels — no request, matching the no-op guard the
+   *  server itself applies. */
+  async function submitEdit() {
+    const target = editing;
+    if (!target) return;
+    const trimmed = draft.trim();
+    if (!trimmed) return; // Update is disabled on an empty draft; guard anyway
+    if (trimmed === (target.body ?? '').trim()) {
+      cancelEdit();
+      return;
+    }
+    setActionError('');
+    try {
+      const res = await editMessage(chat.id, target.id, trimmed);
+      qc.setQueryData<MessagesCache>(['messages', chat.id], (old) =>
+        withAllPages(old, (msgs) => msgs.map((mm) => (mm.id === res.message.id ? res.message : mm))),
+      );
+      setEditing(null);
+      setDraft(preEditDraftRef.current);
+    } catch {
+      setActionError('Edit failed — try again');
+    }
   }
 
   /** Scrolls a quoted message's original into view and highlights it —
@@ -679,6 +768,13 @@ export function ChatView({
   }
 
   function sendDraft() {
+    // Edit mode owns the composer's submit action entirely while active —
+    // see `submitEdit`. `Composer`'s Enter-to-send/Update-button both funnel
+    // through this same `onSend` prop.
+    if (editing) {
+      void submitEdit();
+      return;
+    }
     if (!draft.trim()) return;
     const replyToId = replyingTo?.id;
     const replyPreview = replyingTo ? buildReplyPreview(replyingTo) : undefined;
@@ -1027,8 +1123,10 @@ export function ChatView({
         </p>
       )}
 
-      {replyingTo && (
-        <ReplyPreviewBar message={replyingTo} chat={chat} meId={me.id} onCancel={() => setReplyingTo(null)} />
+      {editing ? (
+        <EditingBar message={editing} onCancel={cancelEdit} />
+      ) : (
+        replyingTo && <ReplyPreviewBar message={replyingTo} chat={chat} meId={me.id} onCancel={() => setReplyingTo(null)} />
       )}
 
       <Composer
@@ -1040,6 +1138,7 @@ export function ChatView({
         onRecordingComplete={handleRecordingComplete}
         onError={setUploadError}
         isMobile={isMobile}
+        editing={!!editing}
       />
 
       {stackSheet && (
@@ -1091,6 +1190,10 @@ export function ChatView({
           onCopy={handleMenuCopy}
           onSelect={(m) => enterSelectionMode([m])}
           onDelete={(m) => void handleMenuDelete(m)}
+          onEdit={(m) => {
+            setActionMenuFor(null);
+            startEdit(m);
+          }}
         />
       )}
       </div>
@@ -1151,6 +1254,35 @@ function ReplyPreviewBar({
       <button
         onClick={onCancel}
         aria-label="Cancel reply"
+        className="shrink-0 text-text-muted"
+        style={{ touchAction: 'manipulation' }}
+      >
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+
+/** Edit bar between the upload/error banners and `<Composer>`
+ *  (docs/MESSAGE_EDIT.md §4.2/4.3) — same slot/pattern as `ReplyPreviewBar`
+ *  above (a separate component rather than a generalization of it: the
+ *  content differs enough — no sender attribution, just "Editing message" +
+ *  the original body — that sharing one component would need more branching
+ *  than it'd save). */
+function EditingBar({ message, onCancel }: { message: Message; onCancel: () => void }) {
+  return (
+    <div
+      className="flex items-start gap-2 border-t border-border bg-surface-raised px-4 py-2"
+      style={{ touchAction: 'manipulation' }}
+    >
+      <div className="w-1 shrink-0 self-stretch rounded-full bg-accent" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xs font-semibold text-accent">Editing message</p>
+        <p className="truncate text-xs text-text-secondary">{message.body}</p>
+      </div>
+      <button
+        onClick={onCancel}
+        aria-label="Cancel edit"
         className="shrink-0 text-text-muted"
         style={{ touchAction: 'manipulation' }}
       >
@@ -1494,6 +1626,23 @@ function MessageBlockRow({
             )}
             {m.body && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
           </div>
+        )}
+
+        {/* docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label, outside/
+            below the bubble, on the side facing screen center. The parent
+            flex-col is `items-end` for mine / `items-start` for others, so
+            this needs the opposite `self-*` to land on the inner edge
+            instead of following the bubble's own side. `!isStack` excludes
+            fanned-stack blocks — same reasoning as the quote/reaction row
+            above: a stack has no single addressable message to attribute
+            the label to. */}
+        {!isStack && m.editedAt && (
+          <span
+            className={'px-1 text-[10px] text-text-muted ' + (mine ? 'self-start' : 'self-end')}
+            title={formatSendTime(m.editedAt)}
+          >
+            edited
+          </span>
         )}
 
         {/* Reaction pills (post-MVP) — a row just below the bubble's bottom

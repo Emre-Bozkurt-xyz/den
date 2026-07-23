@@ -2,6 +2,7 @@ import type {
   ChatSummary,
   ChatsResponse,
   CreateChatRequest,
+  EditMessageResponse,
   Message,
   MessagesResponse,
   SearchMessagesResponse,
@@ -65,6 +66,14 @@ export function deleteMessages(chatId: string, messageIds: string[]): Promise<{ 
  *  `message.restored` WS broadcast, not this call's return value. */
 export function restoreMessages(chatId: string, messageIds: string[]): Promise<{ messages: Message[] }> {
   return api(`/api/chats/${chatId}/messages/restore`, { method: 'POST', body: JSON.stringify({ messageIds }) });
+}
+
+/** Edits the caller's own message body (docs/MESSAGE_EDIT.md). REST-first:
+ *  the caller patches its own cache from this response; the `message.edited`
+ *  WS frame that follows (on a real change) is an idempotent replace, not the
+ *  primary update path — see `lib/realtime.tsx`. */
+export function editMessage(chatId: string, messageId: string, body: string): Promise<EditMessageResponse> {
+  return api(`/api/chats/${chatId}/messages/${messageId}/edit`, { method: 'POST', body: JSON.stringify({ body }) });
 }
 
 /** Adds the caller's reaction (post-MVP). Idempotent add — the server

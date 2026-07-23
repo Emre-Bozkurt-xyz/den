@@ -8,6 +8,7 @@ import {
   type Message,
   type MediaReadyPayload,
   type MessageDeletedPayload,
+  type MessageEditedPayload,
   type MessageNewPayload,
   type MessageRestoredPayload,
   type MessagesResponse,
@@ -196,6 +197,21 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           void qc.invalidateQueries({ queryKey: ['chats'] });
           break;
         }
+        case WsType.MessageEdited: {
+          // Idempotent replace across every loaded page (docs/MESSAGE_EDIT.md
+          // §4.1) — an edit can land on any page, not just the newest, and
+          // applying REST-first already patched this client's own cache, so
+          // re-applying the same replacement here is a harmless no-op rather
+          // than something that needs echo-dedup bookkeeping.
+          const { chatId, message } = frame.payload as MessageEditedPayload;
+          qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
+            withAllPages(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
+          );
+          // Editing the newest message changes the chat-list preview — same
+          // rule as delete/restore.
+          void qc.invalidateQueries({ queryKey: ['chats'] });
+          break;
+        }
         case WsType.MessageRestored: {
           const { chatId, messages: restored } = frame.payload as MessageRestoredPayload;
           qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
@@ -292,6 +308,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       media: null,
       replyTo: replyPreview ?? null,
       reactions: [],
+      editedAt: null,
     };
 
     pendingRef.current.set(reqId, { chatId, tempId });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Mic, Paperclip, Send, Square, X } from 'lucide-react';
+import { Check, Mic, Paperclip, Send, Square, X } from 'lucide-react';
 import { RecordingBar, type RecState } from './RecordingBar';
 
 /**
@@ -67,6 +67,7 @@ export function Composer({
   onRecordingComplete,
   onError,
   isMobile,
+  editing,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -83,6 +84,12 @@ export function Composer({
    *  the mic already had — it's still just `setUploadError` in `ChatView`. */
   onError: (message: string) => void;
   isMobile: boolean;
+  /** docs/MESSAGE_EDIT.md §4.3 — `ChatView` is editing a message: attach and
+   *  mic are hidden (only the submit control remains, restyled Update), and
+   *  `onSend` submits the edit instead of a new message. Recording/gesture
+   *  code paths are unreachable in this mode simply because the mic button
+   *  isn't rendered — no mode checks needed inside those handlers. */
+  editing: boolean;
 }) {
   const [recState, setRecState] = useState<RecState>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -148,6 +155,21 @@ export function Composer({
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
   }, [draft]);
+
+  // docs/MESSAGE_EDIT.md §4.2 "focus the composer" on entering edit mode.
+  // The textarea element itself never unmounts across the `editing` toggle
+  // (only the leading/trailing slots change), so a plain focus() call here
+  // is enough — no ref-forwarding needed from `ChatView`.
+  // ⚠️ iOS: this fires from a `useEffect` after the triggering tap (the focus
+  // menu's Edit row) has already returned control to the browser, not
+  // synchronously inside that click handler — Safari's "must be a direct
+  // result of a user gesture" rule for raising the on-screen keyboard may not
+  // consider this close enough. Unverified on real iOS hardware; if the
+  // keyboard doesn't appear, the draft is still focused/editable once tapped
+  // manually, so this degrades to one extra tap rather than breaking the flow.
+  useEffect(() => {
+    if (editing) textareaRef.current?.focus();
+  }, [editing]);
 
   function submit() {
     if (!draft.trim()) return;
@@ -389,6 +411,12 @@ export function Composer({
     const files = e.clipboardData?.files;
     if (!files || files.length === 0) return;
     e.preventDefault();
+    // docs/MESSAGE_EDIT.md §4.3 — an edit only ever touches `body`; a pasted
+    // file is silently ignored (not routed into the upload path, no error
+    // surfaced) rather than treated as an upload the way it is outside edit
+    // mode. Text paste is unaffected either way (handled above, before this
+    // branch is ever reached).
+    if (editing) return;
     if (uploading) {
       onError('Upload in progress');
       return;
@@ -416,8 +444,10 @@ export function Composer({
       <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple hidden onChange={handleFileInputChange} />
 
       {/* Leading slot: attach button while idle, an explicit Cancel button
-          once recording has a Stop/Cancel pair (see showExplicitStopCancel). */}
-      {recState === 'idle' ? (
+          once recording has a Stop/Cancel pair (see showExplicitStopCancel).
+          Hidden entirely in edit mode (docs/MESSAGE_EDIT.md §4.3) — an edit
+          only ever touches `body`, never media. */}
+      {editing ? null : recState === 'idle' ? (
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -482,8 +512,23 @@ export function Composer({
           the pointer-captured element backing the hold/slide gestures is
           never unmounted mid-touch. It only swaps to the Stop/Send button
           once locked (drag already fully resolved by then) or on desktop
-          (no drag to protect in the first place). */}
-      {showExplicitStopCancel ? (
+          (no drag to protect in the first place). In edit mode
+          (docs/MESSAGE_EDIT.md §4.3) it's the *only* trailing control —
+          recState is always 'idle' there since the mic that drives every
+          other recState is never rendered. */}
+      {editing ? (
+        <button
+          type="submit"
+          disabled={!draft.trim()}
+          onPointerDown={(e) => e.preventDefault()}
+          aria-label="Update message"
+          className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Check size={15} />
+          Update
+        </button>
+      ) : showExplicitStopCancel ? (
         <button
           type="button"
           onClick={finishRecording}

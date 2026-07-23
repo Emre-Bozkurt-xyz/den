@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckSquare, Copy, Plus, Reply, Trash2 } from 'lucide-react';
+import { CheckSquare, Copy, Pencil, Plus, Reply, Trash2 } from 'lucide-react';
 import { ReactionLimits, type MeResponse, type Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
@@ -58,6 +58,7 @@ export function MessageFocusMenu({
   onCopy,
   onSelect,
   onDelete,
+  onEdit,
 }: {
   message: Message;
   /** Captured via `messageRefs.get(id).getBoundingClientRect()` at the
@@ -78,6 +79,9 @@ export function MessageFocusMenu({
   onCopy: (m: Message) => void;
   onSelect: (m: Message) => void;
   onDelete: (m: Message) => void;
+  /** docs/MESSAGE_EDIT.md — sets `ChatView`'s `editing`. Same caller-closes
+   *  contract as every other row here. */
+  onEdit: (m: Message) => void;
 }) {
   const reducedMotion = useReducedMotion();
   // System back gesture / browser back dismisses the menu (matches Escape and
@@ -293,6 +297,20 @@ export function MessageFocusMenu({
           >
             <Copy size={16} />
             Copy
+          </button>
+        )}
+        {/* docs/MESSAGE_EDIT.md — own messages with a body only (text +
+            media captions); a message reaching this menu is never a
+            soft-deleted one (those are filtered out of every read path and
+            removed from the cache on `message.deleted`). No time limit. */}
+        {mine && message.body && (
+          <button
+            onClick={() => onEdit(message)}
+            className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <Pencil size={16} />
+            Edit
           </button>
         )}
         <button
