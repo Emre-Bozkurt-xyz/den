@@ -154,6 +154,10 @@ export interface Message {
   replyTo: ReplyPreview | null;
   /** Post-MVP: aggregated per-emoji counts; [] when the message has none. */
   reactions: ReactionSummary[];
+  /** docs/MESSAGE_EDIT.md — ISO 8601, set the first time the message's body
+   *  is edited; null if never edited. Own messages with a body only (text +
+   *  media captions) — see EditMessageRequest. */
+  editedAt: string | null;
 }
 
 /** DMs are 2-member chats with isGroup=false — never special-cased (BACKBONE §5/§11). */
@@ -197,6 +201,17 @@ export interface MarkReadRequest {
  *  batches are rejected whole, nothing written (docs/archive/MESSAGE_DELETE.md §3). */
 export interface MessageIdsRequest {
   messageIds: string[];
+}
+
+/** POST /chats/:id/messages/:messageId/edit (docs/MESSAGE_EDIT.md). Own
+ *  messages only, body only (text messages and media captions — the edit
+ *  never touches `media`). No time limit. */
+export interface EditMessageRequest {
+  body: string;
+}
+
+export interface EditMessageResponse {
+  message: Message;
 }
 
 export const ChatLimits = {

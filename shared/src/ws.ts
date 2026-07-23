@@ -55,6 +55,8 @@ export const WsType = {
   // message lifecycle (Stage 6 / §2 item 11)
   MessageDeleted: 'message.deleted',
   MessageRestored: 'message.restored',
+  // message edit (post-MVP, docs/MESSAGE_EDIT.md)
+  MessageEdited: 'message.edited',
   // reactions (post-MVP)
   ReactionAdded: 'reaction.added',
   ReactionRemoved: 'reaction.removed',
@@ -138,6 +140,17 @@ export interface MessageDeletedPayload {
 export interface MessageRestoredPayload {
   chatId: string;
   messages: import('./api.js').Message[];
+}
+
+/** Server → client (room broadcast), post-MVP: a message's body was edited
+ *  (docs/MESSAGE_EDIT.md). Carries the FULL updated `Message`, same reasoning
+ *  as `MessageRestoredPayload` — lets clients replace the cached row wholesale
+ *  with no partial-patch reconstruction. Only emitted on a real change (the
+ *  route skips the broadcast for a no-op edit, same "no phantom WS frame"
+ *  rule as delete). */
+export interface MessageEditedPayload {
+  chatId: string;
+  message: import('./api.js').Message;
 }
 
 /** Server → client (room broadcast), post-MVP: someone reacted to a message.

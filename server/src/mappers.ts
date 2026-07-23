@@ -37,6 +37,8 @@ export interface MessageRow {
   body: string | null;
   createdAt: Date;
   replyToMessageId: bigint | null;
+  /** docs/MESSAGE_EDIT.md — null if never edited. */
+  editedAt: Date | null;
 }
 
 export interface MediaRow {
@@ -83,6 +85,7 @@ export function toMessage(
     media,
     replyTo,
     reactions,
+    editedAt: m.editedAt ? m.editedAt.toISOString() : null,
   };
 }
 

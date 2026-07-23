@@ -11,6 +11,8 @@ import {
   makeEnvelope,
   type ChatsResponse,
   type CreateChatRequest,
+  type EditMessageRequest,
+  type EditMessageResponse,
   type MarkReadRequest,
   type Message as MessageDto,
   type MessageIdsRequest,
@@ -23,6 +25,7 @@ import { requireAuth } from '../auth/session.js';
 import { assertMember } from '../chat/membership.js';
 import {
   createChat,
+  editMessage,
   getMessagesPage,
   listChatsForUser,
   markRead,
@@ -146,6 +149,33 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
           .emit('ws', makeEnvelope(WsType.MessageRestored, { chatId: chatId.toString(), messages: restored }));
       }
       return { messages: restored };
+    },
+  );
+
+  // Own-message body edit (docs/MESSAGE_EDIT.md). Membership + ownership are
+  // enforced inside editMessage (chat/service.ts), same all-or-nothing 403
+  // posture as delete/restore above. POST-with-body, matching the
+  // `/delete`/`/restore`/`/read` convention.
+  app.post<{ Params: { id: string; messageId: string }; Body: EditMessageRequest }>(
+    '/chats/:id/messages/:messageId/edit',
+    { preHandler: requireAuth },
+    async (req) => {
+      const chatId = parseId(req.params.id);
+      const messageId = parseId(req.params.messageId);
+      const rawBody = req.body?.body;
+      if (typeof rawBody !== 'string') throw validation('body required');
+
+      const { message, changed } = await editMessage(req.user!.id, chatId, messageId, rawBody);
+
+      // Skip the broadcast entirely on a no-op edit — no phantom WS frame,
+      // same rule as delete/restore.
+      if (changed) {
+        app.io
+          ?.to(chatRoom(chatId))
+          .emit('ws', makeEnvelope(WsType.MessageEdited, { chatId: chatId.toString(), message }));
+      }
+      const res: EditMessageResponse = { message };
+      return res;
     },
   );
 

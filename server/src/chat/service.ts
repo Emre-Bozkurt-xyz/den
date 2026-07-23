@@ -15,7 +15,7 @@ import {
 import { db } from '../db/index.js';
 import { chatMembers, chats, messages, users } from '../db/schema.js';
 import { toChatSummary, toMessage, type ChatRow, type UserRow } from '../mappers.js';
-import { forbidden, validation } from '../errors.js';
+import { forbidden, notFound, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
 import { assertMember } from './membership.js';
 import { mediaInfoForMessages } from '../media/service.js';
@@ -406,4 +406,74 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
       reactionsMap.get(r.id.toString()) ?? [],
     ),
   );
+}
+
+// ─── message edit (post-MVP, docs/MESSAGE_EDIT.md) ──────────────────────
+
+/** Kinds an edit may touch — text messages and media captions. Voice and
+ *  system messages are excluded (docs/MESSAGE_EDIT.md §1 "explicitly out of
+ *  scope"). */
+const EDITABLE_KINDS = new Set(['text', 'image', 'video']);
+
+export interface EditMessageResult {
+  message: MessageDto;
+  /** False on a no-op edit (trimmed body equals the current body) — the
+   *  route skips the WS broadcast in that case, same "no phantom frame" rule
+   *  as `softDeleteMessages`/`restoreMessages`. */
+  changed: boolean;
+}
+
+async function messageDtoFor(row: typeof messages.$inferSelect, viewerId: bigint): Promise<MessageDto> {
+  const [replyTo, mediaMap, reactionsMap] = await Promise.all([
+    replyPreviewFor(row.replyToMessageId),
+    mediaInfoForMessages([row.id]),
+    reactionsForMessages([row.id], viewerId),
+  ]);
+  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, reactionsMap.get(row.id.toString()) ?? []);
+}
+
+/** Edits the caller's own message body in place (own messages only, body
+ *  only — text messages and media captions; the edit never touches `media`).
+ *  No time limit (owner decision, docs/MESSAGE_EDIT.md §1 — fits the closed-
+ *  friend-circle trust model). Same all-or-nothing 403 posture as
+ *  `softDeleteMessages`: membership + ownership are enforced here, not the
+ *  route. Ordering deliberately checks "does this message exist, in this
+ *  chat" before ownership so a wrong-chat id 404s rather than leaking that a
+ *  message with that id exists somewhere else; soft-deleted messages also
+ *  404 (not editable) rather than 403, since "not found" is exactly how every
+ *  other read path already treats a deleted row (`getMessagesPage` etc.). */
+export async function editMessage(
+  viewerId: bigint,
+  chatId: bigint,
+  messageId: bigint,
+  rawBody: string,
+): Promise<EditMessageResult> {
+  await assertMember(viewerId, chatId);
+
+  const rows = await db.select().from(messages).where(eq(messages.id, messageId));
+  const row = rows[0];
+  if (!row || row.chatId !== chatId) throw notFound('message not found');
+  if (row.senderId !== viewerId) throw forbidden('you can only edit your own messages');
+  if (row.deletedAt !== null) throw notFound('message not found');
+  if (!EDITABLE_KINDS.has(row.kind)) throw validation('this message cannot be edited');
+
+  const trimmed = typeof rawBody === 'string' ? rawBody.trim() : '';
+  if (!trimmed) throw validation('message body cannot be empty');
+  if (trimmed.length > ChatLimits.messageBodyMax) {
+    throw validation(`message too long (max ${ChatLimits.messageBodyMax} characters)`);
+  }
+
+  // No-op guard: an edit that doesn't actually change the body returns the
+  // message unchanged and tells the route not to broadcast anything.
+  if (row.body === trimmed) {
+    return { message: await messageDtoFor(row, viewerId), changed: false };
+  }
+
+  const updated = await db
+    .update(messages)
+    .set({ body: trimmed, editedAt: new Date() })
+    .where(eq(messages.id, messageId))
+    .returning();
+  const updatedRow = updated[0]!;
+  return { message: await messageDtoFor(updatedRow, viewerId), changed: true };
 }

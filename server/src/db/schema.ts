@@ -21,6 +21,10 @@
  *   pg_trgm extension + gin trigram index on messages.body (substring
  *   search, not tsvector FTS — see the plan doc for why).
  *
+ * Migration 007 (post-MVP, docs/MESSAGE_EDIT.md): message edit.
+ *   messages.edited_at (nullable timestamptz) — set on first edit; no index
+ *   needed (idx_messages_body_trgm already covers search over edited bodies).
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -212,6 +216,9 @@ export const messages = pgTable(
     replyToMessageId: bigint('reply_to_message_id', { mode: 'bigint' }).references(
       (): AnyPgColumn => messages.id,
     ),
+    // Post-MVP (migration 007, docs/MESSAGE_EDIT.md): set the first time the
+    // message's body is edited; null if never edited. No time limit on edits.
+    editedAt: timestamp('edited_at', { withTimezone: true }),
   },
   (t) => [
     check(
