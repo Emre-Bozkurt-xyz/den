@@ -1536,15 +1536,24 @@ function MessageBlockRow({
   const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);
   const swipeArmed = swipeProgress >= 1;
 
-  // docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label, inline beside the
-  // bubble on the side facing screen center (owner feedback, 2026-07-22: the
-  // original below-the-bubble row added vertical height; inline doesn't). It
-  // lives in the *outer* row flex, not the bubble's flex-col, so it rides the
-  // row's `items-center` alignment next to the block. `!isStack` excludes
-  // fanned-stack blocks — same reasoning as the quote/reaction exclusions
-  // below: a stack has no single addressable message to attribute it to.
+  // docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label beside the bubble
+  // on the side facing screen center (owner feedback, 2026-07-22, twice
+  // revised: below-the-bubble added vertical height; then row-level inline
+  // centered against bubble+reaction-pills together instead of the bubble
+  // alone). Absolutely positioned *inside the bubble div* (which is
+  // `relative`), hanging out past its edge — centers on the bubble itself,
+  // adds no layout size anywhere, and rides along with swipe-to-reply
+  // translation for free. Only rendered on the `showBubble` branch: edited
+  // messages always have a non-empty body, so there is always a bubble (a
+  // bare-media caption bubble included) — and never a stack.
   const editedLabel = !isStack && m.editedAt && (
-    <span className="shrink-0 px-1 text-[10px] text-text-muted" title={formatSendTime(m.editedAt)}>
+    <span
+      className={
+        'pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap text-[10px] text-text-muted ' +
+        (mine ? 'right-full mr-1.5' : 'left-full ml-1.5')
+      }
+      title={formatSendTime(m.editedAt)}
+    >
       edited
     </span>
   );
@@ -1552,7 +1561,6 @@ function MessageBlockRow({
   return (
     <div className={'group relative flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
       {mine && actionsButton}
-      {mine && editedLabel}
       {/* Swipe-to-reply reveal icon — fades/scales in with drag progress and
           "fills in" (muted → accent) once past the fire threshold. Sits in
           the gutter behind the block's resting position (the side opposite
@@ -1621,7 +1629,7 @@ function MessageBlockRow({
         {showBubble && (
           <div
             className={
-              'max-w-full rounded-lg text-sm ' +
+              'relative max-w-full rounded-lg text-sm ' +
               (isVoice ? 'px-2 py-1.5 ' : 'px-3.5 py-2 ') +
               // Run-position corner rounding (UI-8b) — see the file-level
               // doc comment above for the head/middle/tail derivation.
@@ -1639,6 +1647,7 @@ function MessageBlockRow({
               <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
             )}
             {m.body && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
+            {editedLabel}
           </div>
         )}
 
@@ -1676,7 +1685,6 @@ function MessageBlockRow({
           </div>
         )}
       </div>
-      {!mine && editedLabel}
       {!mine && actionsButton}
     </div>
   );
