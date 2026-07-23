@@ -113,4 +113,52 @@ describe('deriveReceipts', () => {
     assert.equal(status, null);
     assert.equal(seenAvatars.size, 0);
   });
+
+  // ── reply-supersedes-receipt (owner revision 2026-07-23, RECEIPTS.md §3) ──
+
+  test("reply supersedes seen: a member's own later message drops their marker AND the status text", () => {
+    // my 700 → Alice reads it (watermark 700) → Alice replies 701. Her reply
+    // is proof enough; no marker under 700, and no stale "Delivered" either.
+    const messages = [msg('700', ME), msg('701', ALICE)];
+    const receipts = [receipt(ME, null, null), receipt(ALICE, '700', '700'), receipt(BOB, '700', '700')];
+
+    const { seenAvatars, status } = deriveReceipts(messages, receipts, members, ME);
+
+    assert.equal(seenAvatars.get('700')?.some((u) => u.id === ALICE) ?? false, false, "Alice's marker must be dropped");
+    assert.equal(status, null, 'status must stay suppressed (she effectively saw it)');
+  });
+
+  test("per-member suppression: B's reply does not hide C's read marker in a group", () => {
+    // my 800 → Alice replies 801, Bob only reads (watermark 800, no reply).
+    // Alice's marker goes; Bob's stays — his avatar is the only evidence.
+    const messages = [msg('800', ME), msg('801', ALICE)];
+    const receipts = [receipt(ME, null, null), receipt(ALICE, '801', '801'), receipt(BOB, '800', '800')];
+
+    const { seenAvatars } = deriveReceipts(messages, receipts, members, ME);
+
+    assert.deepEqual(seenAvatars.get('800')?.map((u) => u.id), [BOB]);
+  });
+
+  test('sending implies seeing: a later reply suppresses status even when the watermark lags behind it', () => {
+    // Alice's markRead raced/failed (watermark null) but her reply 901 is
+    // loaded — my 900 must not show "Sent" as if she never saw it.
+    const messages = [msg('900', ME), msg('901', ALICE)];
+    const receipts = [receipt(ME, null, null), receipt(ALICE, null, null)];
+
+    const { status, seenAvatars } = deriveReceipts(messages, receipts, [user(ME, 'Me'), user(ALICE, 'Alice')], ME);
+
+    assert.equal(status, null, 'her reply counts as effectively seen');
+    assert.equal(seenAvatars.size, 0, 'no marker either — nothing to place from a null watermark');
+  });
+
+  test('a marker newer than their last reply still renders: reply then read-further keeps the receipt visible', () => {
+    // Alice replies 1001, then reads my later 1002 (watermark 1002) without
+    // replying again — her marker belongs on 1002 and must survive.
+    const messages = [msg('1000', ME), msg('1001', ALICE), msg('1002', ME)];
+    const receipts = [receipt(ME, null, null), receipt(ALICE, '1002', '1002')];
+
+    const { seenAvatars } = deriveReceipts(messages, receipts, members, ME);
+
+    assert.deepEqual(seenAvatars.get('1002')?.map((u) => u.id), [ALICE]);
+  });
 });

@@ -1778,7 +1778,16 @@ function MessageBlockRow({
             Failed to send — tap to retry
           </button>
         )}
-        {mine && !failed && seenAvatars.length > 0 && (
+        {/* 2-member chats: the only possible seer is the one other person,
+            so an avatar identifying them is redundant — plain "Seen" reads
+            better (owner revision 2026-07-23). Keyed on member count, not
+            `isGroup` — the same presentation-only precedent as DM display
+            names (chatDisplayName), so the "never special-case DMs"
+            invariant (PROJECT.md §15) stays untouched. */}
+        {mine && !failed && seenAvatars.length > 0 && chat.members.length <= 2 && (
+          <span className="mt-0.5 text-[10px] text-text-muted">Seen</span>
+        )}
+        {mine && !failed && seenAvatars.length > 0 && chat.members.length > 2 && (
           <div className="mt-0.5 flex items-center gap-0.5">
             {seenAvatars.slice(0, 3).map((u) => (
               <div

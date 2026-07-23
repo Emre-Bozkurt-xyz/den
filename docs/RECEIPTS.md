@@ -9,7 +9,8 @@ Per-message status feedback under bubbles, own messages only:
 
 - **Sent** — the server persisted the message (the `message.new` echo confirms it). Small muted text under the sender's newest message only.
 - **Delivered** — every *other* member's device has actually received the message (true device delivery, WhatsApp-style, per owner decision 2026-07-23 — not just "server got it"). Replaces "Sent" under the newest message.
-- **Seen** — avatar icons, Messenger-style: each other member's small avatar sits under the newest of *my* messages they've read (watermark-based, so partial seen in groups falls out naturally). Max 3 avatars per message, then `+N`. When ≥1 member has seen the newest message, the Sent/Delivered text on it is suppressed — the avatars say more.
+- **Seen** — avatar icons, Messenger-style: each other member's small avatar sits under the newest of *my* messages they've read (watermark-based, so partial seen in groups falls out naturally). Max 3 avatars per message, then `+N`. In a **2-member chat** the marker renders as plain "Seen" text instead of an avatar — the only possible seer is the one other person, so identifying them is redundant (owner revision 2026-07-23; keyed on member count, not `isGroup`, same presentation-only precedent as DM display names). When ≥1 member has *effectively* seen the newest message (see §3), the Sent/Delivered text on it is suppressed.
+- **Reply supersedes receipt** (owner revision 2026-07-23) — a member's own later message is proof they saw everything before it (in this app you can only compose from an open, visible chat, which fires markRead), so their seen marker is dropped when a later message of theirs is loaded, and such members count as seers for the status-text suppression (otherwise a stale "Delivered" would sit above their reply forever). Per-member, not chat-wide: in a group, B's reply says nothing about C, so C's read marker survives B replying.
 - **Failed to send** — red text under **every** failed message (unlike Sent/Delivered/Seen, which each exist in at most one place). The bubble persists (today it silently vanishes); **tap retries**, long-press actions menu offers Discard. Client-only state — a failed message never reached the server, so it's gone on refresh. That's correct under "server is truth".
 
 Sending state stays as-is (opacity-60 pending bubble, no text).
@@ -36,9 +37,10 @@ Both updates are **guarded monotonic** (`WHERE watermark IS NULL OR watermark < 
 
 Client-side derivation for my message `m` (BigInt id compares; ids are BIGINT-as-string):
 
-- *Seen avatars on `m`*: members whose `last_read >= m.id` AND `m` is the newest of my messages with `id <= their last_read` (i.e. each member's avatar sits at their watermark, clamped to my messages).
-- *Status text*: only on my newest non-local message — `Delivered` if **all** other members have `last_delivered >= id`, else `Sent`; suppressed entirely if that message has ≥1 seen avatar.
+- *Seen marker on `m` for member X*: `X.last_read >= m.id` AND `m` is the newest of my messages with `id <= X.last_read` (each member's marker sits at their watermark, clamped to my messages) AND X has **no loaded message newer than `m`** (reply supersedes receipt — their own reply already proves it). Renders as X's avatar; as plain "Seen" text in 2-member chats.
+- *Status text*: only on my newest non-local message — `Delivered` if **all** other members have `last_delivered >= id`, else `Sent`; suppressed entirely once ≥1 member has *effectively seen* it (watermark `>= id` **or** a loaded message of theirs with a newer id — the latter matters because that member's marker is suppressed by the reply rule, so the rendered-avatar check alone would leave stale text).
 - *Failed*: local id prefix `failed:` → red label on every such message.
+- Marker *placement* stays watermark-only: a position derived from a member's own message would always sit below that same message and be suppressed by the reply rule — dead code by construction.
 
 ## 4. Backend
 
