@@ -70,6 +70,7 @@ const mediaOnlyShape = {
   width: media.width,
   height: media.height,
   durationMs: media.durationMs,
+  waveform: media.waveform,
   thumbKey: media.thumbKey,
   status: media.status,
 } as const;
@@ -249,6 +250,7 @@ export async function finalizeProcessing(mediaId: bigint): Promise<MessageDto> {
         width: result.width,
         height: result.height,
         durationMs: result.durationMs,
+        waveform: result.waveform,
         thumbKey: result.thumbKey,
         status: 'ready',
       })

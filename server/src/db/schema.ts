@@ -25,6 +25,10 @@
  *   messages.edited_at (nullable timestamptz) — set on first edit; no index
  *   needed (idx_messages_body_trgm already covers search over edited bodies).
  *
+ * Migration 008 (post-MVP, docs/VOICE_WAVEFORM.md): voice waveforms.
+ *   media.waveform (nullable jsonb) — 44 RMS peaks (0–255) computed at
+ *   processing time; voice only, null for image/video and legacy rows.
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -37,6 +41,7 @@ import {
   customType,
   index,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   text,
@@ -255,6 +260,7 @@ export const media = pgTable(
     width: bigint('width', { mode: 'number' }), // images/videos
     height: bigint('height', { mode: 'number' }),
     durationMs: bigint('duration_ms', { mode: 'number' }), // videos/voice
+    waveform: jsonb('waveform').$type<number[]>(), // voice only: 44 RMS peaks 0–255 (docs/VOICE_WAVEFORM.md)
     thumbKey: text('thumb_key'), // R2 key of thumbnail (null for voice)
     status: text('status').notNull().default('processing'), // 'processing' | 'ready' | 'failed'
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

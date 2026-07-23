@@ -1,11 +1,14 @@
 /**
- * Voice-message waveform peaks (docs/archive/UI_REVAMP.md UI-7).
+ * Voice-message waveform peaks — legacy-row fallback decoder
+ * (docs/VOICE_WAVEFORM.md; original client-side design was
+ * docs/archive/UI_REVAMP.md UI-7).
  *
- * Peaks are computed *client-side* — there is no `peaks` column and nothing
- * about this touches the schema, the API, or `MediaInfo`. The bubble renders
- * a deterministic placeholder pattern immediately, then swaps in real peaks
- * once the audio has been fetched and decoded (kicked off on first play, so
- * opening a chat full of voice notes doesn't download all of them).
+ * Waveforms are now computed *server-side* at processing time and arrive on
+ * `MediaInfo.waveform`, so the bubble normally never touches this module. It
+ * survives only as a self-heal for rows without stored peaks (media processed
+ * before the column existed and not yet backfilled, or a processing pass
+ * whose ffmpeg peak step failed): on first play, fetch + decode the audio and
+ * bucket it client-side — same RMS algorithm the server now runs.
  *
  * ⚠️ iOS: decoding goes through `OfflineAudioContext`, not a live
  * `AudioContext`, specifically so it never trips Safari's autoplay/gesture
@@ -14,45 +17,13 @@
  * still call `audio.play()` synchronously inside the click handler and let
  * this resolve afterwards (see VoiceMessage.tsx).
  */
-
-/** Bar count in the bubble. Fixed rather than width-derived so the
- *  placeholder→real swap can't also change the bar layout. */
-export const PEAK_COUNT = 44;
+import { VOICE_WAVEFORM_BARS } from '@den/shared';
 
 // mediaId → peaks. Module-level so scrolling a bubble out of view and back
 // (or remounting via the chat's message list) doesn't re-download/re-decode.
 const cache = new Map<string, number[]>();
 // mediaId → in-flight decode, so a double-tap on play can't start two fetches.
 const inFlight = new Map<string, Promise<number[] | null>>();
-
-/** FNV-1a — small, fast, and stable across reloads (unlike anything seeded
- *  from Math.random), so a given voice message always draws the same
- *  placeholder bars instead of shuffling on every render. */
-function hash(seed: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-/** Decorative bars shown before (or instead of) a real decode. Deliberately
- *  mid-range and gently varied — it should read as "waveform not loaded yet",
- *  never as a confident claim about the audio. */
-export function placeholderPeaks(seed: string, count: number = PEAK_COUNT): number[] {
-  let state = hash(seed) || 1;
-  const out: number[] = [];
-  for (let i = 0; i < count; i++) {
-    // xorshift32 — deterministic per seed, no dependency on Math.random.
-    state ^= state << 13;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    state >>>= 0;
-    out.push(0.25 + (state / 0xffffffff) * 0.45);
-  }
-  return out;
-}
 
 export function cachedPeaks(mediaId: string): number[] | null {
   return cache.get(mediaId) ?? null;
@@ -104,7 +75,7 @@ function toPeaks(audio: AudioBuffer, count: number): number[] {
  *  playback itself is handled by a separate <audio> element that doesn't
  *  depend on any of this. Both requests hit the same presigned URL, so the
  *  HTTP cache generally serves this from the <audio> element's own fetch. */
-export function loadPeaks(mediaId: string, url: string, count: number = PEAK_COUNT): Promise<number[] | null> {
+export function loadPeaks(mediaId: string, url: string, count: number = VOICE_WAVEFORM_BARS): Promise<number[] | null> {
   const hit = cache.get(mediaId);
   if (hit) return Promise.resolve(hit);
   const pending = inFlight.get(mediaId);

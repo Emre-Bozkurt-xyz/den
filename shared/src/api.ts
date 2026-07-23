@@ -268,6 +268,12 @@ export const ReactionLimits = {
 export type MediaKind = 'image' | 'video' | 'voice';
 export type MediaStatus = 'processing' | 'ready' | 'failed';
 
+/** Bar count of a voice message's stored waveform (docs/VOICE_WAVEFORM.md).
+ *  One constant for the server (computes/stores this many peaks) and the
+ *  client (renders exactly this many bars, including the loading state, so
+ *  the loading→real handoff never changes the bar layout). */
+export const VOICE_WAVEFORM_BARS = 44;
+
 /** Media metadata attached to a message. `Message.media` is null for
  *  kind='text'|'system'. Never carries R2 keys — only short-lived presigned
  *  URLs the server mints on read (hard invariant 2). */
@@ -280,6 +286,10 @@ export interface MediaInfo {
   width: number | null;
   height: number | null;
   durationMs: number | null;
+  /** Voice only: VOICE_WAVEFORM_BARS RMS peaks quantized to 0–255, computed
+   *  server-side at processing time (docs/VOICE_WAVEFORM.md). Null for
+   *  image/video and for voice rows processed before the column existed. */
+  waveform: number[] | null;
   url: string | null; // presigned GET; null until status='ready'
   thumbUrl: string | null; // presigned GET for thumb; null for voice or not-ready
 }

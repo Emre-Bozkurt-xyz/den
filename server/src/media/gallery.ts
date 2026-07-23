@@ -29,6 +29,7 @@ const gallerySelectShape = {
   width: media.width,
   height: media.height,
   durationMs: media.durationMs,
+  waveform: media.waveform,
   thumbKey: media.thumbKey,
   status: media.status,
   messageChatId: messages.chatId,

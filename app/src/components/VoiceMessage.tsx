@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
-import type { MediaInfo } from '@den/shared';
-import { cachedPeaks, loadPeaks, PEAK_COUNT, placeholderPeaks } from '../lib/waveform';
+import { VOICE_WAVEFORM_BARS, type MediaInfo } from '@den/shared';
+import { cachedPeaks, loadPeaks } from '../lib/waveform';
 
 /**
  * Custom voice-message player (docs/archive/UI_REVAMP.md UI-7) — replaces the native
@@ -16,6 +16,13 @@ import { cachedPeaks, loadPeaks, PEAK_COUNT, placeholderPeaks } from '../lib/wav
  * vertically centered by the flex container, so growing its height extends it
  * equally up and down — no second mirrored copy to keep in sync.
  *
+ * The waveform itself is real data from the moment the bubble mounts:
+ * `media.waveform` carries server-computed peaks (docs/VOICE_WAVEFORM.md).
+ * Rows without stored peaks (pre-column legacy, failed peak pass) show an
+ * honest loading state — uniform hairline bars, unmistakably "no data" — and
+ * self-heal via the client decoder on first play. There is no fake
+ * placeholder pattern anymore.
+ *
  * ⚠️ iOS: `audio.play()` is called synchronously inside the click handler and
  * the waveform decode is fired off separately afterwards — the decode must
  * never be awaited before play, or Safari drops the user-gesture association
@@ -24,6 +31,13 @@ import { cachedPeaks, loadPeaks, PEAK_COUNT, placeholderPeaks } from '../lib/wav
  */
 
 const BAR_MIN_SCALE = 0.06; // matches lib/waveform.ts's floor — a hairline, never a gap
+
+/** Uniform hairline row shown while there's no waveform data (legacy row
+ *  before its first decode, or a failed server peak pass). All zeros — the
+ *  render floor turns each into the same hairline, which reads as an empty
+ *  track, not as audio. Same bar count as real data so the handoff never
+ *  changes the layout. */
+const LOADING_BARS: number[] = new Array<number>(VOICE_WAVEFORM_BARS).fill(0);
 
 function formatTime(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0;
@@ -38,15 +52,21 @@ export function VoiceMessage({ media, interactive = true }: { media: MediaInfo; 
   const [playing, setPlaying] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [audioDuration, setAudioDuration] = useState<number | null>(null);
-  const [peaks, setPeaks] = useState<number[] | null>(() => cachedPeaks(media.id));
-  const [real, setReal] = useState(() => cachedPeaks(media.id) !== null);
+  const [decoded, setDecoded] = useState<number[] | null>(() => cachedPeaks(media.id));
+
+  // Server-stored peaks are quantized 0–255 (docs/VOICE_WAVEFORM.md); the
+  // client decoder's fallback output is already 0–1.
+  const serverPeaks =
+    media.waveform && media.waveform.length > 0 ? media.waveform.map((v) => v / 255) : null;
+  const peaks = serverPeaks ?? decoded;
+  const real = peaks !== null;
 
   // `durationMs` comes from the server's ffprobe pass and is available before
   // a single byte of audio is fetched; the element's own duration only
   // arrives with metadata, and is `Infinity`/NaN for some streamed sources.
   const durationSec =
     audioDuration ?? (media.durationMs != null ? media.durationMs / 1000 : null);
-  const bars = peaks ?? placeholderPeaks(media.id, PEAK_COUNT);
+  const bars = peaks ?? LOADING_BARS;
   const progress = durationSec && durationSec > 0 ? Math.min(1, elapsed / durationSec) : 0;
 
   // Smooth playhead: `timeupdate` only fires ~4x/sec, which visibly steps the
@@ -83,12 +103,11 @@ export function VoiceMessage({ media, interactive = true }: { media: MediaInfo; 
     }
     // Synchronous play() first — see the iOS note in the file header.
     void el.play().catch(() => setPlaying(false));
+    // Legacy self-heal: no stored waveform on the row → decode one from the
+    // audio we're about to play anyway (see lib/waveform.ts).
     if (!real && media.url) {
       void loadPeaks(media.id, media.url).then((p) => {
-        if (p) {
-          setPeaks(p);
-          setReal(true);
-        }
+        if (p) setDecoded(p);
       });
     }
   }
@@ -167,8 +186,9 @@ export function VoiceMessage({ media, interactive = true }: { media: MediaInfo; 
         style={{ touchAction: 'manipulation' }}
       >
         {bars.map((v, i) => {
-          // Played bars are solid, unplayed are ghosted; the placeholder
-          // pattern is ghosted throughout so it never reads as real data.
+          // Played bars are solid, unplayed are ghosted; the loading state's
+          // hairline row is extra-ghosted (but still tracks playback, so a
+          // legacy row playing before its decode lands isn't a dead strip).
           const played = i / bars.length < progress;
           return (
             <span

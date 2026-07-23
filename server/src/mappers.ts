@@ -50,6 +50,8 @@ export interface MediaRow {
   width: number | null;
   height: number | null;
   durationMs: number | null;
+  /** docs/VOICE_WAVEFORM.md — voice only; null for image/video and legacy rows. */
+  waveform: number[] | null;
 }
 
 /** `urls` is null until status='ready' — the worker hasn't minted a
@@ -64,6 +66,7 @@ export function toMediaInfo(m: MediaRow, urls: { url: string; thumbUrl: string |
     width: m.width,
     height: m.height,
     durationMs: m.durationMs,
+    waveform: m.waveform,
     url: urls?.url ?? null,
     thumbUrl: urls?.thumbUrl ?? null,
   };

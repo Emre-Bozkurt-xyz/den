@@ -26,6 +26,7 @@ import sharp from 'sharp';
 import type { MediaKind } from '@den/shared';
 import { probeMedia, runFfmpeg } from './ffmpeg.js';
 import { deleteObject, getObjectBuffer, mediaKey, putObjectBuffer } from './r2.js';
+import { pcmToPeaks } from './waveform.js';
 
 export interface ProcessResult {
   r2Key: string; // may differ from the original key (image/voice are re-encoded)
@@ -35,6 +36,7 @@ export interface ProcessResult {
   height: number | null;
   durationMs: number | null;
   thumbKey: string | null;
+  waveform: number[] | null; // voice only (docs/VOICE_WAVEFORM.md)
 }
 
 export interface ProcessArgs {
@@ -93,6 +95,7 @@ async function processImage({ chatId, mediaId, originalKey }: ProcessArgs): Prom
     height,
     durationMs: null,
     thumbKey,
+    waveform: null,
   };
 }
 
@@ -134,6 +137,7 @@ async function processVideo({ chatId, mediaId, originalKey }: ProcessArgs): Prom
       height: probe.height,
       durationMs: probe.durationMs,
       thumbKey,
+      waveform: null,
     };
   });
 }
@@ -164,6 +168,20 @@ async function processVoice({ chatId, mediaId, originalKey }: ProcessArgs): Prom
     const probe = await probeMedia(outPath);
     const outBuffer = await readFile(outPath);
 
+    // Waveform peaks from the transcoded audio (docs/VOICE_WAVEFORM.md):
+    // decode to raw mono PCM at a low sample rate (8kHz is plenty — the bars
+    // show loudness envelope, not frequency content) and bucket to RMS peaks.
+    // Best-effort like the video poster: a voice note without a waveform
+    // still plays fine, the client just shows its loading bars.
+    let waveform: number[] | null = null;
+    try {
+      const pcmPath = join(dir, 'peaks.pcm');
+      await runFfmpeg(['-y', '-i', outPath, '-ac', '1', '-ar', '8000', '-f', 's16le', pcmPath]);
+      waveform = pcmToPeaks(await readFile(pcmPath));
+    } catch {
+      waveform = null;
+    }
+
     const voiceKey = mediaKey(chatId, mediaId, 'voice.m4a');
     await putObjectBuffer(voiceKey, outBuffer, 'audio/mp4');
     if (voiceKey !== originalKey) await deleteObject(originalKey);
@@ -176,6 +194,7 @@ async function processVoice({ chatId, mediaId, originalKey }: ProcessArgs): Prom
       height: null,
       durationMs: probe.durationMs,
       thumbKey: null,
+      waveform,
     };
   });
 }
