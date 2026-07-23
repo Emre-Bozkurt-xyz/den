@@ -96,10 +96,10 @@ New **Edit** row (Pencil icon, `lucide-react`) between Copy and Select, rendered
 
 ### 4.5 Edited indicator
 
-In `MessageBlockRow`'s flex-col, after the bubble (and before/alongside the reaction pill row — visually it must not fight the pills; stacking them as separate rows is fine):
+In `MessageBlockRow`'s **outer row flex** (a sibling of the bubble container, not inside its flex-col):
 
 - Render when `m.editedAt && !isStack`: a small muted label, e.g. `text-[10px] text-text-muted`, content "edited", with `title={formatSendTime(m.editedAt)}` for the timestamp on desktop hover.
-- **Placement (owner-specified):** outside/below the bubble, aligned toward the screen center — the parent flex-col is `items-end` for mine / `items-start` for others, so the label needs a `self-start` (mine) / `self-end` (others) override.
+- **Placement (owner-specified, revised 2026-07-22):** inline beside the bubble on the side facing screen center (before the bubble for mine, after it for others), riding the row's `items-center` alignment. Originally shipped as a row below the bubble inside the flex-col; the owner revised it same-day — inline doesn't add vertical height to the message.
 - Design tokens only; no new colors.
 
 ## 5. Verification

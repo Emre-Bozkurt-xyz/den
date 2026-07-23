@@ -1536,9 +1536,23 @@ function MessageBlockRow({
   const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);
   const swipeArmed = swipeProgress >= 1;
 
+  // docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label, inline beside the
+  // bubble on the side facing screen center (owner feedback, 2026-07-22: the
+  // original below-the-bubble row added vertical height; inline doesn't). It
+  // lives in the *outer* row flex, not the bubble's flex-col, so it rides the
+  // row's `items-center` alignment next to the block. `!isStack` excludes
+  // fanned-stack blocks — same reasoning as the quote/reaction exclusions
+  // below: a stack has no single addressable message to attribute it to.
+  const editedLabel = !isStack && m.editedAt && (
+    <span className="shrink-0 px-1 text-[10px] text-text-muted" title={formatSendTime(m.editedAt)}>
+      edited
+    </span>
+  );
+
   return (
     <div className={'group relative flex items-center gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
       {mine && actionsButton}
+      {mine && editedLabel}
       {/* Swipe-to-reply reveal icon — fades/scales in with drag progress and
           "fills in" (muted → accent) once past the fire threshold. Sits in
           the gutter behind the block's resting position (the side opposite
@@ -1628,23 +1642,6 @@ function MessageBlockRow({
           </div>
         )}
 
-        {/* docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label, outside/
-            below the bubble, on the side facing screen center. The parent
-            flex-col is `items-end` for mine / `items-start` for others, so
-            this needs the opposite `self-*` to land on the inner edge
-            instead of following the bubble's own side. `!isStack` excludes
-            fanned-stack blocks — same reasoning as the quote/reaction row
-            above: a stack has no single addressable message to attribute
-            the label to. */}
-        {!isStack && m.editedAt && (
-          <span
-            className={'px-1 text-[10px] text-text-muted ' + (mine ? 'self-start' : 'self-end')}
-            title={formatSendTime(m.editedAt)}
-          >
-            edited
-          </span>
-        )}
-
         {/* Reaction pills (post-MVP) — a row just below the bubble's bottom
             edge, aligned to the sender's side. Placed *inside* this flex-col
             so it stacks as an extra row after the media/bubble rather than
@@ -1679,6 +1676,7 @@ function MessageBlockRow({
           </div>
         )}
       </div>
+      {!mine && editedLabel}
       {!mine && actionsButton}
     </div>
   );
