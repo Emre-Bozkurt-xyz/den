@@ -21,7 +21,9 @@
  *   voice / no-thumb / null-dims rows — skipped (nothing to fix or no cheap
  *             ground truth; reported in the summary).
  *
- * Run inside the api container (compiled to dist/ by the normal build):
+ * Run inside the api container (compiled to dist/ by the normal build). On
+ * the prod host add `--env-file /opt/apps/den/secrets/.env` like every other
+ * compose invocation there (deploy/README.md):
  *   docker compose -f deploy/docker-compose.yml exec api \
  *     node server/dist/scripts/backfill-dims.js            # dry run (default)
  *   docker compose -f deploy/docker-compose.yml exec api \
