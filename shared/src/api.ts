@@ -214,6 +214,21 @@ export interface EditMessageResponse {
   message: Message;
 }
 
+/** GET /chats/:id/receipts (docs/RECEIPTS.md) — every member's watermarks,
+ *  viewer included (the client ignores its own row). Nulls mean "never read/
+ *  delivered anything in this chat". `lastDeliveredMessageId` is true device
+ *  delivery (not just "server has it") — see PROJECT.md §14 for the owner
+ *  call. Ids are BIGINT-as-string; compare with BigInt(), not `<`/`>`. */
+export interface ChatReceipt {
+  userId: string;
+  lastReadMessageId: string | null;
+  lastDeliveredMessageId: string | null;
+}
+
+export interface ReceiptsResponse {
+  receipts: ChatReceipt[];
+}
+
 export const ChatLimits = {
   nameMax: 64,
   messageBodyMax: 4000,

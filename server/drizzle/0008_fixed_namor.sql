@@ -1,0 +1,1 @@
+ALTER TABLE "chat_members" ADD COLUMN "last_delivered_message_id" bigint;

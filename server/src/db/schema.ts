@@ -29,6 +29,11 @@
  *   media.waveform (nullable jsonb) — 44 RMS peaks (0–255) computed at
  *   processing time; voice only, null for image/video and legacy rows.
  *
+ * Migration 009 (post-MVP, docs/RECEIPTS.md): delivered watermark.
+ *   chat_members.last_delivered_message_id (nullable bigint, no FK, mirrors
+ *   last_read_message_id) — advanced by a client delivery ack; both watermarks
+ *   are guarded-monotonic writes (never move backwards).
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -191,6 +196,10 @@ export const chatMembers = pgTable(
     role: text('role').notNull().default('member'),
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
     lastReadMessageId: bigint('last_read_message_id', { mode: 'bigint' }), // unread counts
+    // Migration 009 (post-MVP, docs/RECEIPTS.md): true device-delivery
+    // watermark, distinct from lastReadMessageId — advanced by a client ack
+    // when a message actually reaches this device (not just "server has it").
+    lastDeliveredMessageId: bigint('last_delivered_message_id', { mode: 'bigint' }),
   },
   (t) => [
     primaryKey({ columns: [t.chatId, t.userId] }),

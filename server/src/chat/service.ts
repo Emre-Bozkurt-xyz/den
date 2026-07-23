@@ -3,9 +3,10 @@
  * handler (ws.ts message.send). Keeps DB access in one place; callers own the
  * realtime side effects (WS fanout, push) since those differ per entry point.
  */
-import { and, desc, eq, gt, gte, ilike, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, ilike, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   ChatLimits,
+  type ChatReceipt,
   type ChatSummary,
   type CreateChatRequest,
   type Message as MessageDto,
@@ -294,11 +295,85 @@ export async function searchMessages(
   };
 }
 
-export async function markRead(chatId: bigint, userId: bigint, messageId: bigint): Promise<void> {
-  await db
+// ─── receipts (post-MVP, docs/RECEIPTS.md) ──────────────────────────────────
+
+/** Guard shared by `markRead`/`markDelivered`: a watermark may only advance
+ *  to a message id that actually belongs to this chat and isn't soft-deleted
+ *  — never trust a client-supplied id blindly (CLAUDE.md hard invariant 1's
+ *  spirit extended to "don't let a foreign id leak into another chat's
+ *  watermark"). */
+async function messageExistsInChat(chatId: bigint, messageId: bigint): Promise<boolean> {
+  const rows = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(and(eq(messages.id, messageId), eq(messages.chatId, chatId), isNull(messages.deletedAt)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** Advances the caller's read watermark (docs/RECEIPTS.md §3) — guarded
+ *  monotonic: `WHERE last_read_message_id IS NULL OR < :id`, so a stale
+ *  client (reconnect race, out-of-order request) can never move it
+ *  backwards. Throws a validation error on a foreign/garbage message id
+ *  rather than silently no-oping — REST callers surface that as a 400; the
+ *  WS delivered-ack handler (ws.ts) catches it per-item instead. Returns
+ *  whether a row actually changed, so the caller can skip broadcasting a
+ *  phantom WS frame (same "no phantom frame" rule as edit/delete). */
+export async function markRead(chatId: bigint, userId: bigint, messageId: bigint): Promise<boolean> {
+  if (!(await messageExistsInChat(chatId, messageId))) throw validation('invalid message id');
+  const updated = await db
     .update(chatMembers)
     .set({ lastReadMessageId: messageId })
-    .where(and(eq(chatMembers.chatId, chatId), eq(chatMembers.userId, userId)));
+    .where(
+      and(
+        eq(chatMembers.chatId, chatId),
+        eq(chatMembers.userId, userId),
+        or(isNull(chatMembers.lastReadMessageId), lt(chatMembers.lastReadMessageId, messageId)),
+      ),
+    )
+    .returning({ userId: chatMembers.userId });
+  return updated.length > 0;
+}
+
+/** Advances the caller's *delivered* watermark — true device-delivery, not
+ *  just "the server persisted it" (owner decision 2026-07-23, docs/RECEIPTS.md
+ *  §1/§3). Same guarded-monotonic/validation shape as `markRead`; the two are
+ *  independent watermarks — `POST /chats/:id/read` calls both (reading
+ *  implies delivery) but this also advances on its own via a client
+ *  delivered.ack (ws.ts), with no read implied. */
+export async function markDelivered(chatId: bigint, userId: bigint, messageId: bigint): Promise<boolean> {
+  if (!(await messageExistsInChat(chatId, messageId))) throw validation('invalid message id');
+  const updated = await db
+    .update(chatMembers)
+    .set({ lastDeliveredMessageId: messageId })
+    .where(
+      and(
+        eq(chatMembers.chatId, chatId),
+        eq(chatMembers.userId, userId),
+        or(isNull(chatMembers.lastDeliveredMessageId), lt(chatMembers.lastDeliveredMessageId, messageId)),
+      ),
+    )
+    .returning({ userId: chatMembers.userId });
+  return updated.length > 0;
+}
+
+/** GET /chats/:id/receipts — every member's watermarks, viewer included (the
+ *  client ignores its own row per the DTO's doc comment). One flat select;
+ *  no join needed since chat_members already carries both watermarks. */
+export async function listReceipts(chatId: bigint): Promise<ChatReceipt[]> {
+  const rows = await db
+    .select({
+      userId: chatMembers.userId,
+      lastReadMessageId: chatMembers.lastReadMessageId,
+      lastDeliveredMessageId: chatMembers.lastDeliveredMessageId,
+    })
+    .from(chatMembers)
+    .where(eq(chatMembers.chatId, chatId));
+  return rows.map((r) => ({
+    userId: r.userId.toString(),
+    lastReadMessageId: r.lastReadMessageId?.toString() ?? null,
+    lastDeliveredMessageId: r.lastDeliveredMessageId?.toString() ?? null,
+  }));
 }
 
 /** Persist a text message. Stage 2 only supports `kind: 'text'` — media kinds

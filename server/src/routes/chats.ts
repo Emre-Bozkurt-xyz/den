@@ -18,6 +18,7 @@ import {
   type MessageIdsRequest,
   type MessagesResponse,
   type ReactRequest,
+  type ReceiptsResponse,
   type SearchMessagesQuery,
   type SearchMessagesResponse,
 } from '@den/shared';
@@ -28,6 +29,8 @@ import {
   editMessage,
   getMessagesPage,
   listChatsForUser,
+  listReceipts,
+  markDelivered,
   markRead,
   restoreMessages,
   searchMessages,
@@ -100,6 +103,12 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  // Read receipts (docs/RECEIPTS.md §3): reading implies delivery, so this
+  // advances BOTH watermarks — two independent guarded-monotonic writes, each
+  // broadcast only when it actually moved (no phantom WS frame, same rule as
+  // edit/delete). `markRead`/`markDelivered` throw on a foreign/garbage
+  // message id, which the Fastify error handler turns into a 400 — no
+  // separate catch needed here.
   app.post<{ Params: { id: string }; Body: MarkReadRequest }>(
     '/chats/:id/read',
     { preHandler: requireAuth },
@@ -108,10 +117,46 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       await assertMember(req.user!.id, chatId);
       const messageId = req.body?.messageId ? parseId(req.body.messageId) : null;
       if (messageId === null) throw validation('messageId required');
-      await markRead(chatId, req.user!.id, messageId);
+
+      const userId = req.user!.id;
+      const readAdvanced = await markRead(chatId, userId, messageId);
+      if (readAdvanced) {
+        app.io?.to(chatRoom(chatId)).emit(
+          'ws',
+          makeEnvelope(WsType.MessageRead, {
+            chatId: chatId.toString(),
+            userId: userId.toString(),
+            messageId: messageId.toString(),
+          }),
+        );
+      }
+
+      const deliveredAdvanced = await markDelivered(chatId, userId, messageId);
+      if (deliveredAdvanced) {
+        app.io?.to(chatRoom(chatId)).emit(
+          'ws',
+          makeEnvelope(WsType.MessageDelivered, {
+            chatId: chatId.toString(),
+            userId: userId.toString(),
+            messageId: messageId.toString(),
+          }),
+        );
+      }
+
       return { ok: true };
     },
   );
+
+  // GET /chats/:id/receipts (docs/RECEIPTS.md §4.4) — every member's
+  // watermarks; the client derives seen-avatars/status text from this plus
+  // the loaded message page (lib/receipts.ts), not from any server-side
+  // per-message computation.
+  app.get<{ Params: { id: string } }>('/chats/:id/receipts', { preHandler: requireAuth }, async (req) => {
+    const chatId = parseId(req.params.id);
+    await assertMember(req.user!.id, chatId);
+    const res: ReceiptsResponse = { receipts: await listReceipts(chatId) };
+    return res;
+  });
 
   // Own-messages-only soft delete + undo (Stage 6 / §2 item 11). `POST`-with-
   // body rather than `DELETE`-with-body, matching the `/read` convention

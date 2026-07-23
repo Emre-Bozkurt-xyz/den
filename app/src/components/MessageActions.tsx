@@ -19,16 +19,25 @@ export function MessageActions({
   onMore,
   onReply,
   onReact,
+  onlyMore,
 }: {
   onMore: () => void;
   onReply: () => void;
   onReact: () => void;
+  /** docs/RECEIPTS.md §5.4 — a failed send has no reply target and nothing
+   *  to react to (it never reached the server); only the "More" icon (→ the
+   *  Discard-only focus menu) applies. */
+  onlyMore?: boolean;
 }) {
   return (
     <div className="flex shrink-0 items-center gap-0.5 self-center opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
       <IconButton icon={MoreVertical} label="Message actions" onClick={onMore} />
-      <IconButton icon={Reply} label="Reply" onClick={onReply} />
-      <IconButton icon={Smile} label="React" onClick={onReact} />
+      {!onlyMore && (
+        <>
+          <IconButton icon={Reply} label="Reply" onClick={onReply} />
+          <IconButton icon={Smile} label="React" onClick={onReact} />
+        </>
+      )}
     </div>
   );
 }

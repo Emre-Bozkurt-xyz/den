@@ -59,6 +59,7 @@ export function MessageFocusMenu({
   onSelect,
   onDelete,
   onEdit,
+  onDiscard,
 }: {
   message: Message;
   /** Captured via `messageRefs.get(id).getBoundingClientRect()` at the
@@ -82,6 +83,9 @@ export function MessageFocusMenu({
   /** docs/MESSAGE_EDIT.md — sets `ChatView`'s `editing`. Same caller-closes
    *  contract as every other row here. */
   onEdit: (m: Message) => void;
+  /** docs/RECEIPTS.md §5.4 — removes a `failed:` bubble for good. Same
+   *  caller-closes contract as every other row here. */
+  onDiscard: (m: Message) => void;
 }) {
   const reducedMotion = useReducedMotion();
   // System back gesture / browser back dismisses the menu (matches Escape and
@@ -91,6 +95,10 @@ export function MessageFocusMenu({
   const [panelRevealed, setPanelRevealed] = useState(reducedMotion);
   const cloneHostRef = useRef<HTMLDivElement>(null);
   const mine = message.senderId === me.id;
+  // docs/RECEIPTS.md §5.4 — a failed send never reached the server (no real
+  // id, no reactions/edit/etc. to act on), so its menu drops straight to a
+  // single Discard row instead of the full action set below.
+  const failed = message.id.startsWith('failed:');
 
   // Two-phase mount: render at the captured rect/scale-1 first, then flip to
   // the resting transform one frame later so the browser actually has
@@ -246,90 +254,106 @@ export function MessageFocusMenu({
         className="flex flex-col divide-y divide-border overflow-hidden rounded-md bg-surface-raised shadow-strong"
         style={panelStyle}
       >
-        {/* Quick-emoji row (post-MVP) — always the first row in the panel.
-            The trailing `+` is a disabled placeholder for the eventual full
-            emoji picker (out of scope here — see the task's Icebox note). */}
-        <div className="flex items-center justify-around gap-1 px-2 py-2">
-          {ReactionLimits.quickEmojis.map((emoji) => {
-            const mine = message.reactions.some((r) => r.emoji === emoji && r.mine);
-            return (
-              <button
-                key={emoji}
-                type="button"
-                onClick={() => onReact(message, emoji)}
-                aria-label={`React with ${emoji}`}
-                aria-pressed={mine}
-                className={
-                  'grid h-9 w-9 place-items-center rounded-pill text-lg transition-colors ' +
-                  (mine ? 'bg-accent/15 ring-1 ring-accent' : 'hover:bg-surface-sunken')
-                }
-                style={{ touchAction: 'manipulation' }}
-              >
-                {emoji}
-              </button>
-            );
-          })}
+        {failed ? (
+          // docs/RECEIPTS.md §5.4 — a failed send has nothing else to offer:
+          // no reactions, no reply target, no body to edit server-side, no
+          // send time to show. Discard is the whole menu.
           <button
-            type="button"
-            disabled
-            title="More reactions (coming soon)"
-            aria-label="More reactions (coming soon)"
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-text-muted disabled:opacity-40"
-            style={{ touchAction: 'manipulation' }}
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-        <div className="px-4 py-2.5 text-center text-xs text-text-muted">{formatSendTime(message.createdAt)}</div>
-        <button
-          onClick={() => onReply(message)}
-          className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
-          style={{ touchAction: 'manipulation' }}
-        >
-          <Reply size={16} />
-          Reply
-        </button>
-        {message.body && (
-          <button
-            onClick={() => onCopy(message)}
-            className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
-            style={{ touchAction: 'manipulation' }}
-          >
-            <Copy size={16} />
-            Copy
-          </button>
-        )}
-        {/* docs/MESSAGE_EDIT.md — own messages with a body only (text +
-            media captions); a message reaching this menu is never a
-            soft-deleted one (those are filtered out of every read path and
-            removed from the cache on `message.deleted`). No time limit. */}
-        {mine && message.body && (
-          <button
-            onClick={() => onEdit(message)}
-            className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
-            style={{ touchAction: 'manipulation' }}
-          >
-            <Pencil size={16} />
-            Edit
-          </button>
-        )}
-        <button
-          onClick={() => onSelect(message)}
-          className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
-          style={{ touchAction: 'manipulation' }}
-        >
-          <CheckSquare size={16} />
-          Select
-        </button>
-        {mine && (
-          <button
-            onClick={() => onDelete(message)}
+            onClick={() => onDiscard(message)}
             className="flex items-center gap-3 px-4 py-3 text-left text-sm text-red-600 transition-colors hover:bg-surface-sunken dark:text-red-400"
             style={{ touchAction: 'manipulation' }}
           >
             <Trash2 size={16} />
-            Delete
+            Discard
           </button>
+        ) : (
+          <>
+            {/* Quick-emoji row (post-MVP) — always the first row in the panel.
+                The trailing `+` is a disabled placeholder for the eventual full
+                emoji picker (out of scope here — see the task's Icebox note). */}
+            <div className="flex items-center justify-around gap-1 px-2 py-2">
+              {ReactionLimits.quickEmojis.map((emoji) => {
+                const reacted = message.reactions.some((r) => r.emoji === emoji && r.mine);
+                return (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => onReact(message, emoji)}
+                    aria-label={`React with ${emoji}`}
+                    aria-pressed={reacted}
+                    className={
+                      'grid h-9 w-9 place-items-center rounded-pill text-lg transition-colors ' +
+                      (reacted ? 'bg-accent/15 ring-1 ring-accent' : 'hover:bg-surface-sunken')
+                    }
+                    style={{ touchAction: 'manipulation' }}
+                  >
+                    {emoji}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                disabled
+                title="More reactions (coming soon)"
+                aria-label="More reactions (coming soon)"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-pill text-text-muted disabled:opacity-40"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+            <div className="px-4 py-2.5 text-center text-xs text-text-muted">{formatSendTime(message.createdAt)}</div>
+            <button
+              onClick={() => onReply(message)}
+              className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+              style={{ touchAction: 'manipulation' }}
+            >
+              <Reply size={16} />
+              Reply
+            </button>
+            {message.body && (
+              <button
+                onClick={() => onCopy(message)}
+                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Copy size={16} />
+                Copy
+              </button>
+            )}
+            {/* docs/MESSAGE_EDIT.md — own messages with a body only (text +
+                media captions); a message reaching this menu is never a
+                soft-deleted one (those are filtered out of every read path and
+                removed from the cache on `message.deleted`). No time limit. */}
+            {mine && message.body && (
+              <button
+                onClick={() => onEdit(message)}
+                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Pencil size={16} />
+                Edit
+              </button>
+            )}
+            <button
+              onClick={() => onSelect(message)}
+              className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+              style={{ touchAction: 'manipulation' }}
+            >
+              <CheckSquare size={16} />
+              Select
+            </button>
+            {mine && (
+              <button
+                onClick={() => onDelete(message)}
+                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-red-600 transition-colors hover:bg-surface-sunken dark:text-red-400"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Trash2 size={16} />
+                Delete
+              </button>
+            )}
+          </>
         )}
       </div>
     </div>,

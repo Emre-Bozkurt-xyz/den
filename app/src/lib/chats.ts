@@ -5,6 +5,7 @@ import type {
   EditMessageResponse,
   Message,
   MessagesResponse,
+  ReceiptsResponse,
   SearchMessagesResponse,
 } from '@den/shared';
 import { api } from './api';
@@ -52,6 +53,13 @@ export function fetchMessageSearch(
 
 export function markRead(chatId: string, messageId: string): Promise<{ ok: true }> {
   return api(`/api/chats/${chatId}/read`, { method: 'POST', body: JSON.stringify({ messageId }) });
+}
+
+/** GET /chats/:id/receipts (docs/RECEIPTS.md §4.4) — every member's
+ *  watermarks; see `hooks/useReceipts.ts` for the query wrapper and
+ *  `lib/receipts.ts` for what the client derives from it. */
+export function fetchReceipts(chatId: string): Promise<ReceiptsResponse> {
+  return api<ReceiptsResponse>(`/api/chats/${chatId}/receipts`);
 }
 
 /** Soft-deletes the caller's own messages (Stage 6 / §2 item 11). The chat

@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Copy, Hand, Images, Reply as ReplyIcon, Search, Trash2, X } from 'lucide-react';
-import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type ReplyPreview } from '@den/shared';
+import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type PublicUser, type ReplyPreview } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import type { SearchFormState } from '../hooks/useMessageSearch';
+import { useReceipts } from '../hooks/useReceipts';
 import {
   addReaction,
   chatDisplayName,
@@ -17,10 +18,14 @@ import { formatSendTime } from '../lib/datetime';
 import { kindForMime, uploadMedia } from '../lib/media';
 import { clearChatNotifications } from '../lib/push';
 import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
+import { deriveReceipts, type ReceiptDerivation } from '../lib/receipts';
 import { addTag, removeTag } from '../lib/tags';
 import {
   applyReactionAdded,
   applyReactionRemoved,
+  isFailedId,
+  isLocalId,
+  isPendingId,
   reactionPendingKey,
   useRealtime,
   withAllPages,
@@ -134,7 +139,8 @@ export function ChatView({
   onSearchStateChange: (state: SearchFormState) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
-  const { sendMessage, notePendingReaction, clearPendingReaction } = useRealtime();
+  const { sendMessage, retrySend, discardFailed, notePendingReaction, clearPendingReaction } = useRealtime();
+  const receipts = useReceipts(chat.id);
   const qc = useQueryClient();
   const isMobile = useIsMobile();
   const [draft, setDraftState] = useState(initialDraft);
@@ -255,6 +261,10 @@ export function ChatView({
   // than "is this id new".
   const introIds = useIntroIds(messages, me.id);
   const lastMessageId = messages[messages.length - 1]?.id;
+  // docs/RECEIPTS.md §3/§5.4 — seen-avatars + Sent/Delivered status derived
+  // fresh every render from the receipts cache + whatever's currently
+  // loaded; `lib/receipts.ts` is the pure, unit-tested derivation.
+  const receiptDerivation: ReceiptDerivation = deriveReceipts(messages, receipts.data?.receipts ?? [], chat.members, me.id);
   const viewerMedia = viewer ? (viewer.list[viewer.index] ?? null) : null;
   // Tags for whatever the viewer is showing. Per the UI-7 decision, tagging
   // stays a viewing-time action (never part of the send path) — this just
@@ -267,10 +277,21 @@ export function ChatView({
 
   // Mark the newest message read once it's loaded/changes — cheap and matches
   // "open the chat = you've seen it" (BACKBONE §5 last_read_message_id).
+  // docs/RECEIPTS.md §5.4: visibility-gated — a backgrounded tab/PWA marking
+  // read would now be a user-visible lie (the sender's bubble would show a
+  // Seen avatar for a chat the reader never actually looked at). Mirrors the
+  // `clearChatNotifications` effect right below: mark immediately if already
+  // visible, and again on every later `visibilitychange` that finds it
+  // visible (covers "sent while backgrounded, then the user foregrounds it").
   useEffect(() => {
-    if (lastMessageId && !lastMessageId.startsWith('pending:')) {
-      void markRead(chat.id, lastMessageId).then(() => qc.invalidateQueries({ queryKey: ['chats'] }));
+    if (!lastMessageId || isLocalId(lastMessageId)) return;
+    function markIfVisible() {
+      if (document.visibilityState !== 'visible') return;
+      void markRead(chat.id, lastMessageId!).then(() => qc.invalidateQueries({ queryKey: ['chats'] }));
     }
+    markIfVisible();
+    document.addEventListener('visibilitychange', markIfVisible);
+    return () => document.removeEventListener('visibilitychange', markIfVisible);
   }, [chat.id, lastMessageId, qc]);
 
   // Clear this chat's already-shown notifications when it becomes the active
@@ -451,7 +472,7 @@ export function ChatView({
     const ti = ids.indexOf(targetId);
     if (ai === -1 || ti === -1) return;
     const [lo, hi] = ai < ti ? [ai, ti] : [ti, ai];
-    setSelectedIds(new Set(ids.slice(lo, hi + 1).filter((id) => !id.startsWith('pending:'))));
+    setSelectedIds(new Set(ids.slice(lo, hi + 1).filter((id) => !isLocalId(id))));
   }
 
   function showUndoToast(ids: string[]) {
@@ -639,7 +660,12 @@ export function ChatView({
     // Without this, that next tap would be silently swallowed.
     suppressClickRef.current = false;
     const m = msgs[0];
-    if (!m || m.id.startsWith('pending:')) return;
+    // Pending bubbles have nothing to act on yet (no server-side id at all)
+    // and stay excluded entirely. Failed ones are deliberately let through —
+    // docs/RECEIPTS.md §5.4 wants long-press to reach a (reduced, Discard-
+    // only) focus menu for them, so only `isPendingId` bails here, not the
+    // broader `isLocalId`.
+    if (!m || isPendingId(m.id)) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     longPressStartRef.current = { x: e.clientX, y: e.clientY };
     clearLongPressTimer();
@@ -649,17 +675,21 @@ export function ChatView({
       // Stacks (msgs.length > 1) skip the single-message focus menu: Copy
       // and Delete are per-message, so the useful gesture is "select all of
       // these", which also expands the stack back into individual bubbles.
-      if (selectionMode) toggleSelect(m.id);
-      else if (msgs.length > 1) enterSelectionMode(msgs);
+      // A failed message is never batch-selectable (its id isn't a real
+      // server id) even if selection mode happens to already be active.
+      if (selectionMode) {
+        if (!isLocalId(m.id)) toggleSelect(m.id);
+      } else if (msgs.length > 1) enterSelectionMode(msgs);
       else openActionMenu(m);
     }, LONG_PRESS_MS);
 
     // Stacks are excluded — a stack has no single addressable message to
     // attach a reply to (the same reason it skips the focus menu above).
     // Mouse pointers skip it too: desktop already has the hover Reply
-    // button, and a mouse-drag swipe isn't a gesture users expect there.
+    // button, and a mouse-drag swipe isn't a gesture users expect there. A
+    // failed message can't be replied to either (docs/RECEIPTS.md §5.4).
     swipeGestureRef.current =
-      !selectionMode && msgs.length === 1 && e.pointerType !== 'mouse'
+      !selectionMode && msgs.length === 1 && e.pointerType !== 'mouse' && !isFailedId(m.id)
         ? { msg: m, mine, startX: e.clientX, startY: e.clientY, engaged: false }
         : null;
   }
@@ -750,7 +780,11 @@ export function ChatView({
       return;
     }
     const m = msgs[0];
-    if (!m || m.id.startsWith('pending:')) return;
+    // Neither a still-sending nor a failed bubble has a normal tap action —
+    // failed's only affordance is the dedicated "tap to retry" label inside
+    // it, which stops propagation before this handler ever sees the click
+    // (docs/RECEIPTS.md §5.4).
+    if (!m || isLocalId(m.id)) return;
     // Selection mode disables stacking, so a clickable block is always a
     // single message here.
     if (selectionMode) {
@@ -1084,6 +1118,8 @@ export function ChatView({
                 onPointerUpBlock={onBubblePointerUp}
                 onPointerCancelBlock={onBubblePointerCancel}
                 onClickBlock={onBubbleClick}
+                receipts={receiptDerivation}
+                onRetryFailed={retrySend}
               />
             ),
           )}
@@ -1193,6 +1229,10 @@ export function ChatView({
           onEdit={(m) => {
             setActionMenuFor(null);
             startEdit(m);
+          }}
+          onDiscard={(m) => {
+            setActionMenuFor(null);
+            discardFailed(m.id);
           }}
         />
       )}
@@ -1337,6 +1377,8 @@ function RunGroup({
   onPointerUpBlock,
   onPointerCancelBlock,
   onClickBlock,
+  receipts,
+  onRetryFailed,
 }: {
   run: MessageRun;
   chat: ChatSummary;
@@ -1369,6 +1411,10 @@ function RunGroup({
   onPointerUpBlock: () => void;
   onPointerCancelBlock: () => void;
   onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
+  /** docs/RECEIPTS.md §3/§5.4 — resolved per-block below (own messages
+   *  only). */
+  receipts: ReceiptDerivation;
+  onRetryFailed: (failedId: string) => void;
 }) {
   const mine = run.senderId === me.id;
   const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
@@ -1376,40 +1422,53 @@ function RunGroup({
   return (
     <div className={'flex max-w-[78%] flex-col gap-[2px] ' + (mine ? 'items-end self-end' : 'items-start self-start')}>
       {chat.isGroup && !mine && <p className="px-1 pb-0.5 text-xs font-semibold text-text-secondary">{senderName}</p>}
-      {run.blocks.map((block, bi) => (
-        <MessageBlockRow
-          key={blockMessages(block)[0]!.id}
-          block={block}
-          chat={chat}
-          mine={mine}
-          isRunHead={bi === 0}
-          isRunTail={bi === run.blocks.length - 1}
-          intro={blockMessages(block).some((m) => introIds.has(m.id))}
-          selectedIds={selectedIds}
-          highlightId={highlightId}
-          selectionMode={selectionMode}
-          // Hover bar (UI-8c) is desktop-only, single-message blocks only
-          // (a stack has no addressable single-message action — see the
-          // stack doc comment in lib/messageGroups.ts), and hidden entirely
-          // during multi-select (docs/archive/UI8_CHAT_INSTAGRAM.md §4 cross-cutting
-          // rule — selection mode owns bubble taps instead).
-          showActionsButton={!isMobile && !selectionMode && block.kind === 'single'}
-          registerRef={registerRef}
-          onOpenActions={onOpenActions}
-          onOpenViewer={onOpenViewer}
-          onOpenStack={onOpenStack}
-          onReply={onReply}
-          onToggleReaction={onToggleReaction}
-          onJumpToMessage={onJumpToMessage}
-          swipeDx={swipeState?.id === blockMessages(block)[0]!.id ? swipeState.dx : 0}
-          snappingBack={snappingBackId === blockMessages(block)[0]!.id}
-          onPointerDownBlock={onPointerDownBlock}
-          onPointerMoveBlock={onPointerMoveBlock}
-          onPointerUpBlock={onPointerUpBlock}
-          onPointerCancelBlock={onPointerCancelBlock}
-          onClickBlock={onClickBlock}
-        />
-      ))}
+      {run.blocks.map((block, bi) => {
+        // Receipts only ever render on my own messages (docs/RECEIPTS.md §1)
+        // — a stack resolves against every message it contains (not just its
+        // first), since the "newest of mine" a member's watermark clamps to
+        // can be any item inside it.
+        const blockIds = mine ? blockMessages(block).map((mm) => mm.id) : [];
+        const blockSeenAvatars = blockIds.flatMap((id) => receipts.seenAvatars.get(id) ?? []);
+        const blockStatus = mine && receipts.status && blockIds.includes(receipts.status.messageId) ? receipts.status : null;
+
+        return (
+          <MessageBlockRow
+            key={blockMessages(block)[0]!.id}
+            block={block}
+            chat={chat}
+            mine={mine}
+            isRunHead={bi === 0}
+            isRunTail={bi === run.blocks.length - 1}
+            intro={blockMessages(block).some((m) => introIds.has(m.id))}
+            selectedIds={selectedIds}
+            highlightId={highlightId}
+            selectionMode={selectionMode}
+            // Hover bar (UI-8c) is desktop-only, single-message blocks only
+            // (a stack has no addressable single-message action — see the
+            // stack doc comment in lib/messageGroups.ts), and hidden entirely
+            // during multi-select (docs/archive/UI8_CHAT_INSTAGRAM.md §4 cross-cutting
+            // rule — selection mode owns bubble taps instead).
+            showActionsButton={!isMobile && !selectionMode && block.kind === 'single'}
+            registerRef={registerRef}
+            onOpenActions={onOpenActions}
+            onOpenViewer={onOpenViewer}
+            onOpenStack={onOpenStack}
+            onReply={onReply}
+            onToggleReaction={onToggleReaction}
+            onJumpToMessage={onJumpToMessage}
+            swipeDx={swipeState?.id === blockMessages(block)[0]!.id ? swipeState.dx : 0}
+            snappingBack={snappingBackId === blockMessages(block)[0]!.id}
+            onPointerDownBlock={onPointerDownBlock}
+            onPointerMoveBlock={onPointerMoveBlock}
+            onPointerUpBlock={onPointerUpBlock}
+            onPointerCancelBlock={onPointerCancelBlock}
+            onClickBlock={onClickBlock}
+            seenAvatars={blockSeenAvatars}
+            status={blockStatus}
+            onRetryFailed={onRetryFailed}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -1468,6 +1527,9 @@ function MessageBlockRow({
   onPointerUpBlock,
   onPointerCancelBlock,
   onClickBlock,
+  seenAvatars,
+  status,
+  onRetryFailed,
 }: {
   block: MessageBlock;
   chat: ChatSummary;
@@ -1504,11 +1566,22 @@ function MessageBlockRow({
   onPointerUpBlock: () => void;
   onPointerCancelBlock: () => void;
   onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
+  /** docs/RECEIPTS.md §3/§5.4 — resolved by `RunGroup` across every message
+   *  this block covers; empty/null on anyone else's messages. */
+  seenAvatars: PublicUser[];
+  status: { messageId: string; kind: 'sent' | 'delivered' } | null;
+  onRetryFailed: (failedId: string) => void;
 }) {
   const msgs = blockMessages(block);
   const m = msgs[0]!;
   const isStack = block.kind === 'stack';
-  const pending = m.id.startsWith('pending:');
+  // `pending` gates the "still sending" opacity + hides the desktop hover
+  // actions row — deliberately NOT `isLocalId`: a `failed:` message needs
+  // that hover row's "More" button to stay reachable (docs/RECEIPTS.md
+  // §5.4's Discard-only focus menu), and dimming it like an in-flight send
+  // would read as "still trying" instead of "this one didn't go through".
+  const pending = isPendingId(m.id);
+  const failed = !isStack && isFailedId(m.id);
   const selected = msgs.some((mm) => selectedIds.has(mm.id));
   const highlighted = msgs.some((mm) => mm.id === highlightId);
 
@@ -1530,7 +1603,7 @@ function MessageBlockRow({
   const reactions = !isStack ? m.reactions : [];
 
   const actionsButton = showActionsButton && !pending && (
-    <MessageActions onMore={() => onOpenActions(m)} onReply={() => onReply(m)} onReact={() => onOpenActions(m)} />
+    <MessageActions onMore={() => onOpenActions(m)} onReply={() => onReply(m)} onReact={() => onOpenActions(m)} onlyMore={failed} />
   );
 
   const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);
@@ -1684,6 +1757,43 @@ function MessageBlockRow({
               </button>
             ))}
           </div>
+        )}
+
+        {/* Delivery status / seen avatars / failed-send (docs/RECEIPTS.md §1/
+            §5.4) — own messages only, same below-block slot as the reaction
+            pills above. Mutually exclusive by construction: `seenAvatars`
+            and `status` are derived (lib/receipts.ts) so a message never has
+            both, and a `failed:` message never has either (it's excluded
+            from the derivation entirely — nothing server-side to report). */}
+        {mine && failed && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onRetryFailed(m.id);
+            }}
+            className="mt-0.5 text-left text-[10px] text-red-600 dark:text-red-400"
+            style={{ touchAction: 'manipulation' }}
+          >
+            Failed to send — tap to retry
+          </button>
+        )}
+        {mine && !failed && seenAvatars.length > 0 && (
+          <div className="mt-0.5 flex items-center gap-0.5">
+            {seenAvatars.slice(0, 3).map((u) => (
+              <div
+                key={u.id}
+                title={u.displayName}
+                className="grid h-4 w-4 place-items-center rounded-pill bg-accent text-[8px] font-semibold text-white ring-1 ring-surface"
+              >
+                {u.displayName.charAt(0).toUpperCase()}
+              </div>
+            ))}
+            {seenAvatars.length > 3 && <span className="text-[10px] text-text-muted">+{seenAvatars.length - 3}</span>}
+          </div>
+        )}
+        {mine && !failed && seenAvatars.length === 0 && status && (
+          <span className="mt-0.5 text-[10px] text-text-muted">{status.kind === 'delivered' ? 'Delivered' : 'Sent'}</span>
         )}
       </div>
       {!mine && actionsButton}

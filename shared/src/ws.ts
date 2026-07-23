@@ -60,6 +60,10 @@ export const WsType = {
   // reactions (post-MVP)
   ReactionAdded: 'reaction.added',
   ReactionRemoved: 'reaction.removed',
+  // receipts (post-MVP, docs/RECEIPTS.md)
+  DeliveredAck: 'delivered.ack',
+  MessageDelivered: 'message.delivered',
+  MessageRead: 'message.read',
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
@@ -168,6 +172,31 @@ export interface ReactionRemovedPayload {
   messageId: string;
   emoji: string;
   userId: string;
+}
+
+// ─── receipts (post-MVP, docs/RECEIPTS.md) ──────────────────────────────────
+
+/** Client → server: these messages reached this device (WS frame received,
+ *  or newest ids seen in a refetch after reconnect). Batched: one frame can
+ *  ack many chats. Invalid/non-member items are skipped silently — this is a
+ *  fire-and-forget ack, never worth an Error-frame round trip. */
+export interface DeliveredAckPayload {
+  items: { chatId: string; messageId: string }[];
+}
+
+/** Server → chat room, only when `lastDeliveredMessageId` actually advanced
+ *  (guarded-monotonic write — "no phantom frame" rule). */
+export interface MessageDeliveredPayload {
+  chatId: string;
+  userId: string;
+  messageId: string;
+}
+
+/** Server → chat room, only when `lastReadMessageId` actually advanced. */
+export interface MessageReadPayload {
+  chatId: string;
+  userId: string;
+  messageId: string;
 }
 
 /** Build a server→client envelope with a fresh timestamp. */

@@ -29,14 +29,15 @@ import {
   makeEnvelope,
   isReservedWsType,
   type WsEnvelope,
+  type DeliveredAckPayload,
   type MessageSendPayload,
 } from '@den/shared';
 import { env } from './env.js';
 import { db } from './db/index.js';
 import { chatMembers, sessions } from './db/schema.js';
 import { SESSION_COOKIE } from './auth/session.js';
-import { assertMember } from './chat/membership.js';
-import { sendTextMessage } from './chat/service.js';
+import { assertMember, isMember } from './chat/membership.js';
+import { markDelivered, sendTextMessage } from './chat/service.js';
 import { notifyChatMembers } from './push/notify.js';
 import { AppError } from './errors.js';
 import { chatRoom, userRoom } from './realtime/rooms.js';
@@ -115,6 +116,9 @@ export function attachWs(app: FastifyInstance): IOServer {
         case WsType.MessageSend:
           void handleMessageSend(io, socket, userId, frame as WsEnvelope<string, MessageSendPayload>);
           break;
+        case WsType.DeliveredAck:
+          void handleDeliveredAck(io, userId, frame as WsEnvelope<string, DeliveredAckPayload>);
+          break;
         default:
           // Unknown types are ignored — real handlers land per-stage.
           break;
@@ -162,5 +166,54 @@ async function handleMessageSend(
     const code = e instanceof AppError ? e.code : 'internal';
     const message = e instanceof Error ? e.message : 'failed to send message';
     socket.emit('ws', makeEnvelope(WsType.Error, { code, message }, frame.reqId));
+  }
+}
+
+// Batch ceiling for a single delivered.ack frame (docs/RECEIPTS.md §4.5) —
+// generous enough for a full chat-list reconnect ack, cheap enough that a
+// malicious/buggy client can't turn one frame into an unbounded DB hammer.
+const DELIVERED_ACK_BATCH_MAX = 50;
+
+/** Client → server delivery ack (docs/RECEIPTS.md §4.5): fire-and-forget,
+ *  batched across chats. Every item is validated independently and bad ones
+ *  are skipped silently — no Error-frame spam for what's just a hint, and no
+ *  membership leak via a non-member item's error message. No reply frame on
+ *  success (unlike message.send, nothing here needs reqId correlation). */
+async function handleDeliveredAck(
+  io: IOServer,
+  userId: bigint,
+  frame: WsEnvelope<string, DeliveredAckPayload>,
+): Promise<void> {
+  const items = Array.isArray(frame.payload?.items) ? frame.payload.items.slice(0, DELIVERED_ACK_BATCH_MAX) : [];
+
+  for (const item of items) {
+    if (!item || typeof item.chatId !== 'string' || typeof item.messageId !== 'string') continue;
+    let chatId: bigint;
+    let messageId: bigint;
+    try {
+      chatId = BigInt(item.chatId);
+      messageId = BigInt(item.messageId);
+    } catch {
+      continue; // garbage id — skip, not worth an Error frame
+    }
+
+    if (!(await isMember(userId, chatId))) continue; // non-member: skip silently, nothing leaks
+
+    try {
+      const advanced = await markDelivered(chatId, userId, messageId);
+      if (advanced) {
+        io.to(chatRoom(chatId)).emit(
+          'ws',
+          makeEnvelope(WsType.MessageDelivered, {
+            chatId: chatId.toString(),
+            userId: userId.toString(),
+            messageId: messageId.toString(),
+          }),
+        );
+      }
+    } catch {
+      // Foreign/garbage message id (markDelivered's messageExistsInChat
+      // guard) — skip this item, same fire-and-forget posture as above.
+    }
   }
 }

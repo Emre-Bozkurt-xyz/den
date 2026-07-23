@@ -12,11 +12,11 @@
  */
 import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
-import { eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { db, closeDb } from '../db/index.js';
 import { chatMembers, chats, messages, users } from '../db/schema.js';
 import { AppError } from '../errors.js';
-import { editMessage } from './service.js';
+import { editMessage, listReceipts, markDelivered, markRead } from './service.js';
 
 const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -135,5 +135,140 @@ describe('editMessage', () => {
       () => editMessage(userAId, chatId, row.id, '   '),
       (err: unknown) => statusOf(err) === 400,
     );
+  });
+});
+
+/**
+ * Service-level tests for the receipts watermarks (docs/RECEIPTS.md §4.3/§7)
+ * — same real-Postgres posture as `editMessage` above, with its own
+ * self-contained fixture (a group chat + a foreign chat, both torn down in
+ * `after()`) so these never depend on execution order against the
+ * `editMessage` suite's rows.
+ */
+describe('markRead / markDelivered / listReceipts', () => {
+  let senderId: bigint;
+  let readerId: bigint;
+  let receiptsChatId: bigint;
+  let msg1: bigint;
+  let msg2: bigint;
+  let deletedMsgId: bigint;
+  let foreignChatId: bigint;
+  let foreignMsgId: bigint;
+
+  before(async () => {
+    senderId = await insertUser('receipts-sender');
+    readerId = await insertUser('receipts-reader');
+
+    const chatRows = await db
+      .insert(chats)
+      .values({ isGroup: true, name: 'receipts-test', createdBy: senderId })
+      .returning({ id: chats.id });
+    receiptsChatId = chatRows[0]!.id;
+    await db.insert(chatMembers).values([
+      { chatId: receiptsChatId, userId: senderId },
+      { chatId: receiptsChatId, userId: readerId },
+    ]);
+
+    const m1 = await db.insert(messages).values({ chatId: receiptsChatId, senderId, kind: 'text', body: 'one' }).returning();
+    msg1 = m1[0]!.id;
+    const m2 = await db.insert(messages).values({ chatId: receiptsChatId, senderId, kind: 'text', body: 'two' }).returning();
+    msg2 = m2[0]!.id;
+    const del = await db
+      .insert(messages)
+      .values({ chatId: receiptsChatId, senderId, kind: 'text', body: 'deleted', deletedAt: new Date() })
+      .returning();
+    deletedMsgId = del[0]!.id;
+
+    // A message that's real, but belongs to a *different* chat — proves the
+    // guard rejects cross-chat ids, not just nonexistent ones.
+    const foreignChatRows = await db
+      .insert(chats)
+      .values({ isGroup: true, name: 'receipts-foreign', createdBy: senderId })
+      .returning({ id: chats.id });
+    foreignChatId = foreignChatRows[0]!.id;
+    await db.insert(chatMembers).values({ chatId: foreignChatId, userId: senderId });
+    const fm = await db.insert(messages).values({ chatId: foreignChatId, senderId, kind: 'text', body: 'foreign' }).returning();
+    foreignMsgId = fm[0]!.id;
+  });
+
+  after(async () => {
+    // No `closeDb()` here — the module-level `after` above (which runs after
+    // every describe in this file, editMessage included) owns closing the
+    // shared connection pool exactly once.
+    await db.delete(messages).where(inArray(messages.chatId, [receiptsChatId, foreignChatId]));
+    await db.delete(chatMembers).where(inArray(chatMembers.chatId, [receiptsChatId, foreignChatId]));
+    await db.delete(chats).where(inArray(chats.id, [receiptsChatId, foreignChatId]));
+    await db.delete(users).where(inArray(users.id, [senderId, readerId]));
+  });
+
+  test('markRead advances the watermark forward, then guards against moving it backward (monotonic)', async () => {
+    const first = await markRead(receiptsChatId, readerId, msg1);
+    assert.equal(first, true, 'NULL -> msg1 should advance');
+    const forward = await markRead(receiptsChatId, readerId, msg2);
+    assert.equal(forward, true, 'msg1 -> msg2 should advance');
+    const backward = await markRead(receiptsChatId, readerId, msg1);
+    assert.equal(backward, false, 'msg2 -> msg1 must be a no-op, never move backward');
+  });
+
+  test('markDelivered is monotonic and tracks a watermark independent of markRead', async () => {
+    const first = await markDelivered(receiptsChatId, readerId, msg1);
+    assert.equal(first, true);
+    const same = await markDelivered(receiptsChatId, readerId, msg1);
+    assert.equal(same, false, 'repeating the same id is not "newer" — no-op');
+    const forward = await markDelivered(receiptsChatId, readerId, msg2);
+    assert.equal(forward, true);
+  });
+
+  test('markRead rejects a message id that belongs to a different chat', async () => {
+    await assert.rejects(
+      () => markRead(receiptsChatId, readerId, foreignMsgId),
+      (err: unknown) => statusOf(err) === 400,
+    );
+  });
+
+  test('markRead rejects a soft-deleted message id', async () => {
+    await assert.rejects(
+      () => markRead(receiptsChatId, readerId, deletedMsgId),
+      (err: unknown) => statusOf(err) === 400,
+    );
+  });
+
+  test('markRead rejects a nonexistent message id', async () => {
+    await assert.rejects(
+      () => markRead(receiptsChatId, readerId, 999999999999999n),
+      (err: unknown) => statusOf(err) === 400,
+    );
+  });
+
+  test('markDelivered rejects the same invalid-id cases as markRead (foreign chat, soft-deleted)', async () => {
+    await assert.rejects(
+      () => markDelivered(receiptsChatId, readerId, foreignMsgId),
+      (err: unknown) => statusOf(err) === 400,
+    );
+    await assert.rejects(
+      () => markDelivered(receiptsChatId, readerId, deletedMsgId),
+      (err: unknown) => statusOf(err) === 400,
+    );
+  });
+
+  test('listReceipts returns every member\'s watermarks, with nulls for a member who has read/delivered nothing', async () => {
+    const freshReaderId = await insertUser('receipts-fresh');
+    await db.insert(chatMembers).values({ chatId: receiptsChatId, userId: freshReaderId });
+    try {
+      const receipts = await listReceipts(receiptsChatId);
+      const row = receipts.find((r) => r.userId === freshReaderId.toString());
+      assert.ok(row, 'expected a receipts row for every member, including one who never read/delivered anything');
+      assert.equal(row!.lastReadMessageId, null);
+      assert.equal(row!.lastDeliveredMessageId, null);
+      // Sanity: the earlier tests' watermarks for `readerId` round-trip
+      // through listReceipts as strings, not raw bigints.
+      const readerRow = receipts.find((r) => r.userId === readerId.toString());
+      assert.equal(typeof readerRow?.lastReadMessageId, 'string');
+    } finally {
+      await db
+        .delete(chatMembers)
+        .where(and(eq(chatMembers.chatId, receiptsChatId), eq(chatMembers.userId, freshReaderId)));
+      await db.delete(users).where(eq(users.id, freshReaderId));
+    }
   });
 });
