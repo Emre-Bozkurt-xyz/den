@@ -110,6 +110,7 @@ Modeling rules (locked):
 - **Reactions:** one row per `(message_id, user_id, emoji)`; API returns aggregated `ReactionSummary[]` (`{emoji, count, mine}`). Arbitrary emoji ≤32 chars stored; `ReactionLimits.quickEmojis` is the quick palette.
 - **Auth is provider-ready by design:** `auth_identities` + `webauthn_credentials` exist from migration 001 but **nothing writes to them yet**. Invites authorize, providers authenticate; match OAuth users on `(provider, provider_user_id)`, never email; a user always keeps ≥1 login method.
 - **Message search** (migration 006, docs/MESSAGE_SEARCH.md): `pg_trgm` extension + `idx_messages_body_trgm` gin trigram index on `messages.body` — substring search (ILIKE), not tsvector FTS, so mixed-language/partial-word queries behave like Discord's search instead of a stemmer.
+- **Message edit** (migration 007, docs/MESSAGE_EDIT.md): `messages.edited_at` (nullable timestamptz), set the first time a message's body is edited. Own messages with a non-empty body only (text + media captions — the edit only ever touches `body`, never `media`); no time limit. No index needed — the existing trigram index covers edited bodies automatically.
 
 ## 6. REST API surface (actual, all under `/api`, cookie-authed unless noted)
 
@@ -127,6 +128,7 @@ GET  /chats/:id/messages?before=&limit=  (keyset, id DESC)
 GET  /chats/:id/messages/search?q=&from=&since=&until=&before=&limit=  (docs/MESSAGE_SEARCH.md; ≥1 filter required, else 400)
 POST /chats/:id/read {messageId}
 POST /chats/:id/messages/delete | /restore {messageIds[]}   (own messages only, batch all-or-nothing)
+POST /chats/:id/messages/:messageId/edit {body}          (own messages only, body only — docs/MESSAGE_EDIT.md)
 POST /chats/:id/messages/:messageId/reactions {emoji}
 DELETE /chats/:id/messages/:messageId/reactions/:emoji
 
@@ -151,7 +153,7 @@ Rules: every chat-scoped route calls `assertMember`. Keyset pagination only (`be
 
 Envelope (LOCKED): `{type, payload, ts, reqId?}` — `shared/src/ws.ts`. One connection per client, session-cookie handshake. Rooms: `chat:{id}` (message-scoped fanout) and `user:{id}` (chat-agnostic notices). Heartbeat ~25s (proxy timeouts).
 
-Current types: `hello ping pong error` · `message.send message.new` · `chat.created` · `friend.request friend.accepted` · `media.ready` · `tag.added tag.removed` · `message.deleted message.restored` · `reaction.added reaction.removed`.
+Current types: `hello ping pong error` · `message.send message.new` · `chat.created` · `friend.request friend.accepted` · `media.ready` · `tag.added tag.removed` · `message.deleted message.restored` · `message.edited` · `reaction.added reaction.removed`.
 
 Rules:
 - New features add `type` values to the `WsType` registry — never a second envelope or side-channel.
@@ -236,6 +238,7 @@ Historical log (2026-07-17 → 2026-07-22, ~60 entries): **`docs/archive/BACKBON
 | 2026-07-22 | Per-chat message search shipped (`docs/MESSAGE_SEARCH.md`): `pg_trgm` + gin trigram index for substring `ILIKE` matching (not tsvector FTS — handles mixed-language/partial-word/substring queries the way Discord's search does); mobile renders search as a full-screen overlay, desktop as a ~360px right-side panel that pushes the message column (Discord's own split) | Substring search over an unbounded, growing `messages.body` needs an index that doesn't degrade with chat size; FTS's word/stemmer model is the wrong shape for substring/mixed-language matching. Overlay-vs-panel split follows the same mobile/desktop divergence already established for the gallery and message-focus UI |
 | 2026-07-22 | Native long-press menu (save/share image, selection loupe) suppressed on media *previews* — gallery tiles, album covers, chat photo/video thumbnails, stacks, grid-sheet tiles, selection thumbs — via the `.media-preview` CSS class (`-webkit-touch-callout`/`user-select`/`user-drag: none`, the iOS mechanism) paired with `suppressTouchContextMenu` (`lib/nativeMenu.ts`, swallows Android Chrome's touch/pen `contextmenu`). Full-screen `MediaViewer` keeps native behavior; desktop right-click keeps it everywhere (pointerType-gated) | Real-device finding: the browser's long-press menu fires over the app's own long-press gestures (gallery multi-select, chat focus menu/selection), making them unusable on media. Previews are app chrome — the intentional place to save/share an image is its full display, so native behavior is preserved exactly there |
 | 2026-07-22 | Image paste in the composer shipped (`docs/IMAGE_PASTE.md`): `onPaste` on the composer `<textarea>` reuses the attach-button path (`onPickFiles` → `ChatView.handleFilesPicked`) wholesale — no new upload code, no filtering in `Composer`. Mixed clipboard (file + text) → files win, text dropped. `Composer`'s `onRecordingError` prop generalized to `onError` to also cover the paste-while-uploading error | Owner-requested QoL pull-forward, not on the §13 roadmap. Desktop `Ctrl+V` (screenshot tools) and mobile long-press → Paste were both missing; the attach-button flow already has no pre-send preview/confirm step, so paste follows the same "picking is sending" precedent rather than inventing one |
+| 2026-07-22 | Message edit shipped (`docs/MESSAGE_EDIT.md`, migration 007 `messages.edited_at`): own messages with a non-empty body only (text + media captions — the edit only ever touches `body`, never `media`), no time limit. New `message.edited` WS type carries the full updated `Message` (same "replace wholesale" shape as `message.restored`), emitted only on a real change. Edited indicator is a small muted "edited" label outside/below the bubble, aligned toward screen center (`self-start` for mine, `self-end` for others). Client applies the edit REST-first (mutation response patches the cache); the WS echo is an idempotent replace, no dedup bookkeeping needed | Owner-requested pull-forward, not on the §13 roadmap — same posture as image paste above. Unlimited edit window fits the closed-friend-circle trust model (no impersonation/abuse surface to police); scoping to body-only (never media) keeps the media pipeline's immutability invariants untouched |
 
 ## 15. 🔮 Call-readiness invariants (still binding)
 
