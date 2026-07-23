@@ -65,7 +65,7 @@ export function Composer({
   onPickFiles,
   uploading,
   onRecordingComplete,
-  onRecordingError,
+  onError,
   isMobile,
 }: {
   draft: string;
@@ -78,7 +78,10 @@ export function Composer({
   /** Hands a finished recording off to `ChatView`'s existing `runUpload`
    *  path — this component never talks to the media API directly. */
   onRecordingComplete: (blob: Blob, mime: string) => void;
-  onRecordingError: (message: string) => void;
+  /** Generalized from `onRecordingError` (docs/IMAGE_PASTE.md) once paste
+   *  needed the same "surface a message, don't touch upload state" callback
+   *  the mic already had — it's still just `setUploadError` in `ChatView`. */
+  onError: (message: string) => void;
   isMobile: boolean;
 }) {
   const [recState, setRecState] = useState<RecState>('idle');
@@ -257,7 +260,7 @@ export function Composer({
     } catch {
       closeAudioContext();
       setRecState('idle');
-      onRecordingError('Microphone access failed');
+      onError('Microphone access failed');
     }
   }
 
@@ -371,6 +374,28 @@ export function Composer({
     onPickFiles(files);
   }
 
+  /** docs/IMAGE_PASTE.md — desktop Ctrl+V of a screenshot, or mobile
+   *  long-press → Paste, land here as a `ClipboardEvent` with `.files`
+   *  populated. No files → leave the event alone entirely (no
+   *  `preventDefault()`) so plain text paste behaves exactly as before.
+   *  Files present → this *is* the paste, even on a mixed clipboard (e.g.
+   *  copied off a web page, file + filename text): we take the file and
+   *  drop the text, matching Discord/Slack. Routes into the same
+   *  `onPickFiles` the attach button uses — `ChatView.handleFilesPicked`
+   *  already filters kinds and reports skips, so no filtering here.
+   *  ⚠️ iOS Safari / Android Samsung Keyboard clipboard-image paste is
+   *  unverified on real hardware — see PROJECT.md §12. */
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const files = e.clipboardData?.files;
+    if (!files || files.length === 0) return;
+    e.preventDefault();
+    if (uploading) {
+      onError('Upload in progress');
+      return;
+    }
+    onPickFiles(Array.from(files));
+  }
+
   const lockProgress = clamp01(dragY / LOCK_THRESHOLD_DY);
   const cancelProgress = clamp01(dragX / CANCEL_THRESHOLD_DX);
   // Desktop shows explicit Stop/Cancel buttons for the whole recording
@@ -424,6 +449,7 @@ export function Composer({
           key="text"
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
+          onPaste={handlePaste}
           onKeyDown={(e) => {
             // Desktop: Enter sends, Shift+Enter inserts a newline. Mobile:
             // Enter always inserts a newline (there's a dedicated send

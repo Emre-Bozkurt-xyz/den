@@ -7,7 +7,7 @@ import { ChevronUp, Lock, Square } from 'lucide-react';
  * definition.
  *  - `idle → requesting` on mic press (`getUserMedia` in flight).
  *  - `requesting → recording` on stream grant, or back to `idle` + an error
- *    surfaced via `onRecordingError` on deny.
+ *    surfaced via `onError` on deny.
  *  - `recording → idle` (send) on release (unlocked, push-to-talk) or the
  *    desktop Stop button; `recording → locked` on slide-up-past-threshold;
  *    `recording → cancelling → idle` (discard) on slide-left-past-threshold

@@ -1038,7 +1038,7 @@ export function ChatView({
         onPickFiles={(files) => void handleFilesPicked(files)}
         uploading={!!upload}
         onRecordingComplete={handleRecordingComplete}
-        onRecordingError={setUploadError}
+        onError={setUploadError}
         isMobile={isMobile}
       />
 
