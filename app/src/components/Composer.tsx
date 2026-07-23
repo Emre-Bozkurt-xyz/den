@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, Mic, Paperclip, Send, Square, X } from 'lucide-react';
+import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { RecordingBar, type RecState } from './RecordingBar';
 
 /**
@@ -91,6 +92,10 @@ export function Composer({
    *  isn't rendered — no mode checks needed inside those handlers. */
   editing: boolean;
 }) {
+  // docs/IOS_KEYBOARD.md — 0 on Android/desktop (the hook's iOS gate is off),
+  // so `keyboardInset > 0` below never trips there and this component's
+  // styling is unaffected.
+  const keyboardInset = useKeyboardInset();
   const [recState, setRecState] = useState<RecState>('idle');
   const [elapsedMs, setElapsedMs] = useState(0);
   const [levels, setLevels] = useState<number[]>(() => Array(LEVEL_BAR_COUNT).fill(0.05) as number[]);
@@ -439,7 +444,17 @@ export function Composer({
         submit();
       }}
       className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
-      style={{ paddingBottom: 'max(env(safe-area-inset-bottom), 0.75rem)' }}
+      // docs/IOS_KEYBOARD.md — keyboard closed (or the hook's gate is off,
+      // i.e. not iOS): today's safe-area padding, unchanged. Keyboard open:
+      // swap to the live `--kb-inset` px value and drop the safe-area
+      // inset entirely — the home indicator is hidden behind the keyboard,
+      // so adding both would double-count and leave a gap. Reads the CSS
+      // var (not the `keyboardInset` number) once open so the padding
+      // tracks every animation frame the hook writes, not just the frames
+      // that happen to land a React re-render.
+      style={{
+        paddingBottom: keyboardInset > 0 ? 'var(--kb-inset, 0px)' : 'max(env(safe-area-inset-bottom), 0.75rem)',
+      }}
     >
       <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple hidden onChange={handleFileInputChange} />
 

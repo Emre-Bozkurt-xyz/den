@@ -33,6 +33,7 @@ import {
 } from '../lib/realtime';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useIntroIds } from '../hooks/useIntroIds';
+import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { useMediaTags } from '../hooks/useMediaTags';
 import { useBackHandler } from '../lib/backStack';
 import { Composer } from './Composer';
@@ -357,6 +358,28 @@ export function ChatView({
     const el = scrollerRef.current;
     if (!jumpToMessageId && el) el.scrollTop = el.scrollHeight;
   }, [chat.id, lastMessageId, jumpToMessageId]);
+
+  // docs/IOS_KEYBOARD.md — on iOS, opening the keyboard grows the
+  // composer's own box (see Composer's padding-bottom), which shrinks this
+  // flex-1 scroller and can push the last message out of view underneath
+  // it. Re-run the same "snap to bottom" the effect above already does for
+  // a new message, but only on the keyboard's closed→open *edge*
+  // (`keyboardOpenRef`), not on every intermediate px the hook reports —
+  // otherwise later height changes while it's already open (switching to
+  // the emoji keyboard, the predictive-text bar toggling) would keep
+  // yanking the view back down instead of leaving the user's own scrolling
+  // alone. `keyboardInset` is 0 for the whole session off-iOS (the hook's
+  // gate), so this effect never fires there.
+  const keyboardInset = useKeyboardInset();
+  const keyboardOpenRef = useRef(false);
+  useEffect(() => {
+    const isOpen = keyboardInset > 0;
+    if (isOpen && !keyboardOpenRef.current) {
+      const el = scrollerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+    keyboardOpenRef.current = isOpen;
+  }, [keyboardInset]);
 
   // Short chats: if the first page doesn't even fill the viewport there's no
   // scrollbar, so the scroll handler alone could never trigger a fetch. Runs
