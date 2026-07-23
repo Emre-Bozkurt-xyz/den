@@ -1540,16 +1540,17 @@ function MessageBlockRow({
   // on the side facing screen center (owner feedback, 2026-07-22, twice
   // revised: below-the-bubble added vertical height; then row-level inline
   // centered against bubble+reaction-pills together instead of the bubble
-  // alone). Absolutely positioned *inside the bubble div* (which is
-  // `relative`), hanging out past its edge — centers on the bubble itself,
-  // adds no layout size anywhere, and rides along with swipe-to-reply
-  // translation for free. Only rendered on the `showBubble` branch: edited
+  // alone; then bubble-centered, which the owner revised to bottom-hugging).
+  // Absolutely positioned *inside the bubble div* (which is `relative`),
+  // hanging out past its edge and hugging its bottom (`bottom-0.5` keeps it
+  // just off the rounded corner) — adds no layout size anywhere, and rides
+  // along with swipe-to-reply translation for free. Only rendered on the `showBubble` branch: edited
   // messages always have a non-empty body, so there is always a bubble (a
   // bare-media caption bubble included) — and never a stack.
   const editedLabel = !isStack && m.editedAt && (
     <span
       className={
-        'pointer-events-none absolute top-1/2 -translate-y-1/2 whitespace-nowrap text-[10px] text-text-muted ' +
+        'pointer-events-none absolute bottom-0.5 whitespace-nowrap text-[10px] text-text-muted ' +
         (mine ? 'right-full mr-1.5' : 'left-full ml-1.5')
       }
       title={formatSendTime(m.editedAt)}

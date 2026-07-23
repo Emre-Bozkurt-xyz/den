@@ -96,10 +96,10 @@ New **Edit** row (Pencil icon, `lucide-react`) between Copy and Select, rendered
 
 ### 4.5 Edited indicator
 
-Absolutely positioned **inside the bubble div** (which is `relative`), hanging past its outer edge on the side facing screen center (`right-full` for mine, `left-full` for others), vertically centered on the bubble:
+Absolutely positioned **inside the bubble div** (which is `relative`), hanging past its outer edge on the side facing screen center (`right-full` for mine, `left-full` for others), hugging the bubble's bottom (`bottom-0.5`):
 
 - Render when `m.editedAt && !isStack`: a small muted label, e.g. `text-[10px] text-text-muted`, content "edited", with `title={formatSendTime(m.editedAt)}` for the timestamp on desktop hover. Edited messages always have a non-empty body, so the bubble (incl. a bare-media caption bubble) always exists to host it.
-- **Placement (owner-specified, revised twice 2026-07-22):** originally a row below the bubble (added vertical height); then inline in the block's outer row (centered against bubble+reaction-pills together, not the bubble alone). Final form centers on the bubble itself and adds no layout size anywhere.
+- **Placement (owner-specified, iterated 2026-07-22):** originally a row below the bubble (added vertical height); then inline in the block's outer row (centered against bubble+reaction-pills together, not the bubble alone); then bubble-centered (owner wanted bottom-hugging instead). Final form sits at the bubble's bottom outer corner and adds no layout size anywhere.
 - Design tokens only; no new colors.
 
 ## 5. Verification
