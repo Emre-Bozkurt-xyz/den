@@ -2,6 +2,7 @@ import { Layers, Play, X } from 'lucide-react';
 import type { Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
+import { PreviewImage } from './PreviewImage';
 
 /**
  * Fanned photo/video stack (docs/archive/UI_REVAMP.md UI-7).
@@ -61,7 +62,9 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
           }}
         />
       ))}
-      <img src={thumbOf(top)} alt="" className="relative z-10 max-h-72 max-w-full rounded-md object-cover" />
+      {/* In-flow top card establishes the pile's box — reserve it pre-load so
+          the open-chat scroll-to-bottom isn't measuring a collapsed stack. */}
+      <PreviewImage media={top.media} src={thumbOf(top)} alt="" className="relative z-10 max-h-72 max-w-full rounded-md object-cover" />
       <span className="absolute right-2 top-2 z-20 flex items-center gap-1 rounded-pill bg-black/60 px-2 py-0.5 text-[11px] font-semibold text-white">
         <Layers size={12} />
         {messages.length}

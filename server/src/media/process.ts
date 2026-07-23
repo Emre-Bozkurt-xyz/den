@@ -63,6 +63,14 @@ async function processImage({ chatId, mediaId, originalKey }: ProcessArgs): Prom
   // is called, so EXIF (incl. GPS) is stripped by construction (CLAUDE.md #6).
   const base = sharp(orig, { failOn: 'none' }).rotate();
   const meta = await base.metadata();
+  // metadata() reports the *stored* (pre-rotation) dimensions. EXIF
+  // orientations 5–8 are the 90° rotations (portrait phone shots), so after
+  // .rotate() normalizes them the displayed image has width/height swapped
+  // relative to the metadata — record the displayed orientation, which is
+  // what the client's layout reservation needs.
+  const sideways = (meta.orientation ?? 1) >= 5;
+  const width = (sideways ? meta.height : meta.width) ?? null;
+  const height = (sideways ? meta.width : meta.height) ?? null;
 
   const displayBuffer = await base.clone().webp({ quality: 90 }).toBuffer();
   const thumbBuffer = await sharp(orig, { failOn: 'none' })
@@ -81,8 +89,8 @@ async function processImage({ chatId, mediaId, originalKey }: ProcessArgs): Prom
     r2Key: displayKey,
     mime: 'image/webp',
     sizeBytes: displayBuffer.length,
-    width: meta.width ?? null,
-    height: meta.height ?? null,
+    width,
+    height,
     durationMs: null,
     thumbKey,
   };

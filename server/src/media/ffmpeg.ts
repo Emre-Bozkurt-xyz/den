@@ -30,7 +30,7 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
     const args = [
       '-v', 'error',
       '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height',
+      '-show_entries', 'stream=width,height:stream_side_data=rotation',
       '-show_entries', 'format=duration',
       '-of', 'json',
       path,
@@ -45,14 +45,19 @@ export async function probeMedia(path: string): Promise<ProbeResult> {
   });
 
   const parsed = JSON.parse(stdout) as {
-    streams?: { width?: number; height?: number }[];
+    streams?: { width?: number; height?: number; side_data_list?: { rotation?: number }[] }[];
     format?: { duration?: string };
   };
   const stream = parsed.streams?.[0];
   const durationSec = parsed.format?.duration ? Number(parsed.format.duration) : null;
+  // Coded width/height ignore the display-matrix rotation phones record for
+  // portrait video; playback (and our ffmpeg poster extraction) auto-rotates,
+  // so report the *displayed* orientation — swap on 90°/270°.
+  const rotation = stream?.side_data_list?.find((d) => typeof d.rotation === 'number')?.rotation ?? 0;
+  const sideways = Math.abs(rotation) % 180 === 90;
   return {
     durationMs: durationSec !== null && Number.isFinite(durationSec) ? Math.round(durationSec * 1000) : null,
-    width: stream?.width ?? null,
-    height: stream?.height ?? null,
+    width: (sideways ? stream?.height : stream?.width) ?? null,
+    height: (sideways ? stream?.width : stream?.height) ?? null,
   };
 }
