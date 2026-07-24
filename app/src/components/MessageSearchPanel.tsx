@@ -1,6 +1,6 @@
 import { useRef } from 'react';
-import { ArrowLeft, Image as ImageIcon, Mic, Video, X } from 'lucide-react';
-import type { Message, MessageKind, PublicUser } from '@den/shared';
+import { ArrowLeft, Image as ImageIcon, Link as LinkIcon, Mic, Video, X } from 'lucide-react';
+import type { EmbedProvider, Message, MessageKind, PublicUser } from '@den/shared';
 import {
   flattenSearchResults,
   hasSearchCriteria,
@@ -15,6 +15,13 @@ const MEDIA_KIND_LABEL: Record<Extract<MessageKind, 'image' | 'video' | 'voice'>
   image: 'Photo',
   video: 'Video',
   voice: 'Voice message',
+};
+
+// docs/EMBEDS.md — same "kind label when there's no body" rule as media
+// above, keyed by provider since 'embed' isn't itself descriptive enough.
+const EMBED_KIND_LABEL: Record<EmbedProvider, string> = {
+  instagram: 'Instagram reel',
+  vault: 'Vault doc',
 };
 
 /** How far into a body a match has to sit before the snippet stops showing
@@ -60,6 +67,7 @@ function KindGlyph({ kind }: { kind: MessageKind }) {
   if (kind === 'image') return <ImageIcon size={13} className="shrink-0 text-text-muted" />;
   if (kind === 'video') return <Video size={13} className="shrink-0 text-text-muted" />;
   if (kind === 'voice') return <Mic size={13} className="shrink-0 text-text-muted" />;
+  if (kind === 'embed') return <LinkIcon size={13} className="shrink-0 text-text-muted" />;
   return null;
 }
 
@@ -75,8 +83,14 @@ function SearchResultRow({
   onJump: (id: string) => void;
 }) {
   const sender = members.find((m) => m.id === message.senderId);
-  const isMedia = message.kind !== 'text' && message.kind !== 'system';
-  const rawBody = message.body ?? (isMedia ? MEDIA_KIND_LABEL[message.kind as 'image' | 'video' | 'voice'] : '');
+  const isMedia = message.kind !== 'text' && message.kind !== 'embed' && message.kind !== 'system';
+  const rawBody =
+    message.body ??
+    (isMedia
+      ? MEDIA_KIND_LABEL[message.kind as 'image' | 'video' | 'voice']
+      : message.kind === 'embed' && message.embed
+        ? EMBED_KIND_LABEL[message.embed.provider]
+        : '');
   // Filter-only searches (no q) render the plain body — no highlight, no
   // windowing (§4.4).
   const { text, leadingEllipsis } = windowSnippet(rawBody, query);

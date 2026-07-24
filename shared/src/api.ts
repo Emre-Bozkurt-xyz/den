@@ -7,6 +7,8 @@
  * here as they are built — do not scatter them into /app or /server.
  */
 
+import type { EmbedActionType, EmbedProvider, EmbedStatus } from './embeds.js';
+
 /** Fastify error handler returns exactly this shape. Client maps `code`,
  *  never string-matches `message` (BACKBONE Conventions). */
 export interface ApiError {
@@ -121,7 +123,7 @@ export interface SendFriendRequestBody {
 
 // ─── chats & messages (Stage 2, BACKBONE §5/§6) ─────────────────────────────
 
-export type MessageKind = 'text' | 'image' | 'video' | 'voice' | 'system';
+export type MessageKind = 'text' | 'image' | 'video' | 'voice' | 'embed' | 'system';
 
 /** Lightweight preview of the message a reply points at (post-MVP). Carried
  *  inline on `Message.replyTo` so the client can render a reply strip without
@@ -150,6 +152,10 @@ export interface Message {
   createdAt: string; // ISO 8601
   /** Present iff kind is 'image'|'video'|'voice' (Stage 3). */
   media: MediaInfo | null;
+  /** docs/EMBEDS.md §4.2 — present iff kind is 'embed'. Mirrors `media`:
+   *  null until the placeholder is minted, populated (still `processing`)
+   *  immediately after, then replaced wholesale by the `embed.ready` frame. */
+  embed: EmbedInfo | null;
   /** Post-MVP: null when this message isn't a reply. */
   replyTo: ReplyPreview | null;
   /** Post-MVP: aggregated per-emoji counts; [] when the message has none. */
@@ -438,3 +444,23 @@ export const GalleryLimits = {
   pageDefault: 60,
   pageMax: 120,
 } as const;
+
+// ─── embeds (post-MVP, docs/EMBEDS.md §4.2) ─────────────────────────────────
+
+/** Carried inline on `Message.embed` when kind === 'embed' — mirrors
+ *  `MediaInfo`'s shape/reasoning exactly: a provider-agnostic normalized
+ *  snapshot the ONE shared client renderer (`EmbedCard.tsx`) reads, never
+ *  provider internals. `status`/`thumbUrl` follow the same processing→ready
+ *  lifecycle as media (placeholder card → `embed.ready` replaces it). */
+export interface EmbedInfo {
+  id: string;
+  provider: EmbedProvider;
+  status: EmbedStatus;
+  title: string | null;
+  subtitle: string | null;
+  description: string | null;
+  thumbUrl: string | null; // presigned R2 GET, minted at read time (like media); null until ready
+  canonicalUrl: string | null;
+  contentKind: string | null;
+  actionType: EmbedActionType;
+}

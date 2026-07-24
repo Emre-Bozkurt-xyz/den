@@ -7,6 +7,7 @@ import {
   type WsEnvelope,
   type ChatReceipt,
   type Message,
+  type EmbedReadyPayload,
   type MediaReadyPayload,
   type MessageDeletedPayload,
   type MessageDeliveredPayload,
@@ -176,6 +177,7 @@ function buildOptimisticMessage(id: string, args: PendingSendArgs, senderId: str
     body: args.body,
     createdAt: new Date().toISOString(),
     media: null,
+    embed: null,
     replyTo: args.replyPreview ?? null,
     reactions: [],
     editedAt: null,
@@ -306,6 +308,17 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
         case WsType.MediaReady: {
           const { message } = frame.payload as MediaReadyPayload;
+          qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
+            withFirstPage(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
+          );
+          void qc.invalidateQueries({ queryKey: ['chats'] });
+          sendDeliveredAck([{ chatId: message.chatId, messageId: message.id }]);
+          break;
+        }
+        case WsType.EmbedReady: {
+          // docs/EMBEDS.md §4.2 — identical handling to MediaReady above: the
+          // resolved card replaces the 'processing' placeholder in place.
+          const { message } = frame.payload as EmbedReadyPayload;
           qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
             withFirstPage(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
           );

@@ -20,6 +20,7 @@ import { forbidden, notFound, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
 import { assertMember } from './membership.js';
 import { mediaInfoForMessages } from '../media/service.js';
+import { embedInfoForMessages } from '../embeds/service.js';
 import { reactionsForMessages } from './reactions.js';
 import { assertReplyTarget, replyPreviewFor, replyPreviewsForMessages } from './replies.js';
 
@@ -45,14 +46,16 @@ async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
     .limit(1);
   const row = rows[0];
   if (!row) return null;
-  // Single-row reads (media + reply preview) are cheap here — a chat-list
-  // preview is one row, not a page, so batching would be overkill. Reactions
-  // stay [] for the preview (chat-list rows don't render reaction chips).
-  const [mediaMap, replyTo] = await Promise.all([
+  // Single-row reads (media/embed + reply preview) are cheap here — a
+  // chat-list preview is one row, not a page, so batching would be overkill.
+  // Reactions stay [] for the preview (chat-list rows don't render reaction
+  // chips).
+  const [mediaMap, embedMap, replyTo] = await Promise.all([
     mediaInfoForMessages([row.id]),
+    embedInfoForMessages([row.id]),
     replyPreviewFor(row.replyToMessageId),
   ]);
-  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, []);
+  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, [], embedMap.get(row.id.toString()) ?? null);
 }
 
 async function unreadCountFor(chatId: bigint, viewerId: bigint, lastReadId: bigint | null): Promise<number> {
@@ -184,8 +187,9 @@ export async function getMessagesPage(
     .limit(limit);
 
   const replyToIds = rows.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
-  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+  const [mediaMap, embedMap, replyMap, reactionsMap] = await Promise.all([
     mediaInfoForMessages(rows.map((r) => r.id)),
+    embedInfoForMessages(rows.map((r) => r.id)),
     replyPreviewsForMessages(replyToIds),
     reactionsForMessages(rows.map((r) => r.id), viewerId),
   ]);
@@ -198,6 +202,7 @@ export async function getMessagesPage(
         mediaMap.get(r.id.toString()) ?? null,
         r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
         reactionsMap.get(r.id.toString()) ?? [],
+        embedMap.get(r.id.toString()) ?? null,
       ),
     ),
     nextCursor,
@@ -264,8 +269,9 @@ export async function searchMessages(
   const page = hasMore ? rows.slice(0, limit) : rows;
 
   const replyToIds = page.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
-  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+  const [mediaMap, embedMap, replyMap, reactionsMap] = await Promise.all([
     mediaInfoForMessages(page.map((r) => r.id)),
+    embedInfoForMessages(page.map((r) => r.id)),
     replyPreviewsForMessages(replyToIds),
     reactionsForMessages(page.map((r) => r.id), viewerId),
   ]);
@@ -288,6 +294,7 @@ export async function searchMessages(
         mediaMap.get(r.id.toString()) ?? null,
         r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
         reactionsMap.get(r.id.toString()) ?? [],
+        embedMap.get(r.id.toString()) ?? null,
       ),
     ),
     nextCursor: hasMore ? page[page.length - 1]!.id.toString() : null,
@@ -468,8 +475,9 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
 
   const restoredRows = await db.select().from(messages).where(inArray(messages.id, toRestore));
   const replyToIds = restoredRows.map((r) => r.replyToMessageId).filter((id): id is bigint => id !== null);
-  const [mediaMap, replyMap, reactionsMap] = await Promise.all([
+  const [mediaMap, embedMap, replyMap, reactionsMap] = await Promise.all([
     mediaInfoForMessages(toRestore),
+    embedInfoForMessages(toRestore),
     replyPreviewsForMessages(replyToIds),
     reactionsForMessages(toRestore, viewerId),
   ]);
@@ -479,6 +487,7 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
       mediaMap.get(r.id.toString()) ?? null,
       r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
       reactionsMap.get(r.id.toString()) ?? [],
+      embedMap.get(r.id.toString()) ?? null,
     ),
   );
 }
@@ -499,12 +508,19 @@ export interface EditMessageResult {
 }
 
 async function messageDtoFor(row: typeof messages.$inferSelect, viewerId: bigint): Promise<MessageDto> {
-  const [replyTo, mediaMap, reactionsMap] = await Promise.all([
+  const [replyTo, mediaMap, embedMap, reactionsMap] = await Promise.all([
     replyPreviewFor(row.replyToMessageId),
     mediaInfoForMessages([row.id]),
+    embedInfoForMessages([row.id]),
     reactionsForMessages([row.id], viewerId),
   ]);
-  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, reactionsMap.get(row.id.toString()) ?? []);
+  return toMessage(
+    row,
+    mediaMap.get(row.id.toString()) ?? null,
+    replyTo,
+    reactionsMap.get(row.id.toString()) ?? [],
+    embedMap.get(row.id.toString()) ?? null,
+  );
 }
 
 /** Edits the caller's own message body in place (own messages only, body

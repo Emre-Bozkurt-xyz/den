@@ -49,6 +49,8 @@ export const WsType = {
   FriendAccepted: 'friend.accepted',
   // media (Stage 3)
   MediaReady: 'media.ready',
+  // embeds (post-MVP, docs/EMBEDS.md §4.2)
+  EmbedReady: 'embed.ready',
   // tags (Stage 5)
   TagAdded: 'tag.added',
   TagRemoved: 'tag.removed',
@@ -125,6 +127,14 @@ export interface TagRemovedPayload {
  *  finished (or failed) — updates the "processing" placeholder in place. The
  *  message id ties it back to the placeholder already in the client cache. */
 export interface MediaReadyPayload {
+  message: import('./api.js').Message;
+}
+
+/** Server → client (room broadcast), post-MVP: an embed card's provider
+ *  resolution finished (or failed) — updates the "processing" placeholder in
+ *  place. Identical pattern + reasoning to `MediaReadyPayload` (docs/EMBEDS.md
+ *  §4.2/§4.3). */
+export interface EmbedReadyPayload {
   message: import('./api.js').Message;
 }
 

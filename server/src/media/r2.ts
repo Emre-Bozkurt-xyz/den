@@ -50,6 +50,15 @@ export function mediaKey(chatId: bigint, mediaId: bigint, filename: string): str
   return `media/${chatId}/${mediaId}/${filename}`;
 }
 
+/** R2 key scheme for embed snapshots (docs/EMBEDS.md §4.3) — same
+ *  chat-prefixed shape as `mediaKey`, distinct top-level prefix. This module
+ *  is generic bucket plumbing despite its `media/` path (S3 client + presign
+ *  + put/get), so `server/src/embeds/*` importing from here is the
+ *  reuse-not-duplicate call (CLAUDE.md), not a layering violation. */
+export function embedKey(chatId: bigint, embedId: bigint, filename: string): string {
+  return `embeds/${chatId}/${embedId}/${filename}`;
+}
+
 export async function presignPut(key: string, contentType: string): Promise<string> {
   const cmd = new PutObjectCommand({ Bucket: env.r2Bucket, Key: key, ContentType: contentType });
   return getSignedUrl(signingS3, cmd, { expiresIn: MediaLimits.putUrlTtlSeconds });

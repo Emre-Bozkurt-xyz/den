@@ -35,6 +35,23 @@ export default defineConfig({
           { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
           { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
+        // docs/EMBEDS.md §4.4 — Android Web Share Target: the IG share sheet
+        // (or any app sharing a URL/text) can target Den directly. GET-only,
+        // no file payload, so no service-worker route is needed — it's a
+        // plain navigation to `/share-target?...` that App.tsx picks up on
+        // mount. ⚠️ iOS PWAs cannot register as share targets at all (Apple
+        // limitation, not fixable here) — copy-paste into the composer
+        // (already wired via the paste-detect chip) is the load-bearing path
+        // for iPhone users. Flag for the real-device checklist.
+        share_target: {
+          action: '/share-target',
+          method: 'GET',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url',
+          },
+        },
       },
     }),
   ],

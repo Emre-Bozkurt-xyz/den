@@ -16,6 +16,7 @@ const MEDIA_LABEL: Record<MessageKind, string> = {
   image: '📷 Photo',
   video: '🎥 Video',
   voice: '🎤 Voice message',
+  embed: '🔗 Link', // docs/EMBEDS.md — the reply-preview snippet for an embed message with no caption
 };
 
 /** Batch-resolve reply previews for a page of messages, keyed by the

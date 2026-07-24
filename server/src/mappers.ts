@@ -2,6 +2,10 @@
  *  JS numbers (precision) into the API (see @den/shared PublicUser). */
 import type {
   ChatSummary,
+  EmbedActionType,
+  EmbedInfo,
+  EmbedProvider,
+  EmbedStatus,
   MediaInfo,
   MediaKind,
   MediaStatus,
@@ -77,6 +81,7 @@ export function toMessage(
   media: MediaInfo | null = null,
   replyTo: ReplyPreview | null = null,
   reactions: ReactionSummary[] = [],
+  embed: EmbedInfo | null = null,
 ): MessageDto {
   return {
     id: m.id.toString(),
@@ -86,9 +91,42 @@ export function toMessage(
     body: m.body,
     createdAt: m.createdAt.toISOString(),
     media,
+    embed,
     replyTo,
     reactions,
     editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+  };
+}
+
+// ─── embeds (post-MVP, docs/EMBEDS.md §4.2) ─────────────────────────────────
+
+export interface EmbedRow {
+  id: bigint;
+  provider: string;
+  status: string;
+  title: string | null;
+  subtitle: string | null;
+  description: string | null;
+  canonicalUrl: string | null;
+  providerRef: string | null;
+  contentKind: string | null;
+  actionType: string;
+}
+
+/** `thumbUrl` is passed in separately (like `toMediaInfo`'s `urls`) — it's a
+ *  presigned GET minted at read time, never stored on the row itself. */
+export function toEmbedInfo(e: EmbedRow, thumbUrl: string | null): EmbedInfo {
+  return {
+    id: e.id.toString(),
+    provider: e.provider as EmbedProvider,
+    status: e.status as EmbedStatus,
+    title: e.title,
+    subtitle: e.subtitle,
+    description: e.description,
+    thumbUrl,
+    canonicalUrl: e.canonicalUrl,
+    contentKind: e.contentKind,
+    actionType: e.actionType as EmbedActionType,
   };
 }
 

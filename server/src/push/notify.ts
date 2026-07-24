@@ -8,7 +8,7 @@
 import webpush from 'web-push';
 import { eq, inArray } from 'drizzle-orm';
 import type { Server as IOServer } from 'socket.io';
-import type { Message } from '@den/shared';
+import type { EmbedProvider, Message } from '@den/shared';
 import { db } from '../db/index.js';
 import { chatMembers, pushSubscriptions, users } from '../db/schema.js';
 import { env } from '../env.js';
@@ -55,8 +55,16 @@ const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = {
   voice: '🎤 Voice message',
 };
 
+// docs/EMBEDS.md — same "media with no caption still needs a readable
+// preview" rule as MEDIA_LABEL above.
+const EMBED_LABEL: Record<EmbedProvider, string> = {
+  instagram: '🎬 Instagram reel',
+  vault: '📄 Vault doc',
+};
+
 function previewFor(message: Message): string {
   if (message.media) return message.body?.trim() || MEDIA_LABEL[message.media.kind];
+  if (message.embed) return message.body?.trim() || EMBED_LABEL[message.embed.provider];
   return message.body?.slice(0, 120) ?? '';
 }
 

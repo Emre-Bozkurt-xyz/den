@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ChatSummary, GalleryAlbum, MeResponse } from '@den/shared';
 import { Images, MessageCircle, User } from 'lucide-react';
 import { useMe } from './hooks/useMe';
@@ -118,6 +118,25 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // Same pattern, same reason, for the search panel's per-chat state
   // (query text, filters, open/closed) — docs/MESSAGE_SEARCH.md §4.1.
   const searchStateCacheRef = useRef(new Map<string, SearchFormState>());
+  // docs/EMBEDS.md §4.4 — Android Web Share Target lands here as a plain GET
+  // navigation to `/share-target?url=&text=&title=` (vite.config.ts's
+  // `share_target` manifest entry). Consumed once, on mount: extract the
+  // shared text, wipe the URL back to `/` (so a refresh doesn't re-trigger
+  // it), and hold it until the user picks a chat — the existing `ChatList`
+  // IS the chat-picker the plan doc mentions, no new screen needed. iOS PWAs
+  // can't be share targets at all (Apple limitation) — this path is
+  // Android-only; copy-paste into the composer's paste-detect chip is the
+  // iPhone fallback. ⚠️ Real-device: unverified on Android (share-sheet →
+  // Den entry, and the manifest's GET share_target shape) — flag for the
+  // checklist.
+  const [pendingShare, setPendingShare] = useState<string | null>(null);
+  useEffect(() => {
+    if (window.location.pathname !== '/share-target') return;
+    const params = new URLSearchParams(window.location.search);
+    const shared = params.get('url') || params.get('text') || '';
+    window.history.replaceState(null, '', '/');
+    if (shared) setPendingShare(shared);
+  }, []);
   const qc = useQueryClient();
 
   // Make the device back gesture / browser back button pop one level up the
@@ -130,6 +149,16 @@ function AuthedApp({ me }: { me: MeResponse }) {
   });
 
   function openChat(chat: ChatSummary, jumpToMessageId?: string) {
+    // docs/EMBEDS.md §4.4 — a pending share target lands as the prefilled
+    // draft in whichever chat the user picks; the send itself still goes
+    // through the normal composer submit (no auto-send — this is deliberate
+    // "picking is sending" for MEDIA, but a shared link gets a chance to add
+    // a caption first, same as pasting one).
+    if (pendingShare) {
+      const existing = draftCacheRef.current.get(chat.id) ?? '';
+      draftCacheRef.current.set(chat.id, existing ? `${existing} ${pendingShare}` : pendingShare);
+      setPendingShare(null);
+    }
     const next: ChatView_ = { name: 'chat', chat, jumpToMessageId };
     setView(next);
     setLastChatView(next);
@@ -209,12 +238,17 @@ function AuthedApp({ me }: { me: MeResponse }) {
             ) : view.name === 'gallery' ? (
               <GalleryScreen me={me} onOpenAlbum={(album) => setView({ name: 'chatGallery', album })} />
             ) : (
-              <ChatList
-                me={me}
-                onOpenChat={(chat) => openChat(chat)}
-                onFriends={() => setView({ name: 'friends' })}
-                onNewGroup={() => setView({ name: 'newGroup' })}
-              />
+              <div className="flex h-full flex-col">
+                {pendingShare && <ShareTargetBanner />}
+                <div className="min-h-0 flex-1">
+                  <ChatList
+                    me={me}
+                    onOpenChat={(chat) => openChat(chat)}
+                    onFriends={() => setView({ name: 'friends' })}
+                    onNewGroup={() => setView({ name: 'newGroup' })}
+                  />
+                </div>
+              </div>
             )}
           </div>
           <BottomNav view={view} setView={setView} />
@@ -251,13 +285,16 @@ function AuthedApp({ me }: { me: MeResponse }) {
       <div className="h-full min-w-0 flex-1">
         {isChatsFamily ? (
           <div className="flex h-full">
-            <div className="h-full w-[360px] shrink-0 border-r border-border">
-              <ChatList
-                me={me}
-                onOpenChat={(chat) => openChat(chat)}
-                onFriends={() => setView({ name: 'friends' })}
-                onNewGroup={() => setView({ name: 'newGroup' })}
-              />
+            <div className="flex h-full w-[360px] shrink-0 flex-col border-r border-border">
+              {pendingShare && <ShareTargetBanner />}
+              <div className="min-h-0 flex-1">
+                <ChatList
+                  me={me}
+                  onOpenChat={(chat) => openChat(chat)}
+                  onFriends={() => setView({ name: 'friends' })}
+                  onNewGroup={() => setView({ name: 'newGroup' })}
+                />
+              </div>
             </div>
             <div className="h-full min-w-0 flex-1">
               {rightPaneChat ? (
@@ -396,6 +433,18 @@ function RailButton({
     >
       <Icon size={22} />
     </button>
+  );
+}
+
+/** docs/EMBEDS.md §4.4 — sits above `ChatList` while a Web Share Target hand-
+ *  off is pending a chat pick. `ChatList` itself is the picker; this is just
+ *  the "why is a chat list open right now" hint. Plainly styled, matching
+ *  the deliberate UI-polish-deferred posture elsewhere in Den. */
+function ShareTargetBanner() {
+  return (
+    <p className="shrink-0 border-b border-border bg-accent/10 px-4 py-2 text-xs text-accent">
+      Pick a chat to share this link
+    </p>
   );
 }
 

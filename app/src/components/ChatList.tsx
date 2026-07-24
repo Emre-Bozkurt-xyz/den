@@ -1,6 +1,6 @@
-import { Camera, Mic, Video } from 'lucide-react';
+import { Camera, Link as LinkIcon, Mic, Video } from 'lucide-react';
 import type { ReactNode } from 'react';
-import type { ChatSummary, MeResponse, Message } from '@den/shared';
+import type { ChatSummary, EmbedProvider, MeResponse, Message } from '@den/shared';
 import { useChats } from '../hooks/useChats';
 import { chatDisplayName } from '../lib/chats';
 import { ScreenHeader } from './ScreenHeader';
@@ -93,6 +93,10 @@ export function ChatList({
 const MEDIA_ICON: Record<'image' | 'video' | 'voice', typeof Camera> = { image: Camera, video: Video, voice: Mic };
 const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = { image: 'Photo', video: 'Video', voice: 'Voice message' };
 
+// docs/EMBEDS.md — same "media with no caption still needs a readable
+// preview" rule as MEDIA_LABEL above.
+const EMBED_LABEL: Record<EmbedProvider, string> = { instagram: 'Instagram reel', vault: 'Vault doc' };
+
 function previewFor(message: Message, meId: string): ReactNode {
   const prefix = message.senderId === meId ? 'You: ' : '';
   const body = message.body?.trim();
@@ -104,6 +108,15 @@ function previewFor(message: Message, meId: string): ReactNode {
         {prefix}
         <Icon size={13} className="shrink-0" />
         {MEDIA_LABEL[message.media.kind]}
+      </span>
+    );
+  }
+  if (message.embed) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        {prefix}
+        <LinkIcon size={13} className="shrink-0" />
+        {EMBED_LABEL[message.embed.provider]}
       </span>
     );
   }

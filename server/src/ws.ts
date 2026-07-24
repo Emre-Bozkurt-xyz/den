@@ -28,9 +28,12 @@ import {
   WsType,
   makeEnvelope,
   isReservedWsType,
+  detectEmbedUrl,
+  stripEmbedUrl,
   type WsEnvelope,
   type DeliveredAckPayload,
   type MessageSendPayload,
+  type Message as MessageDto,
 } from '@den/shared';
 import { env } from './env.js';
 import { db } from './db/index.js';
@@ -38,6 +41,7 @@ import { chatMembers, sessions } from './db/schema.js';
 import { SESSION_COOKIE } from './auth/session.js';
 import { assertMember, isMember } from './chat/membership.js';
 import { markDelivered, sendTextMessage } from './chat/service.js';
+import { createEmbedMessage, finalizeEmbed } from './embeds/service.js';
 import { notifyChatMembers } from './push/notify.js';
 import { AppError } from './errors.js';
 import { chatRoom, userRoom } from './realtime/rooms.js';
@@ -158,10 +162,42 @@ async function handleMessageSend(
       }
     }
 
-    const message = await sendTextMessage(chatId, userId, frame.payload?.body ?? '', replyToId);
+    // docs/EMBEDS.md §4.3: server-side sniff of the raw body for a recognized
+    // embeddable URL (shared/src/embeds.ts, same detector the composer's
+    // paste-detect chip uses) — a match mints an embed message instead of a
+    // plain text one. Any words left after stripping the URL become the
+    // caption (its own bubble under the bare card, like a media caption).
+    const rawBody = frame.payload?.body ?? '';
+    const detected = detectEmbedUrl(rawBody);
 
+    let message: MessageDto;
+    let embedId: bigint | null = null;
+    if (detected) {
+      const caption = stripEmbedUrl(rawBody, detected);
+      const created = await createEmbedMessage(chatId, userId, detected.provider, detected.url, detected.providerRef, caption, replyToId);
+      message = created.message;
+      embedId = created.embedId;
+    } else {
+      message = await sendTextMessage(chatId, userId, rawBody, replyToId);
+    }
+
+    // Placeholder fanout now (mirrors media/routes.ts's upload-complete
+    // step) — receivers see a "processing" card immediately, not silence.
     io.to(chatRoom(chatId)).emit('ws', makeEnvelope(WsType.MessageNew, { message }, frame.reqId));
     void notifyChatMembers(io, chatId, message);
+
+    // Resolve in the background; don't make the sender's send wait on an
+    // outbound fetch to a third-party host. embed.ready follows.
+    if (embedId !== null) {
+      const resolvingEmbedId = embedId;
+      void finalizeEmbed(resolvingEmbedId)
+        .then((updated) => {
+          io.to(chatRoom(chatId)).emit('ws', makeEnvelope(WsType.EmbedReady, { message: updated }));
+        })
+        .catch((err) =>
+          console.error(`embed finalize failed for embed ${resolvingEmbedId}:`, err instanceof Error ? err.message : err),
+        );
+    }
   } catch (e) {
     const code = e instanceof AppError ? e.code : 'internal';
     const message = e instanceof Error ? e.message : 'failed to send message';

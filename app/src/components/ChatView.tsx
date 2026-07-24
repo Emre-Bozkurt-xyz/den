@@ -37,6 +37,7 @@ import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { useMediaTags } from '../hooks/useMediaTags';
 import { useBackHandler } from '../lib/backStack';
 import { Composer } from './Composer';
+import { EmbedCard } from './EmbedCard';
 import { MediaBubble } from './MediaBubble';
 import { MediaGridSheet, MediaStack } from './MediaStack';
 import { MediaViewer } from './MediaViewer';
@@ -942,6 +943,22 @@ export function ChatView({
     }
   }
 
+  /** docs/EMBEDS.md §4.4 — tap-action for a bare embed card. Only
+   *  'external' exists in Phase 1/2 (the only registered resolver,
+   *  Instagram, always sets it); 'read'/'portal' are Phase 3/4 and
+   *  intentionally no-op here until those surfaces exist. Same
+   *  `handleTap`/double-tap-to-react wrapping as `openViewer`. */
+  function openEmbed(m: Message) {
+    if (mediaTapSuppressed()) return;
+    const embed = m.embed;
+    if (!embed) return;
+    handleTap(m, () => {
+      if (embed.actionType === 'external' && embed.canonicalUrl) {
+        window.open(embed.canonicalUrl, '_blank', 'noopener,noreferrer');
+      }
+    });
+  }
+
   function openStack(msgs: Message[]) {
     if (mediaTapSuppressed()) return;
     const lead = msgs[0];
@@ -1130,6 +1147,7 @@ export function ChatView({
                 }}
                 onOpenActions={openActionMenu}
                 onOpenViewer={openViewer}
+                onOpenEmbed={openEmbed}
                 onOpenStack={openStack}
                 onReply={startReply}
                 onToggleReaction={toggleReaction}
@@ -1389,6 +1407,7 @@ function RunGroup({
   registerRef,
   onOpenActions,
   onOpenViewer,
+  onOpenEmbed,
   onOpenStack,
   onReply,
   onToggleReaction,
@@ -1414,6 +1433,9 @@ function RunGroup({
   registerRef: (id: string, el: HTMLDivElement | null) => void;
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
+  /** docs/EMBEDS.md §4.4 — the embed analogue of `onOpenViewer`, wired the
+   *  same way (`ChatView.openEmbed`). */
+  onOpenEmbed: (m: Message) => void;
   onOpenStack: (msgs: Message[]) => void;
   /** Post-MVP: sets `ChatView`'s `replyingTo` — wired into the desktop hover
    *  bar's Reply button here. */
@@ -1475,6 +1497,7 @@ function RunGroup({
             registerRef={registerRef}
             onOpenActions={onOpenActions}
             onOpenViewer={onOpenViewer}
+            onOpenEmbed={onOpenEmbed}
             onOpenStack={onOpenStack}
             onReply={onReply}
             onToggleReaction={onToggleReaction}
@@ -1539,6 +1562,7 @@ function MessageBlockRow({
   registerRef,
   onOpenActions,
   onOpenViewer,
+  onOpenEmbed,
   onOpenStack,
   onReply,
   onToggleReaction,
@@ -1572,6 +1596,7 @@ function MessageBlockRow({
   registerRef: (id: string, el: HTMLDivElement | null) => void;
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
+  onOpenEmbed: (m: Message) => void;
   onOpenStack: (msgs: Message[]) => void;
   onReply: (m: Message) => void;
   onToggleReaction: (m: Message, emoji: string) => void;
@@ -1608,9 +1633,11 @@ function MessageBlockRow({
   const selected = msgs.some((mm) => selectedIds.has(mm.id));
   const highlighted = msgs.some((mm) => mm.id === highlightId);
 
-  // Photos/videos (including their processing/failed placeholders, which are
-  // already self-contained cards) render without a bubble behind them.
-  const bare = !isStack && m.media !== null && m.media.kind !== 'voice';
+  // Photos/videos and embed cards (including their processing/failed
+  // placeholders, which are already self-contained cards) render without a
+  // bubble behind them — docs/EMBEDS.md §4.4 "bare embed renders bubble-less
+  // like media".
+  const bare = !isStack && ((m.media !== null && m.media.kind !== 'voice') || m.embed !== null);
   const showBubble = !isStack && (!bare || !!m.body);
   const isVoice = m.media?.kind === 'voice';
   // A stack has no single addressable message to quote (see the same
@@ -1722,7 +1749,12 @@ function MessageBlockRow({
             small standalone card — there's no bubble to render it inside. */}
         {quote && bare && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone onJump={onJumpToMessage} />}
         {isStack && <MediaStack messages={msgs} onOpen={() => onOpenStack(msgs)} />}
-        {bare && <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />}
+        {bare &&
+          (m.embed ? (
+            <EmbedCard message={m} onOpen={() => onOpenEmbed(m)} interactive={!selectionMode} />
+          ) : (
+            <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
+          ))}
         {showBubble && (
           <div
             className={

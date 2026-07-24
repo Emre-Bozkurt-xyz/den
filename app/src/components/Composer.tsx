@@ -1,7 +1,17 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Mic, Paperclip, Send, Square, X } from 'lucide-react';
+import { detectEmbedUrl, type EmbedProvider } from '@den/shared';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { RecordingBar, type RecState } from './RecordingBar';
+
+// docs/EMBEDS.md §4.4 — the composer's paste/type-detect chip: "picking is
+// sending" precedent, so this is purely informational (send behaves exactly
+// the same either way; the server does its own detection independently,
+// shared/src/embeds.ts) — never a pre-send preview/confirm step.
+const EMBED_CHIP_LABEL: Record<EmbedProvider, string> = {
+  instagram: '🎬 Instagram reel — sends as a card',
+  vault: '📄 Vault doc — sends as a card',
+};
 
 /**
  * UI-8e (docs/archive/UI8_CHAT_INSTAGRAM.md) — the chat composer, extracted out of
@@ -437,13 +447,21 @@ export function Composer({
   // mic button itself (see the trailing-slot JSX below).
   const showExplicitStopCancel = recState === 'locked' || (!isMobile && recState !== 'idle');
 
+  // docs/EMBEDS.md §4.4 — recomputed on every draft keystroke/paste; cheap
+  // (a couple of regex passes over one message-length string), and this is
+  // exactly the "type or paste" detection surface the plan calls for.
+  const detectedEmbed = useMemo(() => (recState === 'idle' && !editing ? detectEmbedUrl(draft) : null), [draft, recState, editing]);
+
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
         submit();
       }}
-      className="flex items-end gap-2 border-t border-border bg-surface-raised p-3"
+      // Phase-1 embeds turned this form into a vertical stack (the detected-
+      // embed chip sits above the input row `div` below); the row's own
+      // `flex items-end gap-2` moved onto that inner div.
+      className="flex flex-col gap-1.5 border-t border-border bg-surface-raised p-3"
       // docs/IOS_KEYBOARD.md — keyboard closed (or the hook's gate is off,
       // i.e. not iOS): today's safe-area padding, unchanged. Keyboard open:
       // swap to the live `--kb-inset` px value and drop the safe-area
@@ -457,6 +475,12 @@ export function Composer({
       }}
     >
       <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple hidden onChange={handleFileInputChange} />
+
+      {detectedEmbed && (
+        <p className="px-1 text-xs text-text-secondary">{EMBED_CHIP_LABEL[detectedEmbed.provider]}</p>
+      )}
+
+      <div className="flex items-end gap-2">
 
       {/* Leading slot: attach button while idle, an explicit Cancel button
           once recording has a Stop/Cancel pair (see showExplicitStopCancel).
@@ -586,6 +610,7 @@ export function Composer({
           <Mic size={18} />
         </button>
       )}
+      </div>
     </form>
   );
 }

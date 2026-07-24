@@ -34,6 +34,10 @@
  *   last_read_message_id) — advanced by a client delivery ack; both watermarks
  *   are guarded-monotonic writes (never move backwards).
  *
+ * Migration 010 (post-MVP, docs/EMBEDS.md §4): embed framework + Instagram.
+ *   embeds — belongs to a message exactly as media does; messages_kind_check
+ *   gains 'embed'.
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -237,7 +241,8 @@ export const messages = pgTable(
   (t) => [
     check(
       'messages_kind_check',
-      sql`${t.kind} IN ('text','image','video','voice','system')`,
+      // 'embed' added migration 010 (docs/EMBEDS.md §4.1).
+      sql`${t.kind} IN ('text','image','video','voice','embed','system')`,
     ),
     index('idx_messages_chat').on(t.chatId, t.id.desc()),
     // Substring search over body (text + captions), not word/stemmer-based
@@ -278,6 +283,38 @@ export const media = pgTable(
     check('media_kind_check', sql`${t.kind} IN ('image','video','voice')`),
     check('media_status_check', sql`${t.status} IN ('processing','ready','failed')`),
     index('idx_media_message').on(t.messageId),
+  ],
+);
+
+// ─── embeds (post-MVP, docs/EMBEDS.md §4.1) ──────────────────────────────
+
+export const embeds = pgTable(
+  'embeds',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    messageId: bigint('message_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => messages.id),
+    provider: text('provider').notNull(), // 'instagram' | 'vault'
+    status: text('status').notNull().default('processing'), // 'processing' | 'ready' | 'failed'
+    // Normalized card snapshot (provider-agnostic — the shared client
+    // renderer, EmbedCard.tsx, reads only these, never provider internals).
+    title: text('title'),
+    subtitle: text('subtitle'), // author handle / doc owner
+    description: text('description'), // caption / summary
+    thumbKey: text('thumb_key'), // R2 key of the snapshot image (nullable)
+    canonicalUrl: text('canonical_url'), // external URL (deep-link target)
+    providerRef: text('provider_ref'), // IG shortcode | vault documentId
+    contentKind: text('content_kind'), // 'video' | 'image' | 'document'
+    actionType: text('action_type').notNull().default('external'), // 'external' | 'read' | 'portal'
+    data: jsonb('data').$type<Record<string, unknown>>(), // provider extras (og:video url, etc.)
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('embeds_provider_check', sql`${t.provider} IN ('instagram','vault')`),
+    check('embeds_status_check', sql`${t.status} IN ('processing','ready','failed')`),
+    check('embeds_action_type_check', sql`${t.actionType} IN ('external','read','portal')`),
+    index('idx_embeds_message').on(t.messageId),
   ],
 );
 
