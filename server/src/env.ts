@@ -73,10 +73,17 @@ export const env = Object.freeze({
   // behind Caddy, so this is just `${publicOrigin}/api/integrations/vault/callback`).
   vaultRedirectUri: optional('VAULT_REDIRECT_URI') || undefined,
   // Encrypts vault_links' stored tokens (server/src/integrations/crypto.ts).
-  // Hashed into a 32-byte AES-256-GCM key regardless of input length, same
-  // "dev gets a throwaway default, prod must set its own" posture as sessionSecret.
+  // Hashed into a 32-byte AES-256-GCM key regardless of input length.
+  //
+  // Deliberately NOT `required()` in prod, even though it is a real secret:
+  // it used to be, and a missing value took the ENTIRE app down in a crash
+  // loop (required() throws during module evaluation) over an optional
+  // integration. Now an unset key disables Vault linking and nothing else —
+  // see `vaultLinkingEnabled` below. There is intentionally NO prod fallback
+  // default: silently encrypting real OAuth tokens under a publicly-known
+  // key would be worse than the feature being off.
   vaultTokenEncKey: isProd
-    ? required('VAULT_TOKEN_ENC_KEY')
+    ? optional('VAULT_TOKEN_ENC_KEY') || undefined
     : optional('VAULT_TOKEN_ENC_KEY', 'dev-insecure-vault-token-key-change-me'),
   // Vault SERVICE token (docs/EMBEDS.md §7.1 item 2) — the second, higher tier
   // of trust: the OAuth client above acts *as a user*, but only this token can
@@ -88,3 +95,12 @@ export const env = Object.freeze({
 });
 
 export type Env = typeof env;
+
+/**
+ * Can users link a Vault account at all? False when `VAULT_TOKEN_ENC_KEY` is
+ * unset in prod — without it there is nowhere safe to store OAuth tokens, so
+ * every `/integrations/vault/*` route refuses (503) and the Stage reports the
+ * viewer as unlinked. The rest of Den is unaffected: an optional integration
+ * must never be able to stop the app from booting.
+ */
+export const vaultLinkingEnabled = Boolean(env.vaultTokenEncKey);

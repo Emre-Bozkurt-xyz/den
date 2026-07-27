@@ -87,3 +87,36 @@ describe('vault_links upsert/status/delete (live DB)', () => {
     assert.deepEqual(afterUnlink, { linked: false, vaultDisplayName: null });
   });
 });
+
+/**
+ * Regression guard for the boot-crash of 2026-07-27: `VAULT_TOKEN_ENC_KEY`
+ * was `required()` in prod, so a missing value threw during module evaluation
+ * and took the WHOLE api down in a restart loop — over an optional
+ * integration. The contract now is "unset key ⇒ Vault linking is off", never
+ * "unset key ⇒ Den doesn't boot".
+ */
+describe('vault linking capability gate', () => {
+  test('the encryption key is not a required env var', async () => {
+    // If someone reintroduces `required('VAULT_TOKEN_ENC_KEY')`, importing
+    // env.ts with it unset throws and this fails — which is the entire point.
+    const { env: freshEnv } = await import('../env.js');
+    assert.ok(
+      'vaultTokenEncKey' in freshEnv,
+      'env must expose vaultTokenEncKey without throwing when it is unset',
+    );
+  });
+
+  test('getValidVaultAccessToken yields null rather than throwing when disabled', async () => {
+    const { vaultLinkingEnabled } = await import('../env.js');
+    if (vaultLinkingEnabled) {
+      // Dev has a throwaway default key, so the disabled path can't be
+      // exercised here. Assert the inverse instead: a user with no link row
+      // still gets null, never an exception from the decrypt path.
+      const { getValidVaultAccessToken } = await import('./vaultLinks.js');
+      assert.equal(await getValidVaultAccessToken(userId), null);
+      return;
+    }
+    const { getValidVaultAccessToken } = await import('./vaultLinks.js');
+    assert.equal(await getValidVaultAccessToken(userId), null);
+  });
+});

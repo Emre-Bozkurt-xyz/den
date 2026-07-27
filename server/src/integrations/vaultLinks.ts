@@ -7,6 +7,7 @@
 import { eq } from 'drizzle-orm';
 import type { VaultStatusResponse } from '@den/shared';
 import { db } from '../db/index.js';
+import { vaultLinkingEnabled } from '../env.js';
 import { vaultLinks } from '../db/schema.js';
 import { decryptSecret, encryptSecret } from './crypto.js';
 import { refreshVaultToken, type VaultTokenResponse } from './vaultClient.js';
@@ -87,6 +88,13 @@ export async function vaultStatus(userId: bigint): Promise<VaultStatusResponse> 
  *  yet in Phase 1/2 (no embed provider reads Vault docs until Phase 3) — it
  *  exists now so Phase 3/4 don't have to re-derive this refresh dance. */
 export async function getValidVaultAccessToken(userId: bigint): Promise<string | null> {
+  // No encryption key configured ⇒ nothing stored can be decrypted. Return
+  // null (the same "no usable link" signal every caller already handles)
+  // rather than letting decryptSecret throw — this is the single chokepoint
+  // that keeps an unconfigured key from surfacing as a 500 anywhere that
+  // reads a Vault token, including every Stage route.
+  if (!vaultLinkingEnabled) return null;
+
   const row = await vaultLinkRow(userId);
   if (!row) return null;
 

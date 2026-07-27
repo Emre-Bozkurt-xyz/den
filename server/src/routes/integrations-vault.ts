@@ -24,8 +24,8 @@
 import type { FastifyInstance } from 'fastify';
 import type { VaultStatusResponse } from '@den/shared';
 import { requireAuth } from '../auth/session.js';
-import { env } from '../env.js';
-import { validation } from '../errors.js';
+import { env, vaultLinkingEnabled } from '../env.js';
+import { unavailable, validation } from '../errors.js';
 import { codeChallengeS256, generateCodeVerifier, generateState } from '../integrations/pkce.js';
 import { exchangeCodeForToken, buildAuthorizeUrl, fetchVaultUserinfo } from '../integrations/vaultClient.js';
 import { deleteVaultLink, upsertVaultLink, vaultStatus } from '../integrations/vaultLinks.js';
@@ -53,7 +53,19 @@ function profileRedirectTarget(): string {
 }
 
 export async function integrationsVaultRoutes(app: FastifyInstance): Promise<void> {
+  /** Refuse the linking flows when there's no token-encryption key to store
+   *  credentials under (env.ts `vaultLinkingEnabled`). 503, not 403: nothing
+   *  is broken and the caller did nothing wrong — the feature is simply not
+   *  configured. `/status` deliberately stays reachable so the UI can say so
+   *  instead of showing a dead button. */
+  function assertLinkingEnabled(): void {
+    if (!vaultLinkingEnabled) {
+      throw unavailable('Vault linking is not configured on this server');
+    }
+  }
+
   app.get('/integrations/vault/connect', { preHandler: requireAuth }, async (_req, reply) => {
+    assertLinkingEnabled();
     const verifier = generateCodeVerifier();
     const state = generateState();
     const payload: OAuthCookiePayload = { verifier, state };
@@ -78,6 +90,7 @@ export async function integrationsVaultRoutes(app: FastifyInstance): Promise<voi
     '/integrations/vault/callback',
     { preHandler: requireAuth },
     async (req, reply) => {
+      assertLinkingEnabled();
       const cookieRaw = req.cookies[OAUTH_COOKIE];
       reply.clearCookie(OAUTH_COOKIE, { path: OAUTH_COOKIE_PATH });
 
@@ -132,7 +145,19 @@ export async function integrationsVaultRoutes(app: FastifyInstance): Promise<voi
     return { ok: true };
   });
 
+  // Left UNGATED on purpose: neither reads the encryption key (they only
+  // touch the `vault_links` row), and a user must always be able to clear a
+  // stale link — including after the key was removed, which is exactly when
+  // an orphaned row is most likely to exist.
   app.get('/integrations/vault/status', { preHandler: requireAuth }, async (req) => {
+    // Report "not linked" when linking is switched off, even if a row
+    // survives from when it was on: without the key those stored tokens can
+    // never be decrypted, so the link is functionally dead and claiming
+    // otherwise would render a connected-looking UI whose every action fails.
+    if (!vaultLinkingEnabled) {
+      const res: VaultStatusResponse = { linked: false, vaultDisplayName: null };
+      return res;
+    }
     const res: VaultStatusResponse = await vaultStatus(req.user!.id);
     return res;
   });

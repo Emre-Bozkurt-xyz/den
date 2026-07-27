@@ -28,6 +28,12 @@ export const ErrorCode = {
   InvalidInvite: 'invalid_invite',
   UsernameTaken: 'username_taken',
   InvalidCredentials: 'invalid_credentials',
+  /** A feature is switched off by server configuration, not by permissions —
+   *  e.g. Vault linking with no `VAULT_TOKEN_ENC_KEY` set. Distinct from
+   *  `forbidden` (the caller could never fix that by retrying) and from
+   *  `internal` (nothing is broken). Clients should present it as
+   *  "unavailable", not as an error the user caused. */
+  ServiceUnavailable: 'service_unavailable',
   Internal: 'internal',
 } as const;
 

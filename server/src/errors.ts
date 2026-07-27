@@ -28,3 +28,7 @@ export const validation = (msg: string) =>
   new AppError(400, ErrorCode.Validation, msg);
 export const rateLimited = (msg = 'Too many requests') =>
   new AppError(429, ErrorCode.RateLimited, msg);
+/** A feature is disabled by server configuration — nothing is broken and the
+ *  caller did nothing wrong, so this is neither 403 nor 500. */
+export const unavailable = (msg = 'This feature is not configured on this server') =>
+  new AppError(503, ErrorCode.ServiceUnavailable, msg);
