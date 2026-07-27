@@ -367,10 +367,17 @@ function AddCardTile({ onClick }: { onClick: () => void }) {
     <button
       onClick={onClick}
       aria-label="Add to Stage"
-      className="flex flex-col overflow-hidden rounded-xl border-2 border-dashed border-border text-text-muted hover:bg-surface-sunken hover:text-text-secondary"
+      // `h-full` makes the tile match its row's tallest card rather than
+      // shrink-wrapping the icon: a doc card is the 4/3 preview PLUS a text
+      // block, so without this the add-tile sits noticeably short of it.
+      className="flex h-full flex-col overflow-hidden rounded-xl border-2 border-dashed border-border text-text-muted hover:bg-surface-sunken hover:text-text-secondary"
       style={{ touchAction: 'manipulation' }}
     >
-      <div className="grid aspect-[4/3] w-full place-items-center">
+      {/* `grow` (not `flex-1`) on purpose — flex-1 zeroes the basis, which
+          would collapse this box when the Stage is empty and there is no
+          sibling card to stretch against. Growing from the aspect-ratio
+          basis keeps a sensible size in both cases. */}
+      <div className="grid aspect-[4/3] w-full grow place-items-center">
         <Plus size={28} />
       </div>
       <div className="p-2.5 text-center text-xs font-medium">Add a doc</div>
@@ -392,7 +399,7 @@ function AccessHint({ canEdit }: { canEdit: boolean }) {
   );
 }
 
-/** One Stage grid tile: the paper thumbnail + title/owner/snippet/date, an
+/** One Stage grid tile: the paper thumbnail + title/owner/date, an
  *  overflow ("⋮") menu, and long-press as an alternate path to the same menu
  *  (docs/EMBEDS.md §6.2.1 "card overflow/long-press"). Long-press timing
  *  mirrors `ChatGallery`'s tile handlers (same constants). */
@@ -472,7 +479,11 @@ function StageDocCard({
             <AccessHint canEdit={doc.canEdit} />
           </div>
           {doc.ownerName && <p className="truncate text-xs text-text-muted">{doc.ownerName}</p>}
-          {doc.snippet && <p className="line-clamp-2 text-xs text-text-secondary">{doc.snippet}</p>}
+          {/* No snippet here by design: the paper thumbnail above already
+              shows the document's opening content, so repeating it as raw
+              markdown text was redundant and noisy. `snippet` stays on the
+              DTO — the clone picker still uses it, where there is no
+              thumbnail to convey the same thing. */}
           <p className="text-[11px] text-text-muted">
             {doc.updatedAt ? formatDateLabel(doc.updatedAt) : `Added ${formatDateLabel(doc.addedAt)}`}
           </p>
