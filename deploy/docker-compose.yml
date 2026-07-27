@@ -118,6 +118,20 @@ services:
       # locally against the dev MinIO stand-in.
       R2_PUBLIC_ENDPOINT: ${API_R2_PUBLIC_ENDPOINT:-}
       R2_FORCE_PATH_STYLE: ${R2_FORCE_PATH_STYLE:-true}
+      # Vault connector (docs/EMBEDS.md). This block is easy to forget when
+      # adding an env var: `--env-file` only feeds compose's own `${...}`
+      # substitution, it does NOT pass anything into the container, so a var
+      # absent here is absent at runtime no matter what .env says. That
+      # mismatch is exactly how Vault linking shipped reporting "not
+      # configured on this server" with both values correctly set in .env.
+      # Both are optional and degrade (see server/src/env.ts): no enc key ⇒
+      # linking off; no service token ⇒ Stage read-only.
+      VAULT_TOKEN_ENC_KEY: ${VAULT_TOKEN_ENC_KEY:-}
+      VAULT_SERVICE_TOKEN: ${VAULT_SERVICE_TOKEN:-}
+      VAULT_ISSUER: ${VAULT_ISSUER:-https://vault.ems-place.com}
+      VAULT_CLIENT_ID: ${VAULT_CLIENT_ID:-den}
+      VAULT_CLIENT_SECRET: ${VAULT_CLIENT_SECRET:-}
+      VAULT_REDIRECT_URI: ${VAULT_REDIRECT_URI:-}
     # Bound to localhost only (same pattern as postgres above) — lets the
     # Vite dev server's proxy (app/vite.config.ts, default target
     # localhost:3000) reach this container directly for local testing. Not
