@@ -31,6 +31,17 @@ export interface DetectedEmbed {
 // fetch (server/src/embeds/instagram.ts).
 const INSTAGRAM_URL_RE = /^https?:\/\/(?:www\.)?instagram\.com\/(reel|p)\/([A-Za-z0-9_-]+)\/?(?:\?\S*)?$/i;
 
+// Vault doc URLs (docs/EMBEDS.md §6.1, Phase 3): anchored end-to-end exactly
+// like the Instagram regex above — a lookalike host or an extra path segment
+// doesn't match. This is shared (isomorphic) code with no access to the
+// server's `env.vaultIssuer`, so the host is the fixed production host
+// (docs/EMBEDS.md's fallback option: "match vault.ems-place.com + /docs/
+// <uuid>"). Unlike the Instagram path this never becomes a raw fetch of
+// attacker-controlled bytes — the server only ever calls Vault's own API
+// with `providerRef`, so there's no SSRF surface here to harden further.
+const VAULT_DOC_URL_RE =
+  /^https:\/\/vault\.ems-place\.com\/docs\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\/?(?:\?\S*)?$/;
+
 // Coarse pre-filter: any http(s) URL token in free text. Provider-specific
 // regexes above then validate each candidate — this only narrows down which
 // substrings are worth checking.
@@ -56,6 +67,17 @@ export function detectEmbedUrl(text: string): DetectedEmbed | null {
         matchedText: raw,
         url: `https://www.instagram.com/${kind}/${shortcode}/`,
         providerRef: shortcode,
+      };
+    }
+
+    const vaultMatch = VAULT_DOC_URL_RE.exec(trimmed);
+    if (vaultMatch) {
+      const documentId = vaultMatch[1]!;
+      return {
+        provider: 'vault',
+        matchedText: raw,
+        url: `https://vault.ems-place.com/docs/${documentId}`,
+        providerRef: documentId,
       };
     }
   }

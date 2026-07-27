@@ -19,6 +19,7 @@ import { mediaRoutes } from './routes/media.js';
 import { galleryRoutes } from './routes/gallery.js';
 import { voicePocRoutes } from './routes/voice-poc.js';
 import { integrationsVaultRoutes } from './routes/integrations-vault.js';
+import { stageRoutes } from './routes/stage.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -72,6 +73,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(galleryRoutes, { prefix: '/api' });
   await app.register(voicePocRoutes, { prefix: '/api' });
   await app.register(integrationsVaultRoutes, { prefix: '/api' });
+  await app.register(stageRoutes, { prefix: '/api' });
 
   return app;
 }

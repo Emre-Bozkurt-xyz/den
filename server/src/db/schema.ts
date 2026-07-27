@@ -401,6 +401,47 @@ export const vaultLinks = pgTable('vault_links', {
   linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Migration 012 (docs/EMBEDS.md §6.2, Phase 4) — the chat Stage.
+ *
+ * `chat_vault_groups` maps a Den chat to the Vault GROUP that owns its docs,
+ * one per chat, created lazily on first Stage use. The group — not any person
+ * and not Den — owns the documents, so they survive any member leaving
+ * (bridge §C.7). Den mirrors chat membership into it (embeds/vaultGroups.ts).
+ */
+export const chatVaultGroups = pgTable('chat_vault_groups', {
+  chatId: bigint('chat_id', { mode: 'bigint' })
+    .primaryKey()
+    .references(() => chats.id),
+  vaultGroupId: text('vault_group_id').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * A Vault document pinned to a chat's Stage. Shared-wiki semantics, exactly
+ * like tags (§10): any member adds or removes any doc, `added_by` is
+ * attribution only. Soft-deleted (invariant 8) — and note that removing a doc
+ * from the Stage never deletes the Vault document, which the group still owns.
+ */
+export const chatVaultDocs = pgTable(
+  'chat_vault_docs',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    chatId: bigint('chat_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => chats.id),
+    vaultDocumentId: text('vault_document_id').notNull(),
+    title: text('title'), // cached for the grid; refreshed from Vault metadata
+    addedBy: bigint('added_by', { mode: 'bigint' }).references(() => users.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('chat_vault_docs_unique').on(t.chatId, t.vaultDocumentId),
+    index('idx_chat_vault_docs_chat').on(t.chatId),
+  ],
+);
+
 /** Raw SQL run before the tables in migration 001 (citext type must exist). */
 export const CITEXT_EXTENSION = sql`CREATE EXTENSION IF NOT EXISTS citext`;
 

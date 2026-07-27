@@ -29,6 +29,7 @@ import { validation } from '../errors.js';
 import { codeChallengeS256, generateCodeVerifier, generateState } from '../integrations/pkce.js';
 import { exchangeCodeForToken, buildAuthorizeUrl, fetchVaultUserinfo } from '../integrations/vaultClient.js';
 import { deleteVaultLink, upsertVaultLink, vaultStatus } from '../integrations/vaultLinks.js';
+import { addLinkedUserToExistingChatGroups, removeUnlinkedUserFromAllChatGroups } from '../embeds/vaultGroups.js';
 
 const OAUTH_COOKIE = 'den_vault_oauth';
 const OAUTH_COOKIE_PATH = '/api/integrations/vault';
@@ -100,15 +101,34 @@ export async function integrationsVaultRoutes(app: FastifyInstance): Promise<voi
       const userinfo = await fetchVaultUserinfo(tokens.access_token);
       await upsertVaultLink(req.user!.id, userinfo.userId, tokens);
 
+      // Trigger 2 (docs/EMBEDS.md §6.3): "the already-in-the-chat, links-later
+      // case" — walk every chat this user is already in and add them to that
+      // chat's group, if it has one. Fire-and-forget: the mirror sync must
+      // never delay this redirect, and a Vault outage here must not turn
+      // into a failed link (best-effort, logged, swept later).
+      void addLinkedUserToExistingChatGroups(req.user!.id).catch((err) => {
+        req.log.warn({ err }, 'vault link-sync (trigger 2) failed');
+      });
+
       return reply.redirect(profileRedirectTarget());
     },
   );
 
   app.post('/integrations/vault/unlink', { preHandler: requireAuth }, async (req) => {
-    // Phase 4 (docs/EMBEDS.md §6.3 trigger 4) will also walk this user's
-    // chat-groups and remove them from each — no chat-group mirror exists
-    // yet in Phase 1/2, so there's nothing to reconcile here today.
+    // Trigger 4 (docs/EMBEDS.md §6.3): capture the Vault user id BEFORE the
+    // link row is gone — vaultStatus's `vaultDisplayName` doubles as the raw
+    // vaultUserId for a linked user (vaultLinks.ts's vaultStatus doc
+    // comment), so no extra query is needed here.
+    const statusBeforeUnlink = await vaultStatus(req.user!.id);
     await deleteVaultLink(req.user!.id);
+
+    if (statusBeforeUnlink.vaultDisplayName) {
+      const vaultUserId = statusBeforeUnlink.vaultDisplayName;
+      void removeUnlinkedUserFromAllChatGroups(req.user!.id, vaultUserId).catch((err) => {
+        req.log.warn({ err }, 'vault unlink-sync (trigger 4) failed');
+      });
+    }
+
     return { ok: true };
   });
 

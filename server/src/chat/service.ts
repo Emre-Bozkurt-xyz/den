@@ -19,6 +19,7 @@ import { toChatSummary, toMessage, type ChatRow, type UserRow } from '../mappers
 import { forbidden, notFound, validation } from '../errors.js';
 import { areFriends, pair } from './friends.js';
 import { assertMember } from './membership.js';
+import { addMemberToChatGroup } from '../embeds/vaultGroups.js';
 import { mediaInfoForMessages } from '../media/service.js';
 import { embedInfoForMessages } from '../embeds/service.js';
 import { reactionsForMessages } from './reactions.js';
@@ -112,6 +113,29 @@ export interface CreateChatResult {
   newMemberIds: bigint[];
 }
 
+/** Trigger 1 (docs/EMBEDS.md §6.3): "a user joins a Den chat." Fires for
+ *  every member of a freshly-created chat (creator included). In practice
+ *  this is almost always a no-op today — a brand-new chat has no Vault group
+ *  yet (one is created lazily on first Stage use, and Den has no
+ *  incremental "add member to an existing chat" feature to hook otherwise)
+ *  — but it's wired here so the mirror is correct the moment either of
+ *  those things changes, and it costs one cheap SELECT per member when
+ *  there's nothing to do. Best-effort: never lets a Vault outage block chat
+ *  creation (docs/EMBEDS.md §6.3: "joining a chat must still succeed if
+ *  Vault is down; log and let the sweep fix it"). */
+function syncNewChatMembersToVaultGroup(chatId: bigint, memberIds: bigint[]): void {
+  void Promise.all(
+    memberIds.map((userId) =>
+      addMemberToChatGroup(chatId, userId).catch((err) => {
+        console.error(
+          `vaultGroups: join-sync failed chat=${chatId} user=${userId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      }),
+    ),
+  );
+}
+
 /** POST /chats. 1 memberId ⇒ DM (idempotent: returns the existing DM if one
  *  exists); 2+ ⇒ new group. Every memberId must be an accepted friend of the
  *  caller — friendship gates DMs and group adds (BACKBONE §2). */
@@ -152,6 +176,7 @@ export async function createChat(creatorId: bigint, body: CreateChatRequest): Pr
       ]);
       return created;
     });
+    syncNewChatMembersToVaultGroup(chat.id, [creatorId, otherId]);
     return { chat: await buildSummary(chat, creatorId, null), created: true, newMemberIds: [otherId] };
   }
 
@@ -165,6 +190,7 @@ export async function createChat(creatorId: bigint, body: CreateChatRequest): Pr
     ]);
     return created;
   });
+  syncNewChatMembersToVaultGroup(chat.id, [creatorId, ...memberIds]);
   return { chat: await buildSummary(chat, creatorId, null), created: true, newMemberIds: memberIds };
 }
 

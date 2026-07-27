@@ -215,6 +215,112 @@ label {
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * Stage "paper thumbnail" (docs/EMBEDS.md §6.2.1) — ported from Vault's own
+ * live doc-card technique: the-vault's
+ * `components/workspace/WorkspaceDocumentPreviewCard.tsx` +
+ * `.vault-doc-preview*` in the-vault's `app/styles/components.css`. It is
+ * NOT a rendered-to-image thumbnail — the real rendered-HTML snapshot
+ * (`RenderedDocResponse.html`, shared/src/vault.ts) is dropped into a 4/3
+ * "sheet" and the paper look is faked with CSS alone: miniaturize (scale
+ * 0.82 from the top-left), clip (aspect-ratio + overflow hidden — this is
+ * what makes it read as a "top slice", not a string truncation of the
+ * HTML), a hairline top edge, and a bottom fade so the clipped text trails
+ * off like a real sheet. Vault's `--card`/`--border`/`--foreground` vars are
+ * swapped 1:1 for Den's own surface/border/text design tokens below so dark
+ * mode and Den's palette apply for free — the technique itself is
+ * unchanged. Used by `components/StageDocPreview.tsx`; `.stage-doc-content`
+ * (shared with the unclipped, full-size read view) carries baseline
+ * typography for the sanitized HTML, since Den intentionally does not ship
+ * Vault's `.vault-md-*` markdown stylesheet (locked principle, docs/EMBEDS.md
+ * §1 — "Den is a thin host, Vault owns rendering").
+ * ------------------------------------------------------------------------ */
+.stage-doc-preview {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.stage-doc-preview-edge {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: var(--border);
+}
+
+.stage-doc-preview-content {
+  transform: scale(0.82);
+  transform-origin: top left;
+  width: 122%;
+  padding: 0.85rem 0.95rem;
+  font-size: 0.72rem;
+}
+
+.stage-doc-preview-fade {
+  pointer-events: none;
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 40px;
+  background: linear-gradient(180deg, transparent, var(--surface-raised));
+}
+
+/* Baseline typography for Vault's sanitized rendered HTML — deliberately
+ * minimal (no callout/wiki-link/math styling; those are Vault-only concerns
+ * Den doesn't reimplement, docs/EMBEDS.md §7.1). Shared by the clipped
+ * thumbnail above and the unclipped `StageReadView` overlay. */
+.stage-doc-content {
+  color: var(--text-primary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.stage-doc-content :is(h1, h2, h3, h4, h5, h6) {
+  margin: 0 0 0.4em;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+
+.stage-doc-content p,
+.stage-doc-content ul,
+.stage-doc-content ol,
+.stage-doc-content blockquote,
+.stage-doc-content pre,
+.stage-doc-content table {
+  margin: 0 0 0.6em;
+}
+
+.stage-doc-content ul,
+.stage-doc-content ol {
+  padding-left: 1.2em;
+}
+
+.stage-doc-content a {
+  color: var(--accent);
+}
+
+.stage-doc-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+}
+
+.stage-doc-content blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 0.75em;
+  color: var(--text-secondary);
+}
+
+.stage-doc-content code {
+  background: var(--surface-sunken);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+  font-size: 0.9em;
+}
+
 /* Media *previews* — gallery tiles, chat photo/video thumbnails, media
    stacks — where a long-press is an app gesture (multi-select / focus menu),
    so the browser's own long-press behavior has to stand down: the iOS

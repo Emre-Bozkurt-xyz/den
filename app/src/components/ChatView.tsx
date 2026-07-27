@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Copy, Hand, Images, Reply as ReplyIcon, Search, Trash2, X } from 'lucide-react';
+import { Copy, Hand, Images, Layers, Reply as ReplyIcon, Search, Trash2, X } from 'lucide-react';
 import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type PublicUser, type ReplyPreview } from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import type { SearchFormState } from '../hooks/useMessageSearch';
@@ -45,6 +45,7 @@ import { MessageActions } from './MessageActions';
 import { MessageFocusMenu } from './MessageFocusMenu';
 import { MessageSearchOverlay, MessageSearchPanel } from './MessageSearchPanel';
 import { ScreenHeader } from './ScreenHeader';
+import { StageOverlay, StagePanel } from './Stage';
 
 /** `index`/`total` are 1-based positions within one multi-file pick — each
  *  file is still its own upload and its own message (UI-7). */
@@ -162,6 +163,11 @@ export function ChatView({
       return next;
     });
   }
+  // Stage open/closed (docs/EMBEDS.md §6.2) — plain local state, unlike
+  // `searchState`'s App-level cache mirroring: the Stage has no form input
+  // worth preserving across the mobile/desktop breakpoint remount, so there's
+  // nothing to lose by starting closed on every `ChatView` mount.
+  const [stageOpen, setStageOpen] = useState(false);
   const [upload, setUpload] = useState<UploadState>(null);
   const [uploadError, setUploadError] = useState('');
   const [viewer, setViewer] = useState<ViewerState>(null);
@@ -1099,6 +1105,15 @@ export function ChatView({
                 <Images size={16} />
                 Gallery
               </button>
+              <button
+                onClick={() => setStageOpen(true)}
+                aria-label="Stage"
+                className="flex items-center gap-1 text-sm text-indigo-600 dark:text-indigo-400"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Layers size={16} />
+                Stage
+              </button>
             </>
           }
         />
@@ -1300,6 +1315,13 @@ export function ChatView({
           onJumpToMessage={jumpFromSearchResult}
         />
       )}
+
+      {/* Stage (docs/EMBEDS.md §6.2) — same desktop-panel-vs-mobile-overlay
+          split as search above, deliberately mutually exclusive with search
+          in practice (a user only opens one header action at a time) but not
+          enforced as such: nothing breaks if both happen to be open. */}
+      {!isMobile && stageOpen && <StagePanel chatId={chat.id} onClose={() => setStageOpen(false)} />}
+      {isMobile && stageOpen && <StageOverlay chatId={chat.id} onClose={() => setStageOpen(false)} />}
     </div>
   );
 }

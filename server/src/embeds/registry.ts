@@ -6,6 +6,7 @@
  */
 import type { EmbedActionType, EmbedProvider } from '@den/shared';
 import { resolveInstagram } from './instagram.js';
+import { resolveVault } from './vault.js';
 
 /** What a resolver is handed — enough to fetch/verify without re-querying
  *  the DB for context it already has (mirrors media/process.ts's ProcessArgs). */
@@ -36,12 +37,13 @@ export interface ResolvedEmbed {
 
 export type EmbedResolver = (ctx: EmbedResolveCtx) => Promise<ResolvedEmbed>;
 
-// 'vault' has no resolver until Phase 3 (docs/EMBEDS.md §6.1) — a vault-kind
-// embed message can't be created by Phase 1/2's URL-detection path anyway
-// (shared/src/embeds.ts's detectEmbedUrl only recognizes Instagram today), so
-// leaving it unregistered rather than stubbing it is deliberate.
+// Phase 3 (docs/EMBEDS.md §6.1): 'vault' resolves a shared doc URL into a
+// read-only card, authenticated with the SHARER's own linked token
+// (embeds/vault.ts). shared/src/embeds.ts's detectEmbedUrl recognizes both
+// providers as of this phase.
 const RESOLVERS: Partial<Record<EmbedProvider, EmbedResolver>> = {
   instagram: resolveInstagram,
+  vault: resolveVault,
 };
 
 export function resolverFor(provider: EmbedProvider): EmbedResolver | null {

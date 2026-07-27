@@ -78,6 +78,13 @@ export const env = Object.freeze({
   vaultTokenEncKey: isProd
     ? required('VAULT_TOKEN_ENC_KEY')
     : optional('VAULT_TOKEN_ENC_KEY', 'dev-insecure-vault-token-key-change-me'),
+  // Vault SERVICE token (docs/EMBEDS.md §7.1 item 2) — the second, higher tier
+  // of trust: the OAuth client above acts *as a user*, but only this token can
+  // create groups, own documents and manage membership. Issued once in
+  // plaintext by Vault's `scripts/seed-service.mjs --slug den --name "Den"`.
+  // Deliberately NOT required in prod: leaving it unset degrades the Stage to
+  // read-only rather than refusing to boot the whole server.
+  vaultServiceToken: optional('VAULT_SERVICE_TOKEN') || undefined,
 });
 
 export type Env = typeof env;
