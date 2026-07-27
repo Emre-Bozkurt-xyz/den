@@ -62,6 +62,22 @@ export const env = Object.freeze({
   r2AccessKeyId: optional('R2_ACCESS_KEY_ID', 'den-dev'),
   r2SecretAccessKey: optional('R2_SECRET_ACCESS_KEY', 'den-dev-secret'),
   r2ForcePathStyle: optional('R2_FORCE_PATH_STYLE', 'true') === 'true',
+
+  // Vault account linking (docs/EMBEDS.md §5) — Den as an OUTBOUND OAuth 2.0
+  // client of Vault. Distinct from Den's own future login-OAuth (roadmap #2,
+  // `/auth/oauth/*`) — these never touch that reserved surface.
+  vaultIssuer: optional('VAULT_ISSUER', 'https://vault.ems-place.com'),
+  vaultClientId: optional('VAULT_CLIENT_ID', 'den'),
+  vaultClientSecret: optional('VAULT_CLIENT_SECRET') || undefined,
+  // Computed from `publicOrigin` when unset (prod: app + API are same-origin
+  // behind Caddy, so this is just `${publicOrigin}/api/integrations/vault/callback`).
+  vaultRedirectUri: optional('VAULT_REDIRECT_URI') || undefined,
+  // Encrypts vault_links' stored tokens (server/src/integrations/crypto.ts).
+  // Hashed into a 32-byte AES-256-GCM key regardless of input length, same
+  // "dev gets a throwaway default, prod must set its own" posture as sessionSecret.
+  vaultTokenEncKey: isProd
+    ? required('VAULT_TOKEN_ENC_KEY')
+    : optional('VAULT_TOKEN_ENC_KEY', 'dev-insecure-vault-token-key-change-me'),
 });
 
 export type Env = typeof env;

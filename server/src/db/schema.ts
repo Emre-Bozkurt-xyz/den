@@ -38,6 +38,10 @@
  *   embeds — belongs to a message exactly as media does; messages_kind_check
  *   gains 'embed'.
  *
+ * Migration 011 (post-MVP, docs/EMBEDS.md §5): Vault account linking.
+ *   vault_links — one row per Den user; OAuth tokens ENCRYPTED at rest
+ *   (server/src/integrations/crypto.ts), never sent to the client.
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -376,6 +380,26 @@ export const messageReactions = pgTable(
     index('idx_message_reactions_message').on(t.messageId), // aggregation query
   ],
 );
+
+// ─── Vault account linking (post-MVP, docs/EMBEDS.md §5.1) ───────────────
+
+/** Den as an OUTBOUND OAuth 2.0 client of Vault (vault.ems-place.com) — one
+ *  row per Den user. Tokens are ENCRYPTED at rest (server/src/integrations/
+ *  crypto.ts, app-level key from env) and NEVER serialized into any API
+ *  response (CLAUDE.md hard invariant 2's spirit: server-only secrets stay
+ *  server-only). Distinct from `auth_identities`/roadmap #2 (Den's own login
+ *  OAuth) — this is linking, not authentication. */
+export const vaultLinks = pgTable('vault_links', {
+  userId: bigint('user_id', { mode: 'bigint' })
+    .primaryKey()
+    .references(() => users.id),
+  vaultUserId: text('vault_user_id').notNull(), // Vault's user UUID (from GET /api/me)
+  accessTokenEnc: text('access_token_enc').notNull(),
+  refreshTokenEnc: text('refresh_token_enc').notNull(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  scope: text('scope'),
+  linkedAt: timestamp('linked_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** Raw SQL run before the tables in migration 001 (citext type must exist). */
 export const CITEXT_EXTENSION = sql`CREATE EXTENSION IF NOT EXISTS citext`;

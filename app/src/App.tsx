@@ -6,7 +6,7 @@ import { useIsMobile } from './hooks/useIsMobile';
 import { INITIAL_SEARCH_STATE, type SearchFormState } from './hooks/useMessageSearch';
 import { BackStackProvider, useBackHandler } from './lib/backStack';
 import { AuthScreen } from './components/AuthScreen';
-import { Profile } from './components/Profile';
+import { Profile, VaultLinkSection } from './components/Profile';
 import { InstallInstructions } from './components/InstallInstructions';
 import { PushPoc } from './components/PushPoc';
 import { VoicePoc } from './components/VoicePoc';
@@ -470,6 +470,7 @@ function ProfileTab({ me }: { me: MeResponse }) {
     >
       <InstallInstructions />
       <Profile me={me} />
+      <VaultLinkSection />
       <DebugTools />
     </div>
   );

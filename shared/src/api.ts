@@ -464,3 +464,12 @@ export interface EmbedInfo {
   contentKind: string | null;
   actionType: EmbedActionType;
 }
+
+// ─── Vault account linking (post-MVP, docs/EMBEDS.md §5) ────────────────────
+
+/** GET /integrations/vault/status. Never carries tokens — those are
+ *  server-only, encrypted at rest (CLAUDE.md hard invariant 2's spirit). */
+export interface VaultStatusResponse {
+  linked: boolean;
+  vaultDisplayName: string | null;
+}
