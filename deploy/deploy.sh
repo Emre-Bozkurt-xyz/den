@@ -89,8 +89,16 @@ for i in $(seq 1 30); do
     [ "$state" = "running" ] && break
   fi
   if [ "$i" -eq 30 ]; then
+    # Dump the logs inline rather than telling the operator to go fetch them.
+    # A crash-loop here is usually a missing/invalid env var: env.ts's
+    # `required()` throws during module evaluation, so the process dies
+    # instantly and the only evidence is in these lines. Printing them turns
+    # a "why did it fail?" SSH round trip into an answer in the CI output.
+    printf '\n\033[1;31m--- last api container logs ---\033[0m\n' >&2
+    dc logs --tail 40 --no-color api >&2 2>/dev/null || true
     fail "api container never reached 'running' (last state: ${state:-none}).
-Check: docker compose --env-file $ENV_FILE -f $COMPOSE_FILE logs api"
+See the api logs above. A 'Missing required env var: X' line means X is absent
+from $ENV_FILE — compare it against .env.example."
   fi
   sleep 2
 done
