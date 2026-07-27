@@ -22,10 +22,15 @@ async function main(): Promise<void> {
   // cost a prod deploy once; see docs/EMBEDS.md). But an operator who thinks
   // they configured Vault deserves to be told plainly that they didn't.
   if (!vaultLinkingEnabled) {
+    const missing = [
+      !env.vaultTokenEncKey && 'VAULT_TOKEN_ENC_KEY (generate: `openssl rand -hex 32`)',
+      !env.vaultClientId &&
+        `VAULT_CLIENT_ID (register Den at ${env.vaultIssuer}/oauth/register, then use the returned mcp_… id)`,
+    ].filter(Boolean);
     app.log.warn(
-      'VAULT_TOKEN_ENC_KEY is not set — Vault account linking is DISABLED ' +
-        '(/integrations/vault/connect returns 503, the chat Stage reports every ' +
-        'viewer as unlinked). Generate one with `openssl rand -hex 32`; see .env.example.',
+      `Vault account linking is DISABLED — missing ${missing.join(' and ')}. ` +
+        '/integrations/vault/connect returns 503 and the chat Stage reports every ' +
+        'viewer as unlinked. See .env.example.',
     );
   } else if (!env.vaultServiceToken) {
     app.log.warn(

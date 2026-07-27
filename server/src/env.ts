@@ -67,7 +67,13 @@ export const env = Object.freeze({
   // client of Vault. Distinct from Den's own future login-OAuth (roadmap #2,
   // `/auth/oauth/*`) — these never touch that reserved surface.
   vaultIssuer: optional('VAULT_ISSUER', 'https://vault.ems-place.com'),
-  vaultClientId: optional('VAULT_CLIENT_ID', 'den'),
+  // NO default. Vault issues client ids as `mcp_<random>` via RFC 7591
+  // dynamic registration (`POST /oauth/register`) — there is no way to have
+  // one called 'den', so the old 'den' default was guaranteed to fail with
+  // Vault's opaque "Unknown client, or the redirect URI is not registered."
+  // Empty here means "not registered yet" and disables linking (below),
+  // which surfaces as Den's own clear 503 instead.
+  vaultClientId: optional('VAULT_CLIENT_ID'),
   vaultClientSecret: optional('VAULT_CLIENT_SECRET') || undefined,
   // Computed from `publicOrigin` when unset (prod: app + API are same-origin
   // behind Caddy, so this is just `${publicOrigin}/api/integrations/vault/callback`).
@@ -97,10 +103,14 @@ export const env = Object.freeze({
 export type Env = typeof env;
 
 /**
- * Can users link a Vault account at all? False when `VAULT_TOKEN_ENC_KEY` is
- * unset in prod — without it there is nowhere safe to store OAuth tokens, so
- * every `/integrations/vault/*` route refuses (503) and the Stage reports the
- * viewer as unlinked. The rest of Den is unaffected: an optional integration
- * must never be able to stop the app from booting.
+ * Can users link a Vault account at all? Needs BOTH:
+ *  - `VAULT_TOKEN_ENC_KEY` — nowhere safe to store OAuth tokens without it;
+ *  - `VAULT_CLIENT_ID` — Den isn't a registered OAuth client of Vault without
+ *    it, so every authorize redirect would bounce off Vault's "Unknown
+ *    client" page. Failing here instead makes the misconfiguration Den's own,
+ *    and legible.
+ * Either missing ⇒ `/integrations/vault/*` refuses (503) and the Stage reports
+ * the viewer as unlinked. The rest of Den is unaffected: an optional
+ * integration must never be able to stop the app from booting.
  */
-export const vaultLinkingEnabled = Boolean(env.vaultTokenEncKey);
+export const vaultLinkingEnabled = Boolean(env.vaultTokenEncKey && env.vaultClientId);
