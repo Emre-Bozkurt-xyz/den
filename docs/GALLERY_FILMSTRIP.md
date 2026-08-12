@@ -121,6 +121,11 @@ Now:
 - Tracking uses **window listeners, not pointer capture** — capture would retarget the image's own events and break pinch.
 - An abandoned drag ends in a click on the backdrop, which would otherwise close the viewer; `swipedRef` swallows exactly that one click.
 
+Two follow-up fixes after the owner reported the swipe still "jumps between the old and current one" — both are the kind of seam that only shows on a real device, and both are worth not regressing:
+
+- **The commit hands the incoming item to the stand-in in the same state batch as the swap.** Without it the track snapped home and the new item rendered its *full-size* `src`, which hasn't downloaded yet — so the cached thumbnail that had just slid into view disappeared and left a blank frame until the fetch landed. The stand-in is that same cached thumbnail, so it survives the swap and hands over on `load`.
+- **Neighbours stay mounted through the settle animation** (`trackMoving`, not `dx !== 0`). A snap-back sets `dx` to 0 immediately while the CSS transition runs from the old position, so keying on `dx` alone unmounted the neighbour while the track was still visibly sliding.
+
 ## 5.5 Known, not yet addressed
 
 The gallery grid behind the viewer is **not virtualized**. The filmstrip no longer force-feeds it (§5.1), but paging far through a large chat by hand still grows the DOM without bound. Raised by the owner as a future concern; it predates this feature and is the natural next thing to do if a chat's gallery ever gets heavy.

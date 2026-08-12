@@ -276,6 +276,12 @@ export function MediaViewer({
   /** Set once a drag passes the tolerance, so the release doesn't also read as
    *  a backdrop tap and close the viewer. */
   const swipedRef = useRef(false);
+  /** Neighbours stay mounted for the whole gesture INCLUDING the settle
+   *  animation. Keying them off `dx !== 0` alone unmounted them the instant a
+   *  snap-back began — `dx` is set to 0 immediately while the transition runs
+   *  from the old position — so an abandoned swipe made the neighbour vanish
+   *  while the track was still visibly sliding. */
+  const trackMoving = swipe.dx !== 0 || swipe.settling;
 
   // System back gesture / browser back closes the viewer (matches the X button
   // and swipe-down), instead of unwinding the underlying view. `escape: true`
@@ -327,6 +333,11 @@ export function MediaViewer({
   // instead of re-binding on every parent render.
   const navCbRef = useRef({ onPrev, onNext, onClose });
   navCbRef.current = { onPrev, onNext, onClose };
+  // Same reason: the window listeners bind once, so they must read the
+  // current neighbours through a ref rather than closing over the first
+  // render's values.
+  const neighboursRef = useRef({ prev: prevNeighbour, next: nextNeighbour });
+  neighboursRef.current = { prev: prevNeighbour, next: nextNeighbour };
 
   /** Finishes a committed swipe: run the track the rest of the way out, then
    *  switch item and reset the offset in the SAME state batch so there's no
@@ -334,6 +345,14 @@ export function MediaViewer({
   function commitSwipe(direction: 'prev' | 'next', width: number) {
     setSwipe({ dx: direction === 'next' ? -width : width, dy: 0, settling: true });
     window.setTimeout(() => {
+      // Hand the incoming item to the stand-in IN THE SAME BATCH as the swap.
+      // Without this the swipe flickered: the track snapped home and the new
+      // item rendered its FULL-SIZE src, which hasn't downloaded yet, so the
+      // cached thumbnail that had just slid into view disappeared and left a
+      // blank frame until the fetch landed. The stand-in is the same cached
+      // thumbnail, so it survives the swap and hands over on load.
+      const incoming = direction === 'next' ? neighboursRef.current.next : neighboursRef.current.prev;
+      if (incoming) setStandIn(incoming);
       setSwipe({ dx: 0, dy: 0, settling: false });
       const { onPrev: p, onNext: n } = navCbRef.current;
       if (direction === 'next') n?.();
@@ -726,12 +745,12 @@ export function MediaViewer({
             arrives under the stand-in once the swipe commits. Only drawn
             while a horizontal drag is actually in progress — no point mounting
             them at rest. */}
-        {swipe.dx !== 0 && prevNeighbour && (
+        {trackMoving && prevNeighbour && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ transform: 'translateX(-100%)' }}>
             <NeighbourSlide item={prevNeighbour} revealOverride={revealOverride} isRevealed={isRevealed} />
           </div>
         )}
-        {swipe.dx !== 0 && nextNeighbour && (
+        {trackMoving && nextNeighbour && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ transform: 'translateX(100%)' }}>
             <NeighbourSlide item={nextNeighbour} revealOverride={revealOverride} isRevealed={isRevealed} />
           </div>
