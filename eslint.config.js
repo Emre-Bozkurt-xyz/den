@@ -1,6 +1,7 @@
 // @ts-check
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
   {
@@ -26,6 +27,25 @@ export default tseslint.config(
     files: ['**/*.mjs', '**/scripts/**'],
     languageOptions: {
       globals: { console: 'readonly', process: 'readonly', Buffer: 'readonly' },
+    },
+  },
+  {
+    // Rules-of-hooks enforcement for the PWA. Added 2026-08-12 after a
+    // feature where the only thing standing between us and a hooks-order
+    // crash was people reasoning carefully by hand — twice, a hook called
+    // inside a `.map()` over a variable-length list was caught by review
+    // rather than by tooling. There is no component test harness here, so
+    // this is the only mechanical guard against that class of bug.
+    files: ['app/src/**/*.{ts,tsx}'],
+    plugins: { 'react-hooks': reactHooks },
+    rules: {
+      'react-hooks/rules-of-hooks': 'error',
+      // Dependency completeness stays a WARNING, not an error: this codebase
+      // has several deliberate, documented partial dependency lists (mount-
+      // only effects reading refs, `ChatView`'s scroll-on-keyboard-edge).
+      // Turning it into an error would either bury those in disable comments
+      // or invite mechanical "fixes" that change behaviour.
+      'react-hooks/exhaustive-deps': 'warn',
     },
   },
   {

@@ -108,6 +108,19 @@ The strip renders only when `items.length > 1`. `onPrev`/`onNext` stay exactly a
 - More `filter: blur()` surfaces in a scrolling container (the existing perf risk, now in a rail).
 - The strip's 84px plus `env(safe-area-inset-bottom)` against the home indicator.
 
+## 5.6 Viewer swipe reworked into a carousel (2026-08-12)
+
+Owner report: *"I swipe, the image moves, but then floats back to the center and the next image just appears"*, plus nav not working on videos, and the gesture only responding on the image itself. All three had the same root cause — the gesture lived on the **media element** and animated only that element, then reset it and let the new item cut in.
+
+Now:
+
+- **The stage owns navigation and swipe-to-close.** A horizontal drag moves the whole *track*: the neighbour slides in as the current item slides out, and a committed swipe **finishes the travel** (`SWIPE_SETTLE_MS`) rather than reversing it. Living on the stage is also what makes the dark margins around a portrait image draggable.
+- **Neighbours render the filmstrip's thumbnails**, parked one stage-width to either side and only mounted while a drag is in progress. They're already cached, so a swipe never waits on a fetch, and the full-size image arrives under the existing stand-in machinery once the swipe commits. They respect blur — sliding an `nsfw` item into view unguarded would defeat the point.
+- **Video navigates through the same path.** Its duplicate swipe implementation is deleted; that duplication is why nav "didn't really work on videos" (it moved the video element alone and competed with the stage). `inVideoControls` survives as the stage's guard so the native controls strip keeps untouched touch behaviour, and the `<video>` re-declares `touch-action: auto` because the stage's `none` would otherwise be inherited and kill the scrubber.
+- **The image still owns pinch, double-tap zoom and pan-while-zoomed**, and the stage stands down entirely while zoomed so a pan can't also navigate.
+- Tracking uses **window listeners, not pointer capture** — capture would retarget the image's own events and break pinch.
+- An abandoned drag ends in a click on the backdrop, which would otherwise close the viewer; `swipedRef` swallows exactly that one click.
+
 ## 5.5 Known, not yet addressed
 
 The gallery grid behind the viewer is **not virtualized**. The filmstrip no longer force-feeds it (§5.1), but paging far through a large chat by hand still grows the DOM without bound. Raised by the owner as a future concern; it predates this feature and is the natural next thing to do if a chat's gallery ever gets heavy.

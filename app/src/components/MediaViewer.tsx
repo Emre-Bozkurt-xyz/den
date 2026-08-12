@@ -14,18 +14,31 @@ import { MediaFilmstrip, type FilmstripItem } from './MediaFilmstrip';
  *  Tag list + add/remove UI (§9) only renders when `tags` is passed — the
  *  ChatView usage (tapping a bubble) doesn't wire it, only ChatGallery does.
  *
- *  Gestures (docs/archive/UI_REVAMP.md UI-6): hand-rolled Pointer Events on the
- *  *image* element — swipe left/right calls onPrev/onNext, swipe down
- *  closes, pinch and double-tap zoom/pan. The *video* element gets the same
- *  swipe-nav/swipe-close (no pinch, no double-tap-zoom — doesn't make sense
- *  for video), but only for pointerdowns starting above a bottom exclusion
- *  zone reserved for the native `controls` bar (scrubber/play/fullscreen) —
- *  a pointerdown inside that zone is left completely untouched so native
- *  control behavior is unaffected. See the UI-6 implementation notes /
- *  video-gesture-gap follow-up in docs/archive/UI_REVAMP.md for the reasoning and
- *  the caveat that the exclusion-zone height is a best guess, unverified
- *  without real touch hardware. Desktop arrow buttons and the close/jump
- *  buttons are unrelated siblings, unaffected either way. */
+ *  Gestures (hand-rolled Pointer Events, originally docs/archive/UI_REVAMP.md
+ *  UI-6; reworked into a carousel 2026-08-12 — docs/GALLERY_FILMSTRIP.md §5.6).
+ *  Split across two levels, which is the thing to understand before touching
+ *  any of it:
+ *
+ *   - **The stage** owns navigation and swipe-to-close. A horizontal drag
+ *     moves the whole TRACK — the neighbouring item slides in as the current
+ *     one slides out — and a committed swipe finishes that travel instead of
+ *     snapping home and cutting to the next image (which is what the previous
+ *     implementation did, and it read as broken). Because it's on the stage,
+ *     the dark margins around a portrait image drag too. It tracks on WINDOW
+ *     listeners, not pointer capture, so the image's own handlers keep
+ *     receiving their events — capture would retarget them and break pinch.
+ *     Video navigates through this same path; it no longer has a duplicate
+ *     implementation of its own.
+ *   - **The image** owns pinch, double-tap zoom, and panning while zoomed.
+ *     While zoomed the stage stands down entirely (`transform.scale > 1.01`),
+ *     so a pan can't also navigate.
+ *
+ *  `inVideoControls` keeps the bottom strip of a `<video>` reserved for the
+ *  native controls bar (scrubber/play/fullscreen) — the stage refuses to
+ *  start a gesture there, so that touch behaviour stays completely
+ *  unmodified. The exclusion height is a best guess, unverified on real touch
+ *  hardware (docs/archive/UI_REVAMP.md §8). Desktop arrow buttons, the
+ *  filmstrip and the close/jump buttons are unrelated siblings. */
 
 const MOVE_TOLERANCE = 10; // px — minimal movement before we commit to a drag/pan/axis; below this, a pointer sequence is a "tap" not a gesture.
 const SWIPE_DISTANCE_THRESHOLD = 60; // px
@@ -43,6 +56,12 @@ const MAX_SCALE = 4;
 // per typical browser UA stylesheets, but this varies by browser/OS and is
 // a best guess, not measured against real hardware — see docs/archive/UI_REVAMP.md §8.
 const VIDEO_CONTROLS_EXCLUSION_HEIGHT = 56;
+/** How long the track takes to finish a committed swipe, and to snap back
+ *  from an abandoned one. */
+const SWIPE_SETTLE_MS = 220;
+/** Resistance applied when dragging toward an end with nothing beyond it, so
+ *  the track gives a little instead of feeling broken. */
+const RUBBER_BAND = 0.25;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -125,22 +144,6 @@ type GestureState = {
   rect: DOMRect;
 };
 
-/** Video's gesture bookkeeping is deliberately a smaller shape than
- *  GestureState — no pinch fields, no baseScale/baseX/baseY, no
- *  isDoubleTap/rect — because video never zooms/pans and pointerdowns in
- *  the controls-exclusion zone never start a gesture at all (single
- *  pointer, swipe-nav/close only). Sharing GestureState as-is would mean
- *  either faking values for fields video never uses or widening it with
- *  optional fields everywhere the image code reads them — a smaller
- *  dedicated type is more honest about the actual (simpler) state machine. */
-type VideoGestureState = {
-  axis: 'horizontal' | 'vertical' | null;
-  startX: number;
-  startY: number;
-  lastX: number;
-  lastY: number;
-  startT: number;
-};
 
 export function MediaViewer({
   media,
@@ -211,6 +214,12 @@ export function MediaViewer({
    *
    * Local to the viewer on purpose: nothing above re-renders during a scrub.
    */
+  // Neighbours for the swipe track. Only available when the caller passed a
+  // list (gallery / chat album); a lone chat photo has none, so its track just
+  // rubber-bands.
+  const prevNeighbour = items && index !== undefined && index > 0 ? (items[index - 1] ?? null) : null;
+  const nextNeighbour = items && index !== undefined ? (items[index + 1] ?? null) : null;
+
   const [standIn, setStandIn] = useState<FilmstripItem | null>(null);
   const fullImgRef = useRef<HTMLImageElement>(null);
   const standInBlurred =
@@ -233,11 +242,40 @@ export function MediaViewer({
     if (interacting) setStandIn(null);
   }, [interacting]);
 
-  // Video's swipe-nav/close drag feedback — deliberately separate state from
-  // the image's `transform` (no scale component, no pinch/double-tap fields).
-  const [videoTransform, setVideoTransform] = useState({ x: 0, y: 0 });
-  const [videoInteracting, setVideoInteracting] = useState(false);
-  const videoGestureRef = useRef<VideoGestureState | null>(null);
+  /**
+   * Carousel navigation gesture (owner feedback, 2026-08-12: the old one
+   * "moves, then floats back to the center and the next image just appears"
+   * — the image translated, snapped home, and the new one cut in).
+   *
+   * Now the whole TRACK moves: the neighbouring item slides in as the current
+   * one slides out, following the finger, and a committed swipe finishes the
+   * travel rather than reversing it.
+   *
+   * Three deliberate choices:
+   *  - It lives on the STAGE, not the media element, so the dark area around
+   *    a portrait image drags too ("the gesture only works on the image
+   *    itself... which also feels weird").
+   *  - Neighbours render from the filmstrip's THUMBNAILS. They're already
+   *    cached, so a swipe never waits on a network fetch, and the full-size
+   *    image loads under the same stand-in machinery once the swipe commits.
+   *  - Tracking happens on window listeners rather than pointer capture, so
+   *    the image's own pinch/zoom handlers keep receiving their events
+   *    untouched (capture would retarget them and break pinch).
+   */
+  const navRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    startT: number;
+    axis: 'horizontal' | 'vertical' | null;
+    width: number;
+  } | null>(null);
+  const [swipe, setSwipe] = useState<{ dx: number; dy: number; settling: boolean }>({ dx: 0, dy: 0, settling: false });
+  /** Set once a drag passes the tolerance, so the release doesn't also read as
+   *  a backdrop tap and close the viewer. */
+  const swipedRef = useRef(false);
 
   // System back gesture / browser back closes the viewer (matches the X button
   // and swipe-down), instead of unwinding the underlying view. `escape: true`
@@ -282,10 +320,119 @@ export function MediaViewer({
     pointersRef.current.clear();
     gestureRef.current = null;
     lastTapRef.current = null;
-    setVideoTransform({ x: 0, y: 0 });
-    setVideoInteracting(false);
-    videoGestureRef.current = null;
+    navRef.current = null;
   }, [media.id]);
+
+  // Latest callbacks, read by the window listeners below so they can bind once
+  // instead of re-binding on every parent render.
+  const navCbRef = useRef({ onPrev, onNext, onClose });
+  navCbRef.current = { onPrev, onNext, onClose };
+
+  /** Finishes a committed swipe: run the track the rest of the way out, then
+   *  switch item and reset the offset in the SAME state batch so there's no
+   *  frame where the old item sits back at centre. */
+  function commitSwipe(direction: 'prev' | 'next', width: number) {
+    setSwipe({ dx: direction === 'next' ? -width : width, dy: 0, settling: true });
+    window.setTimeout(() => {
+      setSwipe({ dx: 0, dy: 0, settling: false });
+      const { onPrev: p, onNext: n } = navCbRef.current;
+      if (direction === 'next') n?.();
+      else p?.();
+    }, SWIPE_SETTLE_MS);
+  }
+
+  function releaseSwipe() {
+    setSwipe({ dx: 0, dy: 0, settling: true });
+    window.setTimeout(() => setSwipe({ dx: 0, dy: 0, settling: false }), SWIPE_SETTLE_MS);
+  }
+
+  useEffect(() => {
+    function onMove(e: PointerEvent) {
+      const g = navRef.current;
+      if (!g || g.pointerId !== e.pointerId) return;
+      // A second finger means a pinch is starting — hand the gesture over to
+      // the image's own handlers rather than fighting them for it.
+      if (pointersRef.current.size > 1) {
+        navRef.current = null;
+        setSwipe({ dx: 0, dy: 0, settling: false });
+        return;
+      }
+      g.lastX = e.clientX;
+      g.lastY = e.clientY;
+      const dx = e.clientX - g.startX;
+      const dy = e.clientY - g.startY;
+      if (!g.axis && (Math.abs(dx) > MOVE_TOLERANCE || Math.abs(dy) > MOVE_TOLERANCE)) {
+        g.axis = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
+        swipedRef.current = true;
+      }
+      if (g.axis === 'horizontal') {
+        const { onPrev: p, onNext: n } = navCbRef.current;
+        const blocked = (dx > 0 && !p) || (dx < 0 && !n);
+        setSwipe({ dx: blocked ? dx * RUBBER_BAND : dx, dy: 0, settling: false });
+      } else if (g.axis === 'vertical') {
+        // Downward only — this is a close gesture, not a pan.
+        setSwipe({ dx: 0, dy: Math.max(0, dy), settling: false });
+      }
+    }
+
+    function onUp(e: PointerEvent) {
+      const g = navRef.current;
+      if (!g || g.pointerId !== e.pointerId) return;
+      navRef.current = null;
+      const dt = Math.max(1, Date.now() - g.startT);
+      const dx = g.lastX - g.startX;
+      const dy = g.lastY - g.startY;
+      const action = resolveSwipeGesture(g.axis, dx, dy, dt);
+      const { onPrev: p, onNext: n, onClose: c } = navCbRef.current;
+      if (action === 'close') {
+        c();
+        return;
+      }
+      if (action === 'next' && n) commitSwipe('next', g.width);
+      else if (action === 'prev' && p) commitSwipe('prev', g.width);
+      else releaseSwipe();
+    }
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    // Callbacks are read through `navCbRef`, so this binds once for the life
+    // of the viewer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** True for a pointerdown inside a video's native controls strip, which is
+   *  left completely alone (docs/archive/UI_REVAMP.md §8). */
+  function inVideoControls(e: React.PointerEvent): boolean {
+    const target = e.target as HTMLElement | null;
+    const video = target?.closest('video');
+    if (!video) return false;
+    const rect = video.getBoundingClientRect();
+    return e.clientY >= rect.bottom - VIDEO_CONTROLS_EXCLUSION_HEIGHT;
+  }
+
+  function onStagePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (swipe.settling) return; // mid-commit; ignore until the track lands
+    if (transform.scale > 1.01) return; // zoomed: the image pans instead
+    if (pointersRef.current.size > 1) return; // pinch owns this
+    if (inVideoControls(e)) return;
+    swipedRef.current = false;
+    navRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      startT: Date.now(),
+      axis: null,
+      width: e.currentTarget.clientWidth || 1,
+    };
+  }
 
   function toggleZoom() {
     // Simple, centered toggle (not anchored to the tap point) — deliberate:
@@ -382,22 +529,15 @@ export function MediaViewer({
       g.lastY = e.clientY;
 
       if (g.baseScale > 1.01) {
-        // Zoomed: single-pointer drag pans instead of swipe-navigating/closing.
+        // Zoomed: single-pointer drag pans the image.
         const bounded = clampTranslate(g.baseX + dx, g.baseY + dy, g.baseScale, g.rect);
         setTransform({ scale: g.baseScale, x: bounded.x, y: bounded.y });
         return;
       }
-
-      // Not zoomed: lock to whichever axis dominates once movement clears the tolerance, then stick to it for the rest of the gesture.
-      if (!g.axis && (Math.abs(dx) > MOVE_TOLERANCE || Math.abs(dy) > MOVE_TOLERANCE)) {
-        g.axis = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
-      }
-      if (g.axis === 'horizontal') {
-        setTransform({ scale: 1, x: dx, y: 0 });
-      } else if (g.axis === 'vertical') {
-        // Only downward drag visually tracks (an upward wobble just clamps to 0 — this is a close gesture, not a pan).
-        setTransform({ scale: 1, x: 0, y: Math.max(0, dy) });
-      }
+      // Not zoomed: navigation and swipe-to-close belong to the STAGE's track
+      // gesture, which is tracking this same pointer on window listeners.
+      // Translating the image here too would move it twice as fast as the
+      // track it sits in.
     }
   }
 
@@ -444,7 +584,6 @@ export function MediaViewer({
 
     // g.mode === 'drag'
     if (pointersRef.current.size === 0) {
-      const dt = Math.max(1, Date.now() - g.startT);
       const dx = g.lastX - g.startX;
       const dy = g.lastY - g.startY;
       const movedEnough = Math.hypot(dx, dy) > MOVE_TOLERANCE;
@@ -455,23 +594,9 @@ export function MediaViewer({
         return;
       }
 
-      if (g.baseScale > 1.01) {
-        // Was panning a zoomed image — position already committed live during pointermove, nothing further to resolve.
-        gestureRef.current = null;
-        return;
-      }
-
-      // Shared with video's onVideoPointerUp below — see resolveSwipeGesture.
-      const action = resolveSwipeGesture(g.axis, dx, dy, dt);
-      if (action === 'next' && onNext) onNext();
-      else if (action === 'prev' && onPrev) onPrev();
-      if (action === 'close') {
-        onClose();
-      } else {
-        // Snap back (covers both "swipe didn't cross threshold" and the plain-tap
-        // no-axis-locked case); a real navigation also gets a fresh reset from the media.id effect above.
-        setTransform({ scale: 1, x: 0, y: 0 });
-      }
+      // Panning a zoomed image commits live during pointermove, and when not
+      // zoomed the stage's track gesture owns navigate/close — either way
+      // there's nothing left to resolve here.
       gestureRef.current = null;
     }
   }
@@ -488,92 +613,29 @@ export function MediaViewer({
     }
   }
 
-  // --- Video: swipe-nav (prev/next) + swipe-down-to-close only. No pinch,
-  // no double-tap-zoom (video doesn't need zoom — its own controls already
-  // occupy the interaction budget). Gated on a bottom exclusion zone so the
-  // native controls bar keeps completely untouched touch behavior — see the
-  // file-level comment and docs/archive/UI_REVAMP.md §8 for the reasoning/caveats.
+  // Video navigation is handled by the STAGE's track gesture like every other
+  // kind — video used to carry its own duplicate swipe implementation, which
+  // is why nav "didn't really work on videos" (owner, 2026-08-12): it moved
+  // the video element alone rather than the track, and it competed with the
+  // stage. The bottom exclusion zone survives as `inVideoControls`, consulted
+  // by the stage before it starts a gesture, so the native controls bar keeps
+  // completely untouched touch behaviour (docs/archive/UI_REVAMP.md §8).
 
-  function onVideoPointerDown(e: React.PointerEvent<HTMLVideoElement>) {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const relativeY = e.clientY - rect.top;
-    if (relativeY > rect.height - VIDEO_CONTROLS_EXCLUSION_HEIGHT) {
-      // Pointerdown lands in the native-controls exclusion zone: don't call
-      // setPointerCapture, don't start gesture tracking, don't preventDefault
-      // — leave this pointer's entire event stream for the browser's native
-      // scrubber/play/fullscreen handling, completely unmodified.
-      return;
-    }
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setVideoInteracting(true);
-    videoGestureRef.current = {
-      axis: null,
-      startX: e.clientX,
-      startY: e.clientY,
-      lastX: e.clientX,
-      lastY: e.clientY,
-      startT: Date.now(),
-    };
-  }
-
-  function onVideoPointerMove(e: React.PointerEvent<HTMLVideoElement>) {
-    const g = videoGestureRef.current;
-    // No tracked gesture means this pointer's pointerdown either started in
-    // the exclusion zone or was never ours to begin with — do nothing, and
-    // critically, don't preventDefault, so native control dragging (e.g. the
-    // scrubber) is completely unaffected.
-    if (!g) return;
-    if (e.cancelable) e.preventDefault();
-    const dx = e.clientX - g.startX;
-    const dy = e.clientY - g.startY;
-    g.lastX = e.clientX;
-    g.lastY = e.clientY;
-
-    if (!g.axis && (Math.abs(dx) > MOVE_TOLERANCE || Math.abs(dy) > MOVE_TOLERANCE)) {
-      g.axis = Math.abs(dx) > Math.abs(dy) ? 'horizontal' : 'vertical';
-    }
-    if (g.axis === 'horizontal') {
-      setVideoTransform({ x: dx, y: 0 });
-    } else if (g.axis === 'vertical') {
-      setVideoTransform({ x: 0, y: Math.max(0, dy) }); // only downward tracks — matches the image's close gesture
-    }
-  }
-
-  function onVideoPointerUp(_e: React.PointerEvent<HTMLVideoElement>) {
-    const g = videoGestureRef.current;
-    videoGestureRef.current = null;
-    setVideoInteracting(false);
-    // No tracked gesture: this pointerdown started in the exclusion zone, so
-    // there's nothing of ours to resolve — the native control (play/pause
-    // tap, scrubber release, etc.) already handled its own click/behavior.
-    if (!g) return;
-
-    const dt = Math.max(1, Date.now() - g.startT);
-    const dx = g.lastX - g.startX;
-    const dy = g.lastY - g.startY;
-    const action = resolveSwipeGesture(g.axis, dx, dy, dt);
-    if (action === 'next' && onNext) onNext();
-    else if (action === 'prev' && onPrev) onPrev();
-    if (action === 'close') {
-      onClose();
-    } else {
-      setVideoTransform({ x: 0, y: 0 });
-    }
-  }
-
-  function onVideoPointerCancel(_e: React.PointerEvent<HTMLVideoElement>) {
-    // Browser-interrupted gesture — abort with no side effects, same as the image's cancel handler.
-    videoGestureRef.current = null;
-    setVideoInteracting(false);
-    setVideoTransform({ x: 0, y: 0 });
-  }
 
   if (media.status !== 'ready' || !media.url) return null;
 
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col bg-black/90"
-      onClick={onClose}
+      onClick={() => {
+        // A drag that didn't navigate still ends in a click on this backdrop.
+        // Without this guard, every abandoned swipe would close the viewer.
+        if (swipedRef.current) {
+          swipedRef.current = false;
+          return;
+        }
+        onClose();
+      }}
       style={{
         paddingTop: 'env(safe-area-inset-top)',
         paddingBottom: 'env(safe-area-inset-bottom)',
@@ -640,8 +702,40 @@ export function MediaViewer({
           cover the whole screen and feel too much" (2026-08-12). The padding
           is also what keeps landscape media out from under the close button
           and the prev/next chevrons, which sit in the margins it creates. */}
-      <div className="flex flex-1 items-center justify-center overflow-hidden md:px-20 md:py-16">
-        <div className="relative flex h-full w-full items-center justify-center md:max-h-[80vh] md:max-w-[1100px]">
+      <div
+        className="flex flex-1 items-center justify-center overflow-hidden md:px-20 md:py-16"
+        // The gesture lives here, on the whole stage including the dark
+        // margins around a portrait image — not on the media element, which
+        // is what made it "only work on the image itself".
+        onPointerDown={onStagePointerDown}
+        style={{ touchAction: 'none' }}
+      >
+        <div
+          className="relative flex h-full w-full items-center justify-center md:max-h-[80vh] md:max-w-[1100px]"
+          style={{
+            transform: `translate(${swipe.dx}px, ${swipe.dy}px)`,
+            transition: swipe.settling ? `transform ${SWIPE_SETTLE_MS}ms ease-out` : 'none',
+            // Fade out as a close gesture pulls the stage down, so it reads as
+            // dismissal rather than the image wandering off.
+            opacity: swipe.dy > 0 ? Math.max(0.4, 1 - swipe.dy / 400) : 1,
+          }}
+        >
+        {/* Neighbours, parked one stage-width to either side so they slide in
+            as the track moves. They render the filmstrip's THUMBNAIL: already
+            cached, so a swipe never waits on a fetch, and the full-size image
+            arrives under the stand-in once the swipe commits. Only drawn
+            while a horizontal drag is actually in progress — no point mounting
+            them at rest. */}
+        {swipe.dx !== 0 && prevNeighbour && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ transform: 'translateX(-100%)' }}>
+            <NeighbourSlide item={prevNeighbour} revealOverride={revealOverride} isRevealed={isRevealed} />
+          </div>
+        )}
+        {swipe.dx !== 0 && nextNeighbour && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center" style={{ transform: 'translateX(100%)' }}>
+            <NeighbourSlide item={nextNeighbour} revealOverride={revealOverride} isRevealed={isRevealed} />
+          </div>
+        )}
         {/* When `media.sensitivity` is null (the overwhelming majority case)
             this renders `children` completely unwrapped — zero DOM/layout
             change from before this feature. When sensitive, the wrapper is
@@ -687,13 +781,12 @@ export function MediaViewer({
               }}
             />
           ) : (
-            // Video gets swipe-nav (prev/next) + swipe-down-to-close, gated to
-            // pointerdowns that start above VIDEO_CONTROLS_EXCLUSION_HEIGHT
-            // from the bottom of the element — a pointerdown inside that zone
-            // is left completely alone (see onVideoPointerDown) so the native
-            // `controls` bar (scrubber/play/fullscreen) keeps unmodified touch
-            // behavior. No pinch-zoom, no double-tap-zoom — out of scope for
-            // video (see file-level comment / docs/archive/UI_REVAMP.md §8).
+            // No gesture handlers of its own: the stage's track carries video
+            // exactly like an image, and `inVideoControls` keeps the bottom
+            // strip reserved for the native controls bar (scrubber / play /
+            // fullscreen), whose touch behaviour stays completely unmodified.
+            // No pinch or double-tap zoom for video — out of scope
+            // (docs/archive/UI_REVAMP.md §8).
             <video
               key={media.id}
               src={media.url}
@@ -704,14 +797,12 @@ export function MediaViewer({
               onLoadedData={() => setStandIn(null)}
               onError={() => setStandIn(null)}
               onClick={(e) => e.stopPropagation()}
-              onPointerDown={onVideoPointerDown}
-              onPointerMove={onVideoPointerMove}
-              onPointerUp={onVideoPointerUp}
-              onPointerCancel={onVideoPointerCancel}
-              style={{
-                transform: `translate(${videoTransform.x}px, ${videoTransform.y}px)`,
-                transition: videoInteracting ? 'none' : 'transform 200ms ease-out',
-              }}
+              // The stage sets `touch-action: none` for its own gesture, which
+              // descendants inherit — that would kill dragging the native
+              // scrubber. Hand touch back to the browser on the video itself;
+              // the stage still refuses to start a gesture over the controls
+              // strip (`inVideoControls`), so the two don't collide.
+              style={{ touchAction: 'auto' }}
             />
           )}
         </SensitiveOverlay>
@@ -794,6 +885,32 @@ const TAG_EDITOR_TONES = {
 } as const;
 
 export type TagEditorTone = keyof typeof TAG_EDITOR_TONES;
+
+/** One of the two off-stage slides in the swipe track. Thumbnail only, inert,
+ *  and blurred on the same rule as everywhere else — sliding an `nsfw` item
+ *  into view unguarded would defeat the whole point of the blur. */
+function NeighbourSlide({
+  item,
+  revealOverride,
+  isRevealed,
+}: {
+  item: FilmstripItem;
+  revealOverride: boolean;
+  isRevealed: (id: string) => boolean;
+}) {
+  const blurred = item.sensitivity !== null && !revealOverride && !isRevealed(item.id);
+  return (
+    <SensitiveOverlay
+      sensitivity={item.sensitivity}
+      blurred={blurred}
+      onReveal={() => {}}
+      interactive={false}
+      className="flex h-full w-full items-center justify-center"
+    >
+      <img src={item.thumbUrl ?? undefined} alt="" draggable={false} className="max-h-full max-w-full object-contain" />
+    </SensitiveOverlay>
+  );
+}
 
 export function TagEditor({
   chatId,

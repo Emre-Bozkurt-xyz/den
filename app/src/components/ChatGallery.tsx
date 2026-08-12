@@ -18,6 +18,9 @@ import { ScreenHeader } from './ScreenHeader';
 import { TagSearchInput } from './TagSearchInput';
 import { VoiceMessage } from './VoiceMessage';
 
+/** Stable empty identity for the inactive segment — see `gridItems` below. */
+const EMPTY_ITEMS: GalleryItem[] = [];
+
 const GRID_GAP = 12; // px — mosaic-style presentation retune (stage 1 of the gallery visual rework), up from the original cramped 2px
 
 // Multi-select (BACKBONE §15 2026-07-22, stage 5 of the gallery rework) reuses
@@ -161,8 +164,14 @@ export function ChatGallery({
 
   // Server already filters to exactly this segment's kind(s) — no client-side
   // re-filtering needed, unlike the old single "All" feed that mixed both.
-  const gridItems = segment === 'media' ? items : [];
-  const voiceItems = segment === 'voice' ? items : [];
+  //
+  // Memoized because these feed four downstream memos and an effect: built
+  // inline, the inactive segment's `[]` was a fresh array identity on every
+  // render, so all of them recomputed every time — including the masonry
+  // layout for a grid that isn't virtualized. Surfaced by
+  // react-hooks/exhaustive-deps when the plugin was added.
+  const gridItems = useMemo(() => (segment === 'media' ? items : EMPTY_ITEMS), [segment, items]);
+  const voiceItems = useMemo(() => (segment === 'voice' ? items : EMPTY_ITEMS), [segment, items]);
 
   // Drives the header's "Show all" button — same predicate as `useIsBlurred`,
   // inlined rather than called per item here (calling a hook inside .map()
