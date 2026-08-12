@@ -62,6 +62,7 @@ import {
   uniqueIndex,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
+import type { UserSettings } from '@den/shared';
 
 /** Case-insensitive text. Requires `CREATE EXTENSION citext` (in migration 001). */
 const citext = customType<{ data: string }>({
@@ -87,6 +88,11 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'), // argon2id; NULLABLE — OAuth-only accounts have none
   avatarKey: text('avatar_key'), // R2 key, nullable
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // Migration 013 (post-MVP, docs/MEDIA_ATTACHMENTS.md §4.2/§4.3, D11): the
+  // first jsonb preference bag. May be `{}` or missing keys (pre-migration
+  // rows, or keys added after a user's last PATCH) — always read through
+  // mergeUserSettings (server/src/routes/auth.ts), never trust it raw.
+  settings: jsonb('settings').$type<Partial<UserSettings>>().notNull().default({}),
 });
 
 export const authIdentities = pgTable(
@@ -408,6 +414,14 @@ export const vaultLinks = pgTable('vault_links', {
  * one per chat, created lazily on first Stage use. The group — not any person
  * and not Den — owns the documents, so they survive any member leaving
  * (bridge §C.7). Den mirrors chat membership into it (embeds/vaultGroups.ts).
+ *
+ * Migration 013 (docs/MEDIA_ATTACHMENTS.md §4.2/§4.3, D11): `users.settings`.
+ *   First jsonb bag in an otherwise strict schema — one migration ever beats
+ *   one per preference. Typed `UserSettings` lives in `/shared`; the server
+ *   whitelists + merges on `PATCH /me` (server/src/routes/auth.ts) so the
+ *   column can never accumulate unknown or mistyped keys. Column may hold a
+ *   partial object (rows written before a key existed, or never PATCHed) —
+ *   always read through the merge helper, never trust it directly.
  */
 export const chatVaultGroups = pgTable('chat_vault_groups', {
   chatId: bigint('chat_id', { mode: 'bigint' })

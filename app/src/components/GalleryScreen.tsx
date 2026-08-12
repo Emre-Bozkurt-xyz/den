@@ -4,6 +4,7 @@ import { useElementWidth } from '../hooks/useElementWidth';
 import { chatDisplayName } from '../lib/chats';
 import { albumColumnCount } from '../lib/masonry';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
+import { SensitiveOverlay } from './SensitiveOverlay';
 
 /** Top-level Gallery tab: chats-as-albums grid, cover = latest ready media's
  *  thumb (BACKBONE §9). Chats with zero media are omitted server-side.
@@ -43,6 +44,10 @@ export function GalleryScreen({ me, onOpenAlbum }: { me: MeResponse; onOpenAlbum
         >
           {data.albums.map((album) => {
             const name = chatDisplayName(album, me.id);
+            // Defensive: treat a momentarily-missing field as "not sensitive"
+            // rather than crashing (coordinator note — the server side of
+            // this field is landing separately).
+            const coverSensitivity = album.coverSensitivity ?? null;
             return (
               <button
                 key={album.chatId}
@@ -52,9 +57,24 @@ export function GalleryScreen({ me, onOpenAlbum }: { me: MeResponse; onOpenAlbum
                 style={{ touchAction: 'manipulation' }}
               >
                 <div className="relative aspect-square bg-surface-sunken">
-                  {album.coverThumbUrl && (
-                    <img src={album.coverThumbUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
-                  )}
+                  {/* docs/MEDIA_ATTACHMENTS.md §5.5 — non-null only when every
+                      candidate cover was sensitive (the server prefers a
+                      clean thumb otherwise). No reveal here (`interactive`
+                      false): tapping the tile must always open the album,
+                      never swallow the tap into a reveal — the grid inside
+                      does its own per-item reveal. */}
+                  <SensitiveOverlay
+                    sensitivity={coverSensitivity}
+                    blurred={coverSensitivity !== null}
+                    onReveal={() => {}}
+                    compact
+                    interactive={false}
+                    className="h-full w-full"
+                  >
+                    {album.coverThumbUrl && (
+                      <img src={album.coverThumbUrl} alt="" loading="lazy" className="h-full w-full object-cover" />
+                    )}
+                  </SensitiveOverlay>
                   <span className="absolute bottom-1.5 right-1.5 rounded-sm bg-black/60 px-1.5 py-0.5 text-xs text-white">
                     {album.mediaCount} item{album.mediaCount === 1 ? '' : 's'}
                   </span>

@@ -539,7 +539,7 @@ function StageReadView({
   title: string;
   onClose: () => void;
 }) {
-  useBackHandler(true, onClose);
+  useBackHandler(true, onClose, { escape: true });
   const { data, isLoading, isError } = useRenderedStageDoc(chatId, vaultDocumentId, true);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -596,7 +596,7 @@ function StagePortalOverlay({
   initialUrl?: string;
   onClose: () => void;
 }) {
-  useBackHandler(true, onClose);
+  useBackHandler(true, onClose, { escape: true });
   const portalMutation = useStagePortal(chatId);
   const [url, setUrl] = useState<string | null>(initialUrl ?? null);
   const [error, setError] = useState('');
@@ -658,7 +658,7 @@ function StagePortalOverlay({
 /** Mobile: full-screen overlay, registered on the back stack — identical
  *  chrome tier to `MessageSearchOverlay` (z-40, below MediaViewer's z-50). */
 export function StageOverlay({ chatId, onClose }: { chatId: string; onClose: () => void }) {
-  useBackHandler(true, onClose);
+  useBackHandler(true, onClose, { escape: true });
   return (
     <div className="fixed inset-0 z-40 flex flex-col bg-surface" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
       <StageBody variant="mobile" chatId={chatId} onClose={onClose} />

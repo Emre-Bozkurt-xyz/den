@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { Check, CheckSquare, ChevronDown, ChevronUp, Play, X } from 'lucide-react';
+import { Check, CheckSquare, ChevronDown, ChevronUp, Eye, Play, X } from 'lucide-react';
 import type { GalleryAlbum, GalleryItem, GalleryKindFilter, MeResponse, Tag } from '@den/shared';
 import { flattenGallery, useGallery } from '../hooks/useGallery';
 import { useElementWidth } from '../hooks/useElementWidth';
@@ -10,7 +10,9 @@ import { formatDayLabel, formatTime, isSameCalendarDay } from '../lib/datetime';
 import { useBackHandler } from '../lib/backStack';
 import { computeMasonryLayout, galleryColumnCount, type MasonryLayout } from '../lib/masonry';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
-import { addTag, removeTag } from '../lib/tags';
+import { addTag, commonTags, removeTag } from '../lib/tags';
+import { useIsBlurred, useSensitivity } from '../lib/sensitivity';
+import { SensitiveOverlay } from './SensitiveOverlay';
 import { MediaViewer, TagEditor } from './MediaViewer';
 import { ScreenHeader } from './ScreenHeader';
 import { TagSearchInput } from './TagSearchInput';
@@ -25,13 +27,11 @@ const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 10;
 
 /** Tags common to every item in `items` — the batch tag panel edits this
- *  intersection, not any single item's tags (BACKBONE §15 2026-07-22).
- *  Matched by tag id (the per-chat tag registry is shared, so the same tag
- *  name always resolves to the same id across every selected item). */
+ *  intersection, not any single item's tags (BACKBONE §15 2026-07-22). Thin
+ *  wrapper over the shared `commonTags` (lib/tags.ts, generalized off this
+ *  file's original local copy per docs/MEDIA_ATTACHMENTS.md §5.2 dedup note). */
 function computeTagIntersection(items: GalleryItem[]): Tag[] {
-  if (items.length === 0) return [];
-  const [first, ...rest] = items;
-  return first!.tags.filter((tag) => rest.every((item) => item.tags.some((t) => t.id === tag.id)));
+  return commonTags(items.map((item) => item.tags));
 }
 
 /** Top-level gallery partition (BACKBONE §15 2026-07-22, supersedes the old
@@ -117,6 +117,15 @@ export function ChatGallery({
 }) {
   const qc = useQueryClient();
   const isMobile = useIsMobile();
+  // docs/MEDIA_ATTACHMENTS.md §5.5 — gallery blur. `galleryOverride` is true
+  // when the user's `galleryShowSensitive` setting is on OR they've pressed
+  // "Show all" this session (a session-scoped override, not a bulk reveal —
+  // so tiles arriving from later pagination come in revealed too, instead of
+  // needing the button re-pressed on every scroll). Chat never passes an
+  // override; this split is deliberate (gallery is somewhere you navigated
+  // to on purpose, chat is a surface scrolled past in public).
+  const { isRevealed, galleryShowAll, setGalleryShowAll } = useSensitivity();
+  const galleryOverride = me.settings.galleryShowSensitive || galleryShowAll;
   const [segment, setSegment] = useState<Segment>('media');
   const [mediaFilter, setMediaFilter] = useState<MediaSubFilter>('visual');
   const [query, setQuery] = useState('');
@@ -134,7 +143,7 @@ export function ChatGallery({
   const [sheetExpanded, setSheetExpanded] = useState(false);
   // System back gesture / browser back exits selection mode first, same
   // pattern and priority as ChatView's message multi-select.
-  useBackHandler(selectionMode, () => exitSelectionMode());
+  useBackHandler(selectionMode, () => exitSelectionMode(), { escape: true });
   // Long-press bookkeeping — a plain timer with move-slop cancellation,
   // identical shape to ChatView's (docs/archive/MESSAGE_DELETE.md §4).
   const longPressTimerRef = useRef<number | null>(null);
@@ -153,6 +162,13 @@ export function ChatGallery({
   // re-filtering needed, unlike the old single "All" feed that mixed both.
   const gridItems = segment === 'media' ? items : [];
   const voiceItems = segment === 'voice' ? items : [];
+
+  // Drives the header's "Show all" button — same predicate as `useIsBlurred`,
+  // inlined rather than called per item here (calling a hook inside .map()
+  // over a variable-length array would violate rules-of-hooks; each grid
+  // tile calls `useIsBlurred` itself, as its own component instance, below).
+  const anyBlurred =
+    !galleryOverride && gridItems.some((item) => item.media.sensitivity !== null && !isRevealed(item.media.id));
 
   // A viewer index (or an expanded tag panel) from one segment/filter is
   // meaningless once the underlying item list changes out from under it.
@@ -356,7 +372,22 @@ export function ChatGallery({
 
   return (
     <div className="flex h-full flex-col">
-      <ScreenHeader title={name} onBack={onBack} />
+      <ScreenHeader
+        title={name}
+        onBack={onBack}
+        trailing={
+          anyBlurred ? (
+            <button
+              onClick={() => setGalleryShowAll(true)}
+              className="flex items-center gap-1.5 rounded-pill bg-surface-sunken px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-border"
+              style={{ touchAction: 'manipulation' }}
+            >
+              <Eye size={13} />
+              Show all
+            </button>
+          ) : undefined
+        }
+      />
 
       <div className="border-b border-border px-3 py-2">
         <TagSearchInput
@@ -443,52 +474,18 @@ export function ChatGallery({
                         if (!tile || globalIndex === undefined) return null;
                         const isSelected = selectedIds.has(item.media.id);
                         return (
-                          <button
+                          <GalleryTile
                             key={item.media.id}
+                            item={item}
+                            tile={tile}
+                            isSelected={isSelected}
+                            galleryOverride={galleryOverride}
                             onClick={(e) => onTileClick(e, item.media.id, globalIndex)}
                             onPointerDown={(e) => onTilePointerDown(e, item.media.id)}
                             onPointerMove={onTilePointerMove}
                             onPointerUp={onTilePointerUp}
                             onPointerCancel={onTilePointerCancel}
-                            onContextMenu={suppressTouchContextMenu}
-                            className={
-                              'media-preview gallery-tile animate-gallery-tile-in absolute overflow-hidden rounded-xl border bg-surface-sunken ' +
-                              (isSelected ? 'border-accent ring-2 ring-accent' : 'border-border')
-                            }
-                            style={{
-                              left: tile.left,
-                              top: tile.top,
-                              width: tile.width,
-                              height: tile.height,
-                              touchAction: 'manipulation',
-                            }}
-                          >
-                            <img
-                              src={item.media.thumbUrl ?? item.media.url ?? undefined}
-                              alt=""
-                              loading="lazy"
-                              className="h-full w-full object-cover"
-                            />
-                            {item.media.kind === 'video' && (
-                              <>
-                                <span className="absolute inset-0 grid place-items-center bg-black/10">
-                                  <span className="grid h-8 w-8 place-items-center rounded-pill bg-black/50 text-white">
-                                    <Play size={14} fill="currentColor" />
-                                  </span>
-                                </span>
-                                {item.media.durationMs != null && (
-                                  <span className="absolute bottom-1.5 right-1.5 rounded-sm bg-black/60 px-1.5 py-0.5 text-xs text-white">
-                                    {formatDuration(item.media.durationMs)}
-                                  </span>
-                                )}
-                              </>
-                            )}
-                            {isSelected && (
-                              <span className="absolute left-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-pill bg-accent text-white">
-                                <Check size={12} />
-                              </span>
-                            )}
-                          </button>
+                          />
                         );
                       })}
                     </div>
@@ -645,9 +642,98 @@ export function ChatGallery({
           tags={viewerItem.tags}
           onAddTag={(tagName) => void addTag(viewerItem.media.id, tagName).then(invalidateGallery)}
           onRemoveTag={(tagId) => void removeTag(viewerItem.media.id, tagId).then(invalidateGallery)}
+          revealOverride={galleryOverride}
         />
       )}
     </div>
+  );
+}
+
+/** One Media-segment masonry tile (docs/MEDIA_ATTACHMENTS.md §5.5) — split
+ *  out of the day-section `.map()` above specifically so it can call
+ *  `useIsBlurred` itself: that's a hook, and calling a hook a variable
+ *  number of times per render inside a `.map()` over a list whose length
+ *  changes (pagination, filters) would violate rules-of-hooks. As its own
+ *  component instance per tile, the hook count is stable per instance,
+ *  which is the standard/safe pattern for per-item hooks in a list. */
+function GalleryTile({
+  item,
+  tile,
+  isSelected,
+  galleryOverride,
+  onClick,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+}: {
+  item: GalleryItem;
+  tile: { left: number; top: number; width: number; height: number };
+  isSelected: boolean;
+  galleryOverride: boolean;
+  onClick: (e: React.MouseEvent) => void;
+  onPointerDown: (e: React.PointerEvent) => void;
+  onPointerMove: (e: React.PointerEvent) => void;
+  onPointerUp: () => void;
+  onPointerCancel: () => void;
+}) {
+  const { reveal } = useSensitivity();
+  const blurred = useIsBlurred(item.media, galleryOverride);
+
+  return (
+    <button
+      onClick={onClick}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onContextMenu={suppressTouchContextMenu}
+      className={
+        'media-preview gallery-tile animate-gallery-tile-in absolute overflow-hidden rounded-xl border bg-surface-sunken ' +
+        (isSelected ? 'border-accent ring-2 ring-accent' : 'border-border')
+      }
+      style={{
+        left: tile.left,
+        top: tile.top,
+        width: tile.width,
+        height: tile.height,
+        touchAction: 'manipulation',
+      }}
+    >
+      <SensitiveOverlay
+        sensitivity={item.media.sensitivity}
+        blurred={blurred}
+        onReveal={() => reveal(item.media.id)}
+        compact
+        className="h-full w-full rounded-xl"
+      >
+        <img
+          src={item.media.thumbUrl ?? item.media.url ?? undefined}
+          alt=""
+          loading="lazy"
+          className="h-full w-full object-cover"
+        />
+        {item.media.kind === 'video' && (
+          <>
+            <span className="absolute inset-0 grid place-items-center bg-black/10">
+              <span className="grid h-8 w-8 place-items-center rounded-pill bg-black/50 text-white">
+                <Play size={14} fill="currentColor" />
+              </span>
+            </span>
+            {item.media.durationMs != null && (
+              <span className="absolute bottom-1.5 right-1.5 rounded-sm bg-black/60 px-1.5 py-0.5 text-xs text-white">
+                {formatDuration(item.media.durationMs)}
+              </span>
+            )}
+          </>
+        )}
+      </SensitiveOverlay>
+      {isSelected && (
+        <span className="absolute left-1.5 top-1.5 grid h-5 w-5 place-items-center rounded-pill bg-accent text-white">
+          <Check size={12} />
+        </span>
+      )}
+    </button>
   );
 }
 

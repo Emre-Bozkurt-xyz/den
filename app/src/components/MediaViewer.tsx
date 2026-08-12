@@ -3,6 +3,8 @@ import { ChevronLeft, ChevronRight, Plus, X } from 'lucide-react';
 import type { MediaInfo, Tag } from '@den/shared';
 import { fetchTagAutocomplete } from '../lib/tags';
 import { useBackHandler } from '../lib/backStack';
+import { useIsBlurred, useSensitivity } from '../lib/sensitivity';
+import { SensitiveOverlay } from './SensitiveOverlay';
 
 /** Full-screen viewer for a ready image/video. Voice messages render inline
  *  in the chat (§7: "row-style list items", not thumbnails) and never open
@@ -149,6 +151,7 @@ export function MediaViewer({
   tags,
   onAddTag,
   onRemoveTag,
+  revealOverride = false,
 }: {
   media: MediaInfo;
   onClose: () => void;
@@ -159,12 +162,23 @@ export function MediaViewer({
   tags?: Tag[];
   onAddTag?: (name: string) => void;
   onRemoveTag?: (tagId: string) => void;
+  /** Gallery-only (docs/MEDIA_ATTACHMENTS.md §5.5): mirrors the grid's own
+   *  `galleryOverride` (the `galleryShowSensitive` setting OR a session
+   *  "Show all") so the viewer doesn't contradict what the setting just
+   *  promised on the tile you tapped. Optional, defaults to `false` — chat's
+   *  call sites pass nothing and keep exactly today's always-blur behavior. */
+  revealOverride?: boolean;
 }) {
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [interacting, setInteracting] = useState(false);
   const pointersRef = useRef<Map<number, Point>>(new Map());
   const gestureRef = useRef<GestureState | null>(null);
   const lastTapRef = useRef<{ x: number; y: number; t: number } | null>(null);
+
+  // docs/MEDIA_ATTACHMENTS.md §5.4 — the viewer can be swiped from a clean
+  // item onto a blurred one, so it needs the overlay too.
+  const { reveal } = useSensitivity();
+  const blurred = useIsBlurred(media, revealOverride);
 
   // Video's swipe-nav/close drag feedback — deliberately separate state from
   // the image's `transform` (no scale component, no pinch/double-tap fields).
@@ -173,8 +187,37 @@ export function MediaViewer({
   const videoGestureRef = useRef<VideoGestureState | null>(null);
 
   // System back gesture / browser back closes the viewer (matches the X button
-  // and swipe-down), instead of unwinding the underlying view.
-  useBackHandler(true, onClose);
+  // and swipe-down), instead of unwinding the underlying view. `escape: true`
+  // adds the desktop Escape key, which only fires while this is the topmost
+  // layer — so a viewer opened over the stack grid sheet closes itself first
+  // and leaves the sheet standing (owner request, 2026-08-12).
+  useBackHandler(true, onClose, { escape: true });
+
+  // Arrow keys mirror the on-screen prev/next chevrons — the desktop
+  // equivalent of the swipe gesture, and the thing every other gallery does
+  // (owner request, 2026-08-12). Bound to the window rather than a focused
+  // element because the viewer has no natural focus target: the image isn't
+  // focusable and clicking it starts a pan gesture.
+  useEffect(() => {
+    if (!onPrev && !onNext) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      // Never steal arrows from a text field — the gallery's viewer embeds
+      // `TagEditor`, so ArrowLeft while typing a tag has to move the caret,
+      // not jump to the previous photo.
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      if (e.key === 'ArrowLeft' && onPrev) {
+        e.preventDefault();
+        onPrev();
+      } else if (e.key === 'ArrowRight' && onNext) {
+        e.preventDefault();
+        onNext();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onPrev, onNext]);
 
   // Zoom/pan/gesture bookkeeping must never leak from one item to the next.
   // This component stays mounted across prev/next (only `media` changes), so
@@ -483,10 +526,16 @@ export function MediaViewer({
         paddingBottom: 'env(safe-area-inset-bottom)',
       }}
     >
+      {/* `z-10` + an opaque-ish fill: on a landscape image the media used to
+          run edge to edge under this button, leaving a barely-visible
+          `bg-white/10` circle floating on bright pixels and no obvious way
+          out (owner report, 2026-08-12). The desktop stage padding below now
+          keeps media clear of it entirely; the stronger fill covers the
+          mobile full-bleed case, where the overlap is unavoidable. */}
       <button
         onClick={onClose}
         aria-label="Close"
-        className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-pill bg-white/10 text-white"
+        className="absolute right-4 top-4 z-10 grid h-9 w-9 place-items-center rounded-pill bg-black/60 text-white ring-1 ring-white/25 transition-colors hover:bg-black/80"
         style={{ top: 'calc(env(safe-area-inset-top) + 1rem)', touchAction: 'manipulation' }}
       >
         <X size={18} />
@@ -498,7 +547,7 @@ export function MediaViewer({
             e.stopPropagation();
             onJumpToMessage();
           }}
-          className="absolute left-4 top-4 rounded-pill bg-white/10 px-3 py-1.5 text-sm text-white"
+          className="absolute left-4 top-4 z-10 rounded-pill bg-black/60 px-3 py-1.5 text-sm text-white ring-1 ring-white/25 transition-colors hover:bg-black/80"
           style={{ top: 'calc(env(safe-area-inset-top) + 1rem)', touchAction: 'manipulation' }}
         >
           Jump to message
@@ -512,7 +561,7 @@ export function MediaViewer({
             onPrev();
           }}
           aria-label="Previous"
-          className="absolute left-2 top-1/2 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-pill bg-white/10 text-white"
+          className="absolute left-2 top-1/2 z-10 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-pill bg-black/60 text-white ring-1 ring-white/25 transition-colors hover:bg-black/80"
           style={{ touchAction: 'manipulation' }}
         >
           <ChevronLeft size={22} />
@@ -525,61 +574,86 @@ export function MediaViewer({
             onNext();
           }}
           aria-label="Next"
-          className="absolute right-2 top-1/2 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-pill bg-white/10 text-white"
+          className="absolute right-2 top-1/2 z-10 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-pill bg-black/60 text-white ring-1 ring-white/25 transition-colors hover:bg-black/80"
           style={{ touchAction: 'manipulation' }}
         >
           <ChevronRight size={22} />
         </button>
       )}
 
-      <div className="flex flex-1 items-center justify-center overflow-hidden">
-        {media.kind === 'image' ? (
-          <img
-            src={media.url}
-            alt=""
-            draggable={false}
-            onDragStart={(e) => e.preventDefault()}
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={onImagePointerDown}
-            onPointerMove={onImagePointerMove}
-            onPointerUp={onImagePointerUp}
-            onPointerCancel={onImagePointerCancel}
-            className="max-h-full max-w-full object-contain"
-            style={{
-              touchAction: 'none',
-              WebkitUserSelect: 'none',
-              userSelect: 'none',
-              transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
-              transition: interacting ? 'none' : 'transform 200ms ease-out',
-              cursor: transform.scale > 1.01 ? 'grab' : undefined,
-            }}
-          />
-        ) : (
-          // Video gets swipe-nav (prev/next) + swipe-down-to-close, gated to
-          // pointerdowns that start above VIDEO_CONTROLS_EXCLUSION_HEIGHT
-          // from the bottom of the element — a pointerdown inside that zone
-          // is left completely alone (see onVideoPointerDown) so the native
-          // `controls` bar (scrubber/play/fullscreen) keeps unmodified touch
-          // behavior. No pinch-zoom, no double-tap-zoom — out of scope for
-          // video (see file-level comment / docs/archive/UI_REVAMP.md §8).
-          <video
-            key={media.id}
-            src={media.url}
-            poster={media.thumbUrl ?? undefined}
-            controls
-            autoPlay
-            className="max-h-full max-w-full"
-            onClick={(e) => e.stopPropagation()}
-            onPointerDown={onVideoPointerDown}
-            onPointerMove={onVideoPointerMove}
-            onPointerUp={onVideoPointerUp}
-            onPointerCancel={onVideoPointerCancel}
-            style={{
-              transform: `translate(${videoTransform.x}px, ${videoTransform.y}px)`,
-              transition: videoInteracting ? 'none' : 'transform 200ms ease-out',
-            }}
-          />
-        )}
+      {/* Mobile stays full-bleed (edge-to-edge is right on a phone). Desktop
+          gets a padded, size-capped stage instead of filling the entire
+          monitor — the owner's "album and image views could be smaller, they
+          cover the whole screen and feel too much" (2026-08-12). The padding
+          is also what keeps landscape media out from under the close button
+          and the prev/next chevrons, which sit in the margins it creates. */}
+      <div className="flex flex-1 items-center justify-center overflow-hidden md:px-20 md:py-16">
+        <div className="flex h-full w-full items-center justify-center md:max-h-[80vh] md:max-w-[1100px]">
+        {/* When `media.sensitivity` is null (the overwhelming majority case)
+            this renders `children` completely unwrapped — zero DOM/layout
+            change from before this feature. When sensitive, the wrapper is
+            given an explicit h-full/w-full box (not just max-h-full) so the
+            image/video's own percentage-based max-h-full/max-w-full still
+            resolves against a definite containing-block height instead of an
+            auto-sized one — otherwise object-contain's scale-down clamp would
+            silently stop working for exactly the items that most need it
+            correctly framed (the blur pill sitting over an unclamped giant
+            image). */}
+        <SensitiveOverlay
+          sensitivity={media.sensitivity}
+          blurred={blurred}
+          onReveal={() => reveal(media.id)}
+          className="flex h-full w-full items-center justify-center"
+        >
+          {media.kind === 'image' ? (
+            <img
+              src={media.url}
+              alt=""
+              draggable={false}
+              onDragStart={(e) => e.preventDefault()}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={onImagePointerDown}
+              onPointerMove={onImagePointerMove}
+              onPointerUp={onImagePointerUp}
+              onPointerCancel={onImagePointerCancel}
+              className="max-h-full max-w-full object-contain"
+              style={{
+                touchAction: 'none',
+                WebkitUserSelect: 'none',
+                userSelect: 'none',
+                transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+                transition: interacting ? 'none' : 'transform 200ms ease-out',
+                cursor: transform.scale > 1.01 ? 'grab' : undefined,
+              }}
+            />
+          ) : (
+            // Video gets swipe-nav (prev/next) + swipe-down-to-close, gated to
+            // pointerdowns that start above VIDEO_CONTROLS_EXCLUSION_HEIGHT
+            // from the bottom of the element — a pointerdown inside that zone
+            // is left completely alone (see onVideoPointerDown) so the native
+            // `controls` bar (scrubber/play/fullscreen) keeps unmodified touch
+            // behavior. No pinch-zoom, no double-tap-zoom — out of scope for
+            // video (see file-level comment / docs/archive/UI_REVAMP.md §8).
+            <video
+              key={media.id}
+              src={media.url}
+              poster={media.thumbUrl ?? undefined}
+              controls
+              autoPlay
+              className="max-h-full max-w-full"
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={onVideoPointerDown}
+              onPointerMove={onVideoPointerMove}
+              onPointerUp={onVideoPointerUp}
+              onPointerCancel={onVideoPointerCancel}
+              style={{
+                transform: `translate(${videoTransform.x}px, ${videoTransform.y}px)`,
+                transition: videoInteracting ? 'none' : 'transform 200ms ease-out',
+              }}
+            />
+          )}
+        </SensitiveOverlay>
+        </div>
       </div>
 
       {tags && onAddTag && onRemoveTag && (
@@ -591,17 +665,55 @@ export function MediaViewer({
   );
 }
 
+/** Palettes for `TagEditor`'s two homes. `dark` is the original: fixed dark
+ *  literals because the editor sits on `MediaViewer`'s always-black backdrop
+ *  regardless of app theme, where `bg-surface-raised` would be white in light
+ *  mode (docs/archive/UI_REVAMP.md UI-5/UI-6 precedent). `surface` is for app
+ *  chrome that follows the theme — the composer's attachment sheet
+ *  (docs/MEDIA_ATTACHMENTS.md §5.2). Added instead of wrapping the editor in
+ *  yet another `bg-neutral-900` box the way ChatGallery's MobileTagSheet
+ *  does; a third copy of that hack was the wrong direction. */
+const TAG_EDITOR_TONES = {
+  dark: {
+    chip: 'bg-white/15 text-white hover:bg-white/20',
+    chipRemove: 'text-white/60 hover:text-white',
+    input:
+      'border-white/20 bg-white/10 text-white placeholder:text-white/40 focus:border-white/40',
+    submit: 'bg-indigo-600 text-white hover:bg-indigo-500 disabled:hover:bg-indigo-600',
+    suggestions: 'bg-neutral-900 shadow-lg',
+    suggestion: 'text-white hover:bg-white/10',
+    suggestionCount: 'text-white/40',
+  },
+  surface: {
+    chip: 'bg-surface-sunken text-text-primary hover:bg-border',
+    chipRemove: 'text-text-muted hover:text-text-primary',
+    input:
+      'border-border bg-surface text-text-primary placeholder:text-text-muted focus:border-accent',
+    submit: 'bg-accent text-white hover:bg-accent-hover disabled:hover:bg-accent',
+    suggestions: 'border border-border bg-surface-raised shadow-strong',
+    suggestion: 'text-text-primary hover:bg-surface-sunken',
+    suggestionCount: 'text-text-muted',
+  },
+} as const;
+
+export type TagEditorTone = keyof typeof TAG_EDITOR_TONES;
+
 export function TagEditor({
   chatId,
   tags,
   onAddTag,
   onRemoveTag,
+  tone = 'dark',
 }: {
   chatId: string | undefined;
   tags: Tag[];
   onAddTag: (name: string) => void;
   onRemoveTag: (tagId: string) => void;
+  /** Defaults to `dark` so every pre-existing call site (MediaViewer,
+   *  ChatGallery's panels) is untouched. */
+  tone?: TagEditorTone;
 }) {
+  const t = TAG_EDITOR_TONES[tone];
   const [draft, setDraft] = useState('');
   const [suggestions, setSuggestions] = useState<Tag[]>([]);
 
@@ -629,24 +741,25 @@ export function TagEditor({
     setSuggestions([]);
   }
 
-  // Deliberately fixed-dark literal colors here, not app tokens (docs/archive/UI_REVAMP.md
-  // UI-5 precedent, reconfirmed for UI-6): this panel sits inside MediaViewer's
-  // always-black/90 backdrop regardless of the app's light/dark mode, so
-  // `bg-surface-raised` (white in light mode) would break contrast against it.
-  // Radius still comes from the shared token scale (rounded-sm/rounded-pill).
+  // Colors come from TAG_EDITOR_TONES above: `dark` keeps the original fixed
+  // literals (docs/archive/UI_REVAMP.md UI-5 precedent — this panel sits on
+  // MediaViewer's always-black/90 backdrop regardless of the app's light/dark
+  // mode, so `bg-surface-raised` would be white-on-white in light mode);
+  // `surface` follows the theme tokens for in-app chrome. Radius always comes
+  // from the shared token scale (rounded-sm/rounded-pill).
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap gap-1.5">
-        {tags.map((t) => (
+        {tags.map((tag) => (
           <span
-            key={t.id}
-            className="flex items-center gap-1 rounded-pill bg-white/15 px-2.5 py-1 text-xs text-white transition-colors hover:bg-white/20"
+            key={tag.id}
+            className={'flex items-center gap-1 rounded-pill px-2.5 py-1 text-xs transition-colors ' + t.chip}
           >
-            {t.name}
+            {tag.name}
             <button
-              onClick={() => onRemoveTag(t.id)}
-              aria-label={`Remove tag ${t.name}`}
-              className="text-white/60 transition-colors hover:text-white"
+              onClick={() => onRemoveTag(tag.id)}
+              aria-label={`Remove tag ${tag.name}`}
+              className={'transition-colors ' + t.chipRemove}
             >
               <X size={12} />
             </button>
@@ -665,27 +778,33 @@ export function TagEditor({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="Add a tag — spaces become hyphens"
-            className="min-w-0 flex-1 rounded-sm border border-white/20 bg-white/10 px-2.5 py-1.5 text-sm text-white outline-none placeholder:text-white/40 focus:border-white/40"
+            className={'min-w-0 flex-1 rounded-sm border px-2.5 py-1.5 text-sm outline-none ' + t.input}
           />
           <button
             type="submit"
             disabled={!draft.trim()}
-            className="flex shrink-0 items-center gap-1 rounded-sm bg-indigo-600 px-3 py-1.5 text-sm text-white transition-colors hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600"
+            className={
+              'flex shrink-0 items-center gap-1 rounded-sm px-3 py-1.5 text-sm transition-colors disabled:opacity-40 ' +
+              t.submit
+            }
           >
             <Plus size={14} />
             Add
           </button>
         </form>
         {suggestions.length > 0 && (
-          <div className="absolute bottom-full left-0 mb-1 w-full overflow-hidden rounded-sm bg-neutral-900 shadow-lg">
+          <div className={'absolute bottom-full left-0 mb-1 w-full overflow-hidden rounded-sm ' + t.suggestions}>
             {suggestions.map((s) => (
               <button
                 key={s.id}
                 onClick={() => submit(s.name)}
-                className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-white transition-colors hover:bg-white/10"
+                className={
+                  'flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ' +
+                  t.suggestion
+                }
               >
                 <span>{s.name}</span>
-                <span className="text-white/40">{s.usageCount}</span>
+                <span className={t.suggestionCount}>{s.usageCount}</span>
               </button>
             ))}
           </div>

@@ -55,6 +55,15 @@ const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = {
   voice: '🎤 Voice message',
 };
 
+// docs/MEDIA_ATTACHMENTS.md §6: "Push preview: unchanged, and now one push
+// per album instead of N" — same album-count wording as the reply-preview
+// label (chat/replies.ts). Voice is never staged into an album (§6), so it
+// has no plural form.
+const MEDIA_LABEL_ALBUM: Partial<Record<'image' | 'video' | 'voice', (n: number) => string>> = {
+  image: (n) => `📷 ${n} photos`,
+  video: (n) => `🎥 ${n} videos`,
+};
+
 // docs/EMBEDS.md — same "media with no caption still needs a readable
 // preview" rule as MEDIA_LABEL above.
 const EMBED_LABEL: Record<EmbedProvider, string> = {
@@ -63,7 +72,12 @@ const EMBED_LABEL: Record<EmbedProvider, string> = {
 };
 
 function previewFor(message: Message): string {
-  if (message.media) return message.body?.trim() || MEDIA_LABEL[message.media.kind];
+  if (message.media.length > 0) {
+    const first = message.media[0]!;
+    const label =
+      message.media.length > 1 ? (MEDIA_LABEL_ALBUM[first.kind]?.(message.media.length) ?? MEDIA_LABEL[first.kind]) : MEDIA_LABEL[first.kind];
+    return message.body?.trim() || label;
+  }
   if (message.embed) return message.body?.trim() || EMBED_LABEL[message.embed.provider];
   return message.body?.slice(0, 120) ?? '';
 }

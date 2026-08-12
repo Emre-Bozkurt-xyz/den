@@ -39,13 +39,18 @@ export interface MessageRun {
  *  still-processing or failed item has no thumbnail to draw as a card.
  *  `pending:` uploads are excluded so an in-flight item can't be swept into
  *  a stack whose long-press would then try to select an id that doesn't
- *  exist server-side yet. */
+ *  exist server-side yet. An album (`media.length > 1`,
+ *  docs/MEDIA_ATTACHMENTS.md D2/D4) is excluded too — it renders as its own
+ *  `AlbumCard` mosaic and must never merge into a legacy fan; the fan is
+ *  reserved for several separate single-item sends grouped by proximity. */
 export function isStackable(m: Message): boolean {
+  const media = m.media[0];
   return (
     !m.body &&
     !m.id.startsWith('pending:') &&
-    m.media?.status === 'ready' &&
-    (m.media.kind === 'image' || m.media.kind === 'video')
+    m.media.length === 1 &&
+    media?.status === 'ready' &&
+    (media.kind === 'image' || media.kind === 'video')
   );
 }
 

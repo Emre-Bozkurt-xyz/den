@@ -8,6 +8,7 @@
  */
 
 import type { EmbedActionType, EmbedProvider, EmbedStatus } from './embeds.js';
+import type { Sensitivity } from './tags.js';
 
 /** Fastify error handler returns exactly this shape. Client maps `code`,
  *  never string-matches `message` (BACKBONE Conventions). */
@@ -48,8 +49,27 @@ export interface PublicUser {
   avatarUrl: string | null;
 }
 
-/** GET /me → current user, or 401 with ApiError. */
-export type MeResponse = PublicUser;
+/** Per-user preferences (docs/MEDIA_ATTACHMENTS.md §4.3, migration 013).
+ *  Stored as a single `users.settings` jsonb rather than a column per
+ *  preference — the owner intends to keep adding settings for existing
+ *  features, and one migration beats one per toggle. The server whitelists
+ *  and MERGES these keys on write; it never stores an unknown key and never
+ *  replaces the whole object. Keep this interface flat and JSON-primitive. */
+export interface UserSettings {
+  /** docs/MEDIA_ATTACHMENTS.md §5.5 — when true the gallery never blurs
+   *  sensitive media. Chat still does: the gallery is a place you navigated
+   *  to on purpose, chat is a surface you scroll past in public. */
+  galleryShowSensitive: boolean;
+}
+
+export const DEFAULT_USER_SETTINGS: UserSettings = {
+  galleryShowSensitive: false,
+};
+
+/** GET /me → current user (+ their settings), or 401 with ApiError. */
+export interface MeResponse extends PublicUser {
+  settings: UserSettings;
+}
 
 /** POST /auth/register. Invites authorize; the provider (here, password)
  *  authenticates. OAuth/passkeys do NOT bypass invites (BACKBONE §5). */
@@ -69,10 +89,13 @@ export interface LoginRequest {
 /** Register and login both return the authenticated user (session set via cookie). */
 export type AuthResponse = PublicUser;
 
-/** PATCH /me — account settings stub (Stage 1: display name only; avatar
- *  upload needs R2, Stage 3). */
+/** PATCH /me — account settings (avatar upload still needs R2, Stage 3).
+ *  `settings` is a PARTIAL: the server merges the whitelisted keys it
+ *  recognizes onto the stored object and drops the rest, so an older client
+ *  sending a subset can never clobber a preference it doesn't know about. */
 export interface UpdateMeRequest {
   displayName?: string;
+  settings?: Partial<UserSettings>;
 }
 
 /** Client-side validation limits, shared so both sides agree (§ auth rules). */
@@ -156,8 +179,18 @@ export interface Message {
   kind: MessageKind;
   body: string | null;
   createdAt: string; // ISO 8601
-  /** Present iff kind is 'image'|'video'|'voice' (Stage 3). */
-  media: MediaInfo | null;
+  /** Media carried by this message (Stage 3; an ARRAY as of
+   *  docs/MEDIA_ATTACHMENTS.md §4.1).
+   *
+   *  - `[]` for text/embed/system messages.
+   *  - One entry for voice, and for every message sent before albums existed.
+   *  - **Two or more = an album**: one send, one message, N media. `kind`
+   *    stays the FIRST item's kind (no 'album' MessageKind, so
+   *    `messages_kind_check` and every kind-branching code path are
+   *    untouched) — album-ness is derived from `media.length > 1` everywhere.
+   *
+   *  Order is the order the user staged them in (media id ASC). */
+  media: MediaInfo[];
   /** docs/EMBEDS.md §4.2 — present iff kind is 'embed'. Mirrors `media`:
    *  null until the placeholder is minted, populated (still `processing`)
    *  immediately after, then replaced wholesale by the `embed.ready` frame. */
@@ -319,31 +352,64 @@ export interface MediaInfo {
   waveform: number[] | null;
   url: string | null; // presigned GET; null until status='ready'
   thumbUrl: string | null; // presigned GET for thumb; null for voice or not-ready
+  /** docs/MEDIA_ATTACHMENTS.md §4.3 — DERIVED server-side from this item's
+   *  tags, never stored: `spoiler`/`nsfw` are ordinary per-chat tags
+   *  (SENSITIVE_TAGS in shared/src/tags.ts) and the tag rows stay the single
+   *  source of truth. 'nsfw' wins when both are attached. Null = render
+   *  normally. Clients blur on this field alone — they must never
+   *  string-match tag names themselves. */
+  sensitivity: Sensitivity | null;
 }
 
-/** POST /media/uploads. Server enforces per-kind max size (§6): images 25MB,
- *  video 500MB, voice 20MB — never trust the client beyond these ceilings. */
-export interface CreateUploadRequest {
-  chatId: string;
+/** One staged attachment in a `POST /media/uploads` batch. */
+export interface CreateUploadItem {
   kind: MediaKind;
   mime: string;
   sizeBytes: number;
 }
 
-export interface CreateUploadResponse {
+/** POST /media/uploads (docs/MEDIA_ATTACHMENTS.md §4.4) — mints ONE message
+ *  row plus one media row per item, and returns a presigned PUT per item.
+ *  Server enforces per-kind max size (§6: images 25MB, video 500MB, voice
+ *  20MB) per item and `items.length <= MediaLimits.maxAttachments` — never
+ *  trust the client beyond these ceilings.
+ *
+ *  `caption`/`replyToId` moved here from /complete when albums landed: they
+ *  belong to the *message*, which now covers N items, so they can no longer
+ *  ride "the first item's" completion. */
+export interface CreateUploadRequest {
+  chatId: string;
+  items: CreateUploadItem[];
+  caption?: string;
+  replyToId?: string;
+}
+
+export interface CreateUploadItemResponse {
   mediaId: string;
   presignedPutUrl: string;
   /** Caller must PUT with this exact Content-Type header (SigV4-signed). */
   requiredContentType: string;
 }
 
-/** POST /media/:id/complete. Optional `body` = caption text on the message.
- *  Optional `replyToId` (post-MVP): the message this upload replies to —
- *  applied here rather than at /media/uploads because the message row is
- *  created before the client has a chance to set it (§7 upload flow). */
+export interface CreateUploadResponse {
+  /** The single message row every item in `items` hangs off. */
+  messageId: string;
+  /** Same order as the request's `items`. */
+  items: CreateUploadItemResponse[];
+}
+
+/** POST /media/:id/complete — per item, still.
+ *
+ *  `tags` are attached INSIDE this call, before any fanout
+ *  (docs/MEDIA_ATTACHMENTS.md §4.4/D7): tagging over separate REST calls
+ *  after the message went out would show every other client an unblurred
+ *  `nsfw` image for a few hundred ms, which is the one thing the feature
+ *  exists to prevent. Normalized + validated server-side like any other tag.
+ *
+ *  The invariant this preserves: *an item's tags are attached before that
+ *  item ever appears in a `ready` state anywhere.* */
 export interface CompleteUploadRequest {
-  body?: string;
-  replyToId?: string;
+  tags?: string[];
 }
 
 /** GET /media/:id/url response — fresh presigned GET pair, re-mintable any
@@ -362,7 +428,16 @@ export const MediaLimits = {
   /** Presigned URL lifetimes (§7 R2 hygiene: GETs ≤ 1h; PUT is short-lived too). */
   putUrlTtlSeconds: 10 * 60,
   getUrlTtlSeconds: 60 * 60,
-} as const satisfies { maxBytes: Record<MediaKind, number>; putUrlTtlSeconds: number; getUrlTtlSeconds: number };
+  /** docs/MEDIA_ATTACHMENTS.md §5.1 — max items the composer may stage into
+   *  one album, enforced client-side at attach time (so the user is told
+   *  immediately) AND server-side at mint time (never trust the client). */
+  maxAttachments: 10,
+} as const satisfies {
+  maxBytes: Record<MediaKind, number>;
+  putUrlTtlSeconds: number;
+  getUrlTtlSeconds: number;
+  maxAttachments: number;
+};
 
 // ─── tags (Stage 5, BACKBONE §5/§6) ─────────────────────────────────────────
 
@@ -436,6 +511,14 @@ export interface GalleryAlbum {
   isGroup: boolean;
   members: PublicUser[];
   coverThumbUrl: string | null; // latest ready media *with a thumbnail* (image/video); null if none has one
+  /** docs/MEDIA_ATTACHMENTS.md §5.5 — the album tile on the Gallery tab would
+   *  otherwise happily show an `nsfw` photo full-size as chat decoration.
+   *  The server prefers the newest NON-sensitive thumb-having item as the
+   *  cover; this is non-null only when every candidate was sensitive, in
+   *  which case the client blurs the cover. Blur here is non-interactive:
+   *  tapping the tile opens the album (there's nothing to reveal — the grid
+   *  inside does its own per-item reveal). */
+  coverSensitivity: Sensitivity | null;
   mediaCount: number;
 }
 

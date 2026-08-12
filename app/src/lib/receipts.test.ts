@@ -25,7 +25,7 @@ function msg(id: string, senderId: string): Message {
     kind: 'text',
     body: `msg ${id}`,
     createdAt: new Date().toISOString(),
-    media: null,
+    media: [],
     embed: null,
     replyTo: null,
     reactions: [],

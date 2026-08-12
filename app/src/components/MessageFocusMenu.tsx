@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckSquare, Copy, Pencil, Plus, Reply, Trash2 } from 'lucide-react';
+import { CheckSquare, Copy, EyeOff, Pencil, Plus, Reply, Trash2 } from 'lucide-react';
 import { ReactionLimits, type MeResponse, type Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
 import { useBackHandler } from '../lib/backStack';
+import { useSensitivity } from '../lib/sensitivity';
 
 /**
  * iMessage-style "focus" action menu (UI-8d request F,
@@ -90,7 +91,7 @@ export function MessageFocusMenu({
   const reducedMotion = useReducedMotion();
   // System back gesture / browser back dismisses the menu (matches Escape and
   // the backdrop tap), instead of unwinding the underlying view.
-  useBackHandler(true, onClose);
+  useBackHandler(true, onClose, { escape: true });
   const [revealed, setRevealed] = useState(reducedMotion);
   const [panelRevealed, setPanelRevealed] = useState(reducedMotion);
   const cloneHostRef = useRef<HTMLDivElement>(null);
@@ -99,6 +100,11 @@ export function MessageFocusMenu({
   // id, no reactions/edit/etc. to act on), so its menu drops straight to a
   // single Discard row instead of the full action set below.
   const failed = message.id.startsWith('failed:');
+  // docs/MEDIA_ATTACHMENTS.md §5.4/§5.8 — every marked item this message
+  // carries (single media or an album), so "Hide again" can drop all of them
+  // out of the app-session reveal set at once rather than one at a time.
+  const { hide } = useSensitivity();
+  const sensitiveMediaIds = message.media.filter((m) => m.sensitivity !== null).map((m) => m.id);
 
   // Two-phase mount: render at the captured rect/scale-1 first, then flip to
   // the resting transform one frame later so the browser actually has
@@ -343,6 +349,19 @@ export function MessageFocusMenu({
               <CheckSquare size={16} />
               Select
             </button>
+            {sensitiveMediaIds.length > 0 && (
+              <button
+                onClick={() => {
+                  hide(sensitiveMediaIds);
+                  onClose();
+                }}
+                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <EyeOff size={16} />
+                Hide again
+              </button>
+            )}
             {mine && (
               <button
                 onClick={() => onDelete(message)}

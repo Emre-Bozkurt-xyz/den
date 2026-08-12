@@ -22,6 +22,7 @@ import {
   type ReactionSummary,
   type ReceiptsResponse,
   type ReplyPreview,
+  type TagAddedPayload,
 } from '@den/shared';
 import { connectSocket } from './socket';
 import { useChats } from '../hooks/useChats';
@@ -176,7 +177,7 @@ function buildOptimisticMessage(id: string, args: PendingSendArgs, senderId: str
     kind: 'text',
     body: args.body,
     createdAt: new Date().toISOString(),
-    media: null,
+    media: [],
     embed: null,
     replyTo: args.replyPreview ?? null,
     reactions: [],
@@ -403,13 +404,55 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         case WsType.FriendAccepted:
           void qc.invalidateQueries({ queryKey: ['friends'] });
           break;
-        case WsType.TagAdded:
-        case WsType.TagRemoved:
-          // Payloads only carry mediaId, not chatId — invalidating broadly
-          // is cheap (react-query only refetches queries currently mounted)
-          // and keeps every open gallery/viewer in sync with shared-wiki tags.
+        case WsType.TagAdded: {
+          // docs/MEDIA_ATTACHMENTS.md §4.5/D7 — re-blurs (or unblurs, on the
+          // 'nsfw'-wins edge) live for everyone, in the same frame, without
+          // waiting on a refetch. The payload carries the full `Tag` (with
+          // its name), so this is a direct patch rather than an invalidate:
+          // find the message carrying this mediaId across every loaded chat
+          // (the payload has no chatId to scope the search to one) and patch
+          // that one item's `sensitivity`. Non-sensitive tag names (the vast
+          // majority) are a no-op here — `sensitivity` only ever reflects
+          // SENSITIVE_TAGS.
+          const { mediaId, tag } = frame.payload as TagAddedPayload;
+          if (tag.name === 'nsfw' || tag.name === 'spoiler') {
+            qc.setQueriesData<MessagesCache>({ queryKey: ['messages'] }, (old) =>
+              withAllPages(old, (messages) =>
+                messages.map((m) =>
+                  m.media.some((med) => med.id === mediaId)
+                    ? {
+                        ...m,
+                        media: m.media.map((med) =>
+                          med.id === mediaId
+                            ? { ...med, sensitivity: tag.name === 'nsfw' ? 'nsfw' : (med.sensitivity ?? 'spoiler') }
+                            : med,
+                        ),
+                      }
+                    : m,
+                ),
+              ),
+            );
+          }
           void qc.invalidateQueries({ queryKey: ['gallery'] });
           void qc.invalidateQueries({ queryKey: ['mediaTags'] });
+          break;
+        }
+        case WsType.TagRemoved:
+          // Unlike TagAdded, this payload carries only `mediaId`/`tagId` —
+          // no tag name (see TagRemovedPayload in shared/src/ws.ts) — so the
+          // client cannot tell locally whether the detached tag was 'nsfw',
+          // 'spoiler', or an unrelated descriptive tag, nor (if the item
+          // carries both reserved tags) which one should still win. Rather
+          // than guess, fall back to a refetch: invalidating the messages
+          // caches too (in addition to gallery/mediaTags) means every open
+          // chat re-fetches and picks up the server's authoritative
+          // `sensitivity` — "server is truth" (CLAUDE.md invariant 3), just
+          // via a round trip instead of an instant patch. Flagged in the
+          // implementation report: if this ever needs to be instant too, add
+          // the removed tag's name to `TagRemovedPayload`.
+          void qc.invalidateQueries({ queryKey: ['gallery'] });
+          void qc.invalidateQueries({ queryKey: ['mediaTags'] });
+          void qc.invalidateQueries({ queryKey: ['messages'] });
           break;
         case WsType.ReactionAdded:
         case WsType.ReactionRemoved: {

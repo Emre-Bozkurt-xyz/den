@@ -15,7 +15,7 @@ import {
   restoreMessages,
 } from '../lib/chats';
 import { formatSendTime } from '../lib/datetime';
-import { kindForMime, uploadMedia } from '../lib/media';
+import { retryAlbumItems, stageFiles, uploadAlbum, uploadVoice, type StagedAttachment } from '../lib/media';
 import { clearChatNotifications } from '../lib/push';
 import { blockMessages, buildTimeline, groupMessages, type MessageBlock, type MessageRun } from '../lib/messageGroups';
 import { deriveReceipts, type ReceiptDerivation } from '../lib/receipts';
@@ -36,6 +36,8 @@ import { useIntroIds } from '../hooks/useIntroIds';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { useMediaTags } from '../hooks/useMediaTags';
 import { useBackHandler } from '../lib/backStack';
+import { AlbumCard } from './AlbumCard';
+import { AttachmentSheet } from './AttachmentSheet';
 import { Composer } from './Composer';
 import { EmbedCard } from './EmbedCard';
 import { MediaBubble } from './MediaBubble';
@@ -47,9 +49,11 @@ import { MessageSearchOverlay, MessageSearchPanel } from './MessageSearchPanel';
 import { ScreenHeader } from './ScreenHeader';
 import { StageOverlay, StagePanel } from './Stage';
 
-/** `index`/`total` are 1-based positions within one multi-file pick — each
- *  file is still its own upload and its own message (UI-7). */
-type UploadState = { kind: 'image' | 'video' | 'voice'; progress: number; index: number; total: number } | null;
+/** docs/MEDIA_ATTACHMENTS.md §5.1 — an in-flight album send. `index`/`total`
+ *  are 1-based positions within the album (1-of-1 for the unchanged voice
+ *  push-to-talk path, which still passes a `label` for the banner text since
+ *  it has no attachment tray to show "N of M" against). */
+type UploadState = { index: number; total: number; progress: number; label?: string } | null;
 
 /** What the full-screen viewer is showing. A list rather than a single item
  *  so prev/next works when the viewer was opened from a stack's grid sheet,
@@ -96,12 +100,25 @@ const MEDIA_REPLY_LABEL: Record<'image' | 'video' | 'voice', string> = {
   voice: '🎤 Voice message',
 };
 
+/** docs/MEDIA_ATTACHMENTS.md §6 "ChatList / reply previews" — derived from
+ *  `media.length`: 2+ is an album (D2), rendered as "📷 3 photos" rather than
+ *  the single-item label above. */
+function mediaReplyLabel(m: Message): string {
+  if (m.media.length > 1) {
+    const kind = m.media[0]!.kind;
+    const noun = kind === 'video' ? 'videos' : kind === 'voice' ? 'voice messages' : 'photos';
+    return `📷 ${m.media.length} ${noun}`;
+  }
+  const media = m.media[0];
+  return media ? MEDIA_REPLY_LABEL[media.kind] : '';
+}
+
 /** Builds the `ReplyPreview` carried on an outgoing reply — a short text
  *  snippet for text messages, a media label otherwise. Mirrors the server's
  *  own preview shape (`ReplyPreview.preview`, "<=120 chars") without a
  *  second round-trip. */
 function buildReplyPreview(m: Message): ReplyPreview {
-  const preview = m.body ? m.body.slice(0, 120) : m.media ? MEDIA_REPLY_LABEL[m.media.kind] : '';
+  const preview = m.body ? m.body.slice(0, 120) : mediaReplyLabel(m);
   return { id: m.id, senderId: m.senderId, kind: m.kind, preview, deleted: false };
 }
 
@@ -115,6 +132,8 @@ export function ChatView({
   onDraftChange,
   initialSearchState,
   onSearchStateChange,
+  initialAttachments,
+  onAttachmentsChange,
 }: {
   chat: ChatSummary;
   me: MeResponse;
@@ -140,6 +159,20 @@ export function ChatView({
    *  across a genuine `ChatView` remount too. */
   initialSearchState: SearchFormState;
   onSearchStateChange: (state: SearchFormState) => void;
+  /** Same App-level per-chat cache pattern again (docs/MEDIA_ATTACHMENTS.md
+   *  §5.1) — staged-but-unsent attachments must survive switching chats and
+   *  crossing the mobile/desktop breakpoint, exactly like draft text. Losing
+   *  a picked-and-tagged album to an accidental tab switch would be the same
+   *  class of bug as losing typed text, and worse: the user may have spent
+   *  time tagging each item.
+   *
+   *  The cached entries' `previewUrl`s are DEAD by the time they come back —
+   *  `Composer` revokes every object URL on unmount, deliberately, so a chat
+   *  the user never returns to can't leak them. The `File` objects survive
+   *  though (they're just references), so the mount below re-derives fresh
+   *  URLs from them. Never render a cached `previewUrl` directly. */
+  initialAttachments: StagedAttachment[];
+  onAttachmentsChange: (attachments: StagedAttachment[]) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
   const { sendMessage, retrySend, discardFailed, notePendingReaction, clearPendingReaction } = useRealtime();
@@ -170,10 +203,39 @@ export function ChatView({
   const [stageOpen, setStageOpen] = useState(false);
   const [upload, setUpload] = useState<UploadState>(null);
   const [uploadError, setUploadError] = useState('');
+  // docs/MEDIA_ATTACHMENTS.md §5.1 — staged, not-yet-uploaded picks; the
+  // composer's tray renders from this. Seeded from AuthedApp's per-chat cache
+  // and mirrored back on every write (see the prop docs above), so a chat
+  // switch or a breakpoint remount doesn't throw away picked-and-tagged
+  // files. Object URLs are re-minted here because the previous mount's
+  // `Composer` revoked them on the way out.
+  const [attachments, setAttachmentsState] = useState<StagedAttachment[]>(() =>
+    initialAttachments.map((a) => ({ ...a, previewUrl: a.previewUrl ? URL.createObjectURL(a.file) : a.previewUrl })),
+  );
+  /** Mirrors into the App-level cache in addition to updating local state —
+   *  same shape as `setDraft`/`setSearchState` above. */
+  function setAttachments(updater: (prev: StagedAttachment[]) => StagedAttachment[]) {
+    setAttachmentsState((prev) => {
+      const next = updater(prev);
+      onAttachmentsChange(next);
+      return next;
+    });
+  }
+  // Which staged attachment's `AttachmentSheet` is open, if any.
+  const [attachmentSheetFor, setAttachmentSheetFor] = useState<string | null>(null);
+  // The message id an album mint created, kept around only while some of its
+  // items are still `failed` — lets `discardAlbum`/an expired-URL retry
+  // soft-delete the right orphaned message. Cleared once nothing staged is
+  // failed anymore. A plain ref (not state): it never drives a render on its
+  // own, only read inside the retry/discard handlers below.
+  const failedAlbumMessageIdRef = useRef<string | null>(null);
   const [viewer, setViewer] = useState<ViewerState>(null);
-  // Messages of the stack whose grid sheet is open (UI-7). Held as messages,
-  // not media, so picking a tile can seed the viewer in stack order.
-  const [stackSheet, setStackSheet] = useState<Message[] | null>(null);
+  // The items of whichever grid sheet is open (UI-7 legacy fan, or
+  // docs/MEDIA_ATTACHMENTS.md §5.3's album "+N" overflow) — held as resolved
+  // `MediaInfo[]`, not messages, so `MediaGridSheet` (which only ever needed
+  // one media item per row) doesn't care which of the two opened it, and
+  // picking a tile can seed the viewer directly from this same array.
+  const [gridSheetItems, setGridSheetItems] = useState<MediaInfo[] | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef(new Map<string, HTMLDivElement>());
@@ -203,8 +265,8 @@ export function ChatView({
   // exclusive with `replyingTo`: starting one clears the other (see
   // `startReply`/`startEdit`). `preEditDraftRef` stashes whatever was in the
   // composer *before* entering edit mode so Cancel/successful-submit can put
-  // it back, exactly like `runUpload`'s caption clearing has no equivalent
-  // need to restore — this is closer to a "swap the draft out and back".
+  // it back — this is closer to a "swap the draft out and back" than an
+  // upload's caption clearing (which has no equivalent need to restore).
   const [editing, setEditing] = useState<Message | null>(null);
   const preEditDraftRef = useRef('');
   // Live swipe-to-reply drag state — which block (by its lead message id) is
@@ -237,7 +299,7 @@ export function ChatView({
   // System back gesture / browser back cancels selection mode (matches the X
   // in the selection header) before it would unwind the chat → chat list.
   // Registered after AuthedApp's view handler, so LIFO exits selection first.
-  useBackHandler(selectionMode, () => exitSelectionMode());
+  useBackHandler(selectionMode, () => exitSelectionMode(), { escape: true });
   // The message the focus menu (UI-8d — Copy/Select/Delete + send time) is
   // currently open for, plus what was captured at open time for the lift
   // animation. Was `Message | null` pre-UI-8, when this drove a plain
@@ -605,6 +667,14 @@ export function ChatView({
    *  seeds the composer with the message's current body. */
   function startEdit(m: Message) {
     if (!m.body) return;
+    // docs/MEDIA_ATTACHMENTS.md §5.1 — entering edit mode is blocked while
+    // attachments are staged: a hidden-but-alive tray whose contents the
+    // Update button ignores would be quietly confusing. Surfaced through the
+    // existing error path rather than silently hiding the tray.
+    if (attachments.length > 0) {
+      setUploadError('Send or remove the attachment first');
+      return;
+    }
     setReplyingTo(null);
     preEditDraftRef.current = draft;
     setEditing(m);
@@ -839,6 +909,13 @@ export function ChatView({
       void submitEdit();
       return;
     }
+    // docs/MEDIA_ATTACHMENTS.md §5.1/D1 — staged attachments own Send now:
+    // the composer text becomes the album's caption (or no caption at all),
+    // not a separate text message.
+    if (attachments.length > 0) {
+      void sendAlbum();
+      return;
+    }
     if (!draft.trim()) return;
     const replyToId = replyingTo?.id;
     const replyPreview = replyingTo ? buildReplyPreview(replyingTo) : undefined;
@@ -847,84 +924,172 @@ export function ChatView({
     setReplyingTo(null);
   }
 
-  /** Multi-pick (UI-7): each file is uploaded separately and becomes its own
-   *  message — no batching exists on the wire. Consecutive ones simply *draw*
-   *  as a fanned stack (lib/messageGroups.ts). Uploads run sequentially, not
-   *  in parallel: the media pipeline is per-item anyway and a serial queue
-   *  keeps the progress bar honest and phone radios/CPU from being hammered
-   *  by N concurrent PUTs. */
-  async function handleFilesPicked(picked: File[]) {
-    if (picked.length === 0) return;
-
-    const files = picked.flatMap((file) => {
-      const kind = kindForMime(file.type);
-      return kind === 'image' || kind === 'video' ? [{ file, kind }] : [];
-    });
-    if (files.length === 0) {
-      setUploadError('Pick an image or video');
-      return;
-    }
-    if (files.length < picked.length) setUploadError('Skipped files that were not an image or video');
-
-    // Like the caption, a pending reply applies to the first uploaded item
-    // only — cleared up front (optimistic, matching how `sendDraft` clears
-    // the draft immediately rather than waiting on the upload to finish).
-    const replyToId = replyingTo?.id;
-    if (replyToId) setReplyingTo(null);
-
-    let failed = 0;
-    for (const [i, { file, kind }] of files.entries()) {
-      // The composer's text rides along as a caption on the first item only —
-      // repeating it on every message of a batch would read as spam.
-      const ok = await runUpload(file, kind, file.type, i === 0 ? draft : '', i + 1, files.length, i === 0 ? replyToId : undefined);
-      if (!ok) failed++;
-    }
-    if (failed > 0) {
-      setUploadError(failed === files.length ? 'Upload failed — try again' : `${failed} of ${files.length} uploads failed`);
-    }
+  /** docs/MEDIA_ATTACHMENTS.md §5.1 — attach button / paste both land here
+   *  after `Composer` gathers the raw picked `File`s; validation
+   *  (kind/size/`MediaLimits.maxAttachments`) lives once, centrally, via
+   *  `stageFiles` (lib/media.ts), shared with `AttachmentSheet`'s own "+"
+   *  tile so the two entry points can never drift on what's accepted. */
+  function handleAddFiles(files: File[]) {
+    const { accepted, error } = stageFiles(files, attachments.length);
+    if (accepted.length > 0) setAttachments((prev) => [...prev, ...accepted]);
+    if (error) setUploadError(error);
   }
 
-  async function runUpload(
-    file: Blob,
-    kind: 'image' | 'video' | 'voice',
-    mime: string,
-    caption: string,
-    index = 1,
-    total = 1,
-    replyToId?: string,
-  ): Promise<boolean> {
-    if (index === 1) setUploadError('');
-    setUpload({ kind, progress: 0, index, total });
+  function handleRemoveAttachment(localId: string) {
+    setAttachments((prev) => prev.filter((a) => a.localId !== localId));
+  }
+
+  function handleUpdateAttachmentTags(localId: string, updater: (tags: string[]) => string[]) {
+    setAttachments((prev) => prev.map((a) => (a.localId === localId ? { ...a, tags: updater(a.tags) } : a)));
+  }
+
+  /** Replaces staged items with the outcome of an upload/retry round: drops
+   *  everything that succeeded (it's a real sent message now) and keeps only
+   *  the still-failed ones staged, refreshed with whatever mint info they
+   *  should retry against next (docs §5.1 "a failed send keeps the tray").
+   *  Items in `attachments` that weren't part of this round (shouldn't
+   *  normally happen — `results` always covers the attempted set) pass
+   *  through untouched. */
+  function settleAttachments(
+    results: { localId: string; ok: boolean; mediaId: string; presignedPutUrl: string; requiredContentType: string }[],
+  ): number {
+    const byId = new Map(results.map((r) => [r.localId, r]));
+    setAttachments((prev) =>
+      prev.flatMap((a) => {
+        const r = byId.get(a.localId);
+        if (!r) return [a];
+        if (r.ok) return [];
+        return [{ ...a, status: 'failed' as const, progress: 0, mediaId: r.mediaId, presignedPutUrl: r.presignedPutUrl, requiredContentType: r.requiredContentType }];
+      }),
+    );
+    return results.filter((r) => !r.ok).length;
+  }
+
+  /** Send with attachments staged (docs §5.1/§4.4): one mint call for every
+   *  staged item plus the composer's draft as caption and the pending reply,
+   *  then serial PUT+complete (lib/media.ts's `uploadAlbum`). The message
+   *  itself arrives back over WS — `message.new` for the first item to
+   *  complete, `media.ready` for the rest (§4.4) — this function never
+   *  hand-inserts it into the query cache. */
+  async function sendAlbum() {
+    const items = attachments;
+    const caption = draft;
+    const replyToId = replyingTo?.id;
+    const replyToMsg = replyingTo;
+    setUploadError('');
+    setDraft('');
+    setReplyingTo(null);
+    setAttachments((prev) => prev.map((a) => ({ ...a, status: 'uploading' as const, progress: 0 })));
     try {
-      await uploadMedia(
+      const outcome = await uploadAlbum(
         chat.id,
-        file,
-        kind,
-        mime,
+        items.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags })),
         caption,
-        (pct) => setUpload({ kind, progress: pct, index, total }),
         replyToId,
+        (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
       );
-      if (caption) setDraft('');
-      return true;
+      const failedCount = settleAttachments(outcome.items);
+      if (failedCount === 0) {
+        failedAlbumMessageIdRef.current = null;
+      } else {
+        failedAlbumMessageIdRef.current = outcome.messageId;
+        setUploadError(
+          failedCount === items.length ? 'Upload failed — try again' : `${failedCount} of ${items.length} failed — retry or discard`,
+        );
+      }
     } catch {
-      return false;
+      // The mint call itself failed — nothing was created server-side, so
+      // there's nothing to discard, but the user's caption/reply/files must
+      // not vanish (docs §5.1: "do not lose the user's files").
+      setDraft(caption);
+      if (replyToMsg) setReplyingTo(replyToMsg);
+      setAttachments((prev) => prev.map((a) => ({ ...a, status: 'failed' as const, progress: 0 })));
+      failedAlbumMessageIdRef.current = null;
+      setUploadError('Upload failed — try again');
     } finally {
       setUpload(null);
     }
   }
 
+  /** Retries every currently-failed staged item. Re-PUTs to the still-valid
+   *  presigned URL (no re-mint — same message row) unless the server says it
+   *  expired (§5.1's 10 min TTL), in which case the still-failing items are
+   *  re-minted as a brand-new album and the orphaned old message is
+   *  soft-deleted. */
+  async function retryAlbum() {
+    const retryable = attachments.filter((a) => a.status === 'failed' && a.mediaId && a.presignedPutUrl && a.requiredContentType);
+    if (retryable.length === 0) return;
+    setUploadError('');
+    setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'uploading' as const, progress: 0 } : a)));
+    try {
+      let results = await retryAlbumItems(
+        retryable.map((a) => ({
+          localId: a.localId,
+          file: a.file,
+          tags: a.tags,
+          mediaId: a.mediaId!,
+          presignedPutUrl: a.presignedPutUrl!,
+          requiredContentType: a.requiredContentType!,
+        })),
+        (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
+      );
+      const expired = results.filter((r) => r.expired);
+      if (expired.length > 0) {
+        const oldMessageId = failedAlbumMessageIdRef.current;
+        const toRemint = attachments.filter((a) => expired.some((r) => r.localId === a.localId));
+        const remint = await uploadAlbum(
+          chat.id,
+          toRemint.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags })),
+          undefined,
+          undefined,
+          (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
+        );
+        if (oldMessageId) void deleteMessages(chat.id, [oldMessageId]).catch(() => {});
+        failedAlbumMessageIdRef.current = remint.messageId;
+        results = results.filter((r) => !r.expired).concat(remint.items);
+      }
+      const failedCount = settleAttachments(results);
+      if (failedCount === 0) {
+        failedAlbumMessageIdRef.current = null;
+        setUploadError('');
+      } else {
+        setUploadError(`${failedCount} failed — retry or discard`);
+      }
+    } catch {
+      setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'failed' as const, progress: 0 } : a)));
+      setUploadError('Retry failed — try again');
+    } finally {
+      setUpload(null);
+    }
+  }
+
+  /** Gives up on every currently-failed staged item, soft-deleting the
+   *  orphaned album message they belonged to through the existing delete
+   *  route (docs §5.1/§6 "Discard soft-deletes the album message"). */
+  function discardAlbum() {
+    const messageId = failedAlbumMessageIdRef.current;
+    setAttachments((prev) => prev.filter((a) => a.status !== 'failed'));
+    setUploadError('');
+    failedAlbumMessageIdRef.current = null;
+    if (messageId) void deleteMessages(chat.id, [messageId]).catch(() => {});
+  }
+
   /** Hands a finished recording (UI-8e — `Composer`'s state machine) off to
-   *  the same `runUpload` path every other media kind already uses; this
-   *  function is the entire bridge between the two, so the actual
-   *  upload/transcode flow is not duplicated or rewritten. No caption: the
-   *  mic/recording bar only exists while the composer's text is empty. */
+   *  `lib/media.ts`'s `uploadVoice` — voice is completely unchanged by
+   *  staging (docs §5.1): push-to-talk still sends immediately and is never
+   *  staged. No caption: the mic/recording bar only exists while the
+   *  composer's text is empty. */
   function handleRecordingComplete(blob: Blob, mime: string) {
     const replyToId = replyingTo?.id;
     if (replyToId) setReplyingTo(null);
-    void runUpload(blob, 'voice', mime, '', 1, 1, replyToId).then((ok) => {
-      if (!ok) setUploadError('Upload failed — try again');
-    });
+    setUploadError('');
+    setUpload({ index: 1, total: 1, progress: 0, label: 'voice message' });
+    void uploadVoice(chat.id, blob, mime, replyToId, (pct) => setUpload({ index: 1, total: 1, progress: pct, label: 'voice message' }))
+      .then((outcome) => {
+        if (outcome.items.some((r) => !r.ok)) setUploadError('Upload failed — try again');
+      })
+      .catch(() => setUploadError('Upload failed — try again'))
+      .finally(() => setUpload(null));
   }
 
   /** True when a tap on media should be ignored because it belongs to the
@@ -943,10 +1108,31 @@ export function ChatView({
 
   function openViewer(m: Message) {
     if (mediaTapSuppressed()) return;
-    if (m.media?.status === 'ready' && (m.media.kind === 'image' || m.media.kind === 'video')) {
-      const media = m.media;
+    const media = m.media[0];
+    if (media?.status === 'ready' && (media.kind === 'image' || media.kind === 'video')) {
       handleTap(m, () => setViewer({ list: [media], index: 0 }));
     }
+  }
+
+  /** docs/MEDIA_ATTACHMENTS.md §5.3 — tap on one of an album's visible
+   *  mosaic tiles: opens the viewer straight at that item, stepping through
+   *  the *whole* album via prev/next (no grid-sheet detour — the mosaic
+   *  already shows what you're picking, unlike a legacy fan). */
+  function openAlbumViewer(m: Message, index: number) {
+    if (mediaTapSuppressed()) return;
+    handleTap(m, () => setViewer({ list: m.media, index }));
+  }
+
+  /** The "+N" overflow tile on a 7–10 item album — reuses the same
+   *  `MediaGridSheet` a legacy fan's tap opens (see `openStack`/
+   *  `gridSheetItems`). */
+  function openAlbumOverflow(m: Message) {
+    if (mediaTapSuppressed()) return;
+    // Routed through `handleTap` like every other media tap: without it the
+    // FIRST tap of a double-tap opened the grid sheet, and the second landed
+    // on whatever tile was under the finger — so double-tapping "+N" opened
+    // an image instead of reacting (owner report, 2026-08-12).
+    handleTap(m, () => setGridSheetItems(m.media));
   }
 
   /** docs/EMBEDS.md §4.4 — tap-action for a bare embed card. Only
@@ -972,7 +1158,7 @@ export function ChatView({
     // A double-tap on a stack reacts to its lead (top) message — there's no
     // single "the stack" to attach a reaction to on the wire, same reasoning
     // as excluding stacks from swipe-to-reply/the focus menu above.
-    handleTap(lead, () => setStackSheet(msgs));
+    handleTap(lead, () => setGridSheetItems(msgs.flatMap((m) => (m.media[0] ? [m.media[0]] : []))));
   }
 
   /** Post-MVP double-tap-to-react: delays a bubble tap's normal single-tap
@@ -1162,6 +1348,8 @@ export function ChatView({
                 }}
                 onOpenActions={openActionMenu}
                 onOpenViewer={openViewer}
+                onOpenAlbumViewer={openAlbumViewer}
+                onOpenAlbumOverflow={openAlbumOverflow}
                 onOpenEmbed={openEmbed}
                 onOpenStack={openStack}
                 onReply={startReply}
@@ -1199,8 +1387,8 @@ export function ChatView({
 
       {upload && (
         <div className="border-t border-border bg-surface-raised px-4 py-2.5 text-xs text-text-secondary">
-          Uploading {upload.kind}
-          {upload.total > 1 ? ` ${upload.index} of ${upload.total}` : ''}… {upload.progress}%
+          {upload.total > 1 ? `Uploading ${upload.index} of ${upload.total}` : `Uploading ${upload.label ?? 'attachment'}`}
+          … {upload.progress}%
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-pill bg-surface-sunken">
             <div
               className="h-full rounded-pill bg-accent transition-[width]"
@@ -1210,9 +1398,22 @@ export function ChatView({
         </div>
       )}
       {uploadError && (
-        <p className="border-t border-border bg-surface-raised px-4 py-2 text-xs text-red-600 dark:text-red-400">
-          {uploadError}
-        </p>
+        <div className="flex items-center justify-between gap-2 border-t border-border bg-surface-raised px-4 py-2 text-xs text-red-600 dark:text-red-400">
+          <span>{uploadError}</span>
+          {/* docs/MEDIA_ATTACHMENTS.md §5.1 — "a failed send keeps the tray":
+              failed items stay staged with a retry affordance right here,
+              never silently dropped. */}
+          {attachments.some((a) => a.status === 'failed') && (
+            <span className="flex shrink-0 gap-3">
+              <button onClick={() => void retryAlbum()} className="font-semibold text-indigo-600 dark:text-indigo-400" style={{ touchAction: 'manipulation' }}>
+                Retry
+              </button>
+              <button onClick={discardAlbum} className="font-semibold text-red-600 dark:text-red-400" style={{ touchAction: 'manipulation' }}>
+                Discard
+              </button>
+            </span>
+          )}
+        </div>
       )}
 
       {editing ? (
@@ -1225,7 +1426,10 @@ export function ChatView({
         draft={draft}
         onDraftChange={setDraft}
         onSend={sendDraft}
-        onPickFiles={(files) => void handleFilesPicked(files)}
+        attachments={attachments}
+        onAddFiles={handleAddFiles}
+        onRemoveAttachment={handleRemoveAttachment}
+        onOpenAttachment={setAttachmentSheetFor}
         uploading={!!upload}
         onRecordingComplete={handleRecordingComplete}
         onError={setUploadError}
@@ -1233,14 +1437,22 @@ export function ChatView({
         editing={!!editing}
       />
 
-      {stackSheet && (
+      {attachmentSheetFor && (
+        <AttachmentSheet
+          attachments={attachments}
+          focusedId={attachmentSheetFor}
+          chatId={chat.id}
+          onClose={() => setAttachmentSheetFor(null)}
+          onUpdateTags={handleUpdateAttachmentTags}
+          onAddFiles={handleAddFiles}
+        />
+      )}
+
+      {gridSheetItems && (
         <MediaGridSheet
-          messages={stackSheet}
-          onClose={() => setStackSheet(null)}
-          onPick={(index) => {
-            const list = stackSheet.flatMap((m) => (m.media ? [m.media] : []));
-            setViewer({ list, index });
-          }}
+          items={gridSheetItems.map((media) => ({ media, thumbUrl: media.thumbUrl ?? media.url ?? undefined }))}
+          onClose={() => setGridSheetItems(null)}
+          onPick={(index) => setViewer({ list: gridSheetItems, index })}
         />
       )}
 
@@ -1343,7 +1555,7 @@ function ReplyPreviewBar({
 }) {
   const senderName =
     message.senderId === meId ? 'You' : (chat.members.find((mem) => mem.id === message.senderId)?.displayName ?? 'Unknown');
-  const preview = message.body ? message.body : message.media ? MEDIA_REPLY_LABEL[message.media.kind] : '';
+  const preview = message.body ? message.body : mediaReplyLabel(message);
   return (
     <div
       className="flex items-start gap-2 border-t border-border bg-surface-raised px-4 py-2"
@@ -1429,6 +1641,8 @@ function RunGroup({
   registerRef,
   onOpenActions,
   onOpenViewer,
+  onOpenAlbumViewer,
+  onOpenAlbumOverflow,
   onOpenEmbed,
   onOpenStack,
   onReply,
@@ -1455,6 +1669,11 @@ function RunGroup({
   registerRef: (id: string, el: HTMLDivElement | null) => void;
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
+  /** docs/MEDIA_ATTACHMENTS.md §5.3 — tap on one of an album's visible
+   *  mosaic tiles, `ChatView.openAlbumViewer`. */
+  onOpenAlbumViewer: (m: Message, index: number) => void;
+  /** The "+N" overflow tile, `ChatView.openAlbumOverflow`. */
+  onOpenAlbumOverflow: (m: Message) => void;
   /** docs/EMBEDS.md §4.4 — the embed analogue of `onOpenViewer`, wired the
    *  same way (`ChatView.openEmbed`). */
   onOpenEmbed: (m: Message) => void;
@@ -1519,6 +1738,8 @@ function RunGroup({
             registerRef={registerRef}
             onOpenActions={onOpenActions}
             onOpenViewer={onOpenViewer}
+            onOpenAlbumViewer={onOpenAlbumViewer}
+            onOpenAlbumOverflow={onOpenAlbumOverflow}
             onOpenEmbed={onOpenEmbed}
             onOpenStack={onOpenStack}
             onReply={onReply}
@@ -1584,6 +1805,8 @@ function MessageBlockRow({
   registerRef,
   onOpenActions,
   onOpenViewer,
+  onOpenAlbumViewer,
+  onOpenAlbumOverflow,
   onOpenEmbed,
   onOpenStack,
   onReply,
@@ -1618,6 +1841,8 @@ function MessageBlockRow({
   registerRef: (id: string, el: HTMLDivElement | null) => void;
   onOpenActions: (m: Message) => void;
   onOpenViewer: (m: Message) => void;
+  onOpenAlbumViewer: (m: Message, index: number) => void;
+  onOpenAlbumOverflow: (m: Message) => void;
   onOpenEmbed: (m: Message) => void;
   onOpenStack: (msgs: Message[]) => void;
   onReply: (m: Message) => void;
@@ -1655,21 +1880,44 @@ function MessageBlockRow({
   const selected = msgs.some((mm) => selectedIds.has(mm.id));
   const highlighted = msgs.some((mm) => mm.id === highlightId);
 
-  // Photos/videos and embed cards (including their processing/failed
-  // placeholders, which are already self-contained cards) render without a
-  // bubble behind them — docs/EMBEDS.md §4.4 "bare embed renders bubble-less
-  // like media".
-  const bare = !isStack && ((m.media !== null && m.media.kind !== 'voice') || m.embed !== null);
-  const showBubble = !isStack && (!bare || !!m.body);
-  const isVoice = m.media?.kind === 'voice';
+  // docs/MEDIA_ATTACHMENTS.md §5.3/D2 — a message now carries an ARRAY of
+  // media (0, 1, or 2+ = an album). `singleMedia` is set only for the
+  // exactly-one-item case; `isAlbum` for 2+.
+  const singleMedia = !isStack && m.media.length === 1 ? m.media[0]! : null;
+  const isAlbum = !isStack && m.media.length > 1;
+  const isVoice = singleMedia?.kind === 'voice';
+  const hasBody = !!m.body;
+  // Embeds keep their exact pre-existing behavior — always bare, with a
+  // separate caption bubble below when there's a body (docs/EMBEDS.md §4.4,
+  // out of scope for the media captioned-container redesign below).
+  const embedBare = !isStack && m.embed !== null;
+  // A single non-voice media item with NO caption stays bare, unchanged
+  // (§5.3 "uncaptioned single media: unchanged"). WITH a caption it becomes
+  // the new merged container (`captionedMedia`) instead — deliberately
+  // excluded from `bare` and from the classic text-bubble path below, since
+  // today's "bare media + a separate small caption bubble underneath" is
+  // exactly the "two objects" look D3 replaces.
+  const bareMedia = !isStack && singleMedia !== null && singleMedia.kind !== 'voice' && !hasBody;
+  const captionedMedia = !isStack && singleMedia !== null && singleMedia.kind !== 'voice' && hasBody;
+  const bare = bareMedia || embedBare;
+  // The classic text/voice bubble — not for albums (their own `AlbumCard`
+  // carries the caption strip) and not for captioned single media (its own
+  // merged container carries it); otherwise unchanged: voice always gets a
+  // bubble (even captionless), plain text always does, and an embed's
+  // caption still rides in a bubble underneath it exactly as before.
+  const showBubble = !isStack && !isAlbum && !captionedMedia && (!bare || hasBody);
   // A stack has no single addressable message to quote (see the same
-  // exclusion on the swipe/focus-menu reply affordances above).
+  // exclusion on the swipe/focus-menu reply affordances above). Bare media,
+  // an album, and captioned media all render their quote as its own
+  // standalone card above the media/card (no bubble to sit inline inside).
   const quote = !isStack && m.replyTo ? m.replyTo : null;
-  // Bare media (and stacks) already own their tap via `onOpenViewer`/
-  // `onOpenStack` (each does its own double-tap-to-react check) — the
-  // wrapper's `onClick` skips redoing it for those so one physical tap
-  // doesn't get read as two (see `ChatView.onBubbleClick`'s doc comment).
-  const hasMediaTap = isStack || bare;
+  const standaloneQuote = bare || isAlbum || captionedMedia;
+  // Bare media, an album, captioned media, and stacks all already own their
+  // tap via `onOpenViewer`/`openAlbumViewer`/`onOpenStack` (each does its own
+  // double-tap-to-react check) — the wrapper's `onClick` skips redoing it for
+  // those so one physical tap doesn't get read as two (see
+  // `ChatView.onBubbleClick`'s doc comment).
+  const hasMediaTap = isStack || bare || isAlbum || captionedMedia;
   // A stack has no single addressable message for a pill row either — same
   // exclusion as the quote above.
   const reactions = !isStack ? m.reactions : [];
@@ -1686,12 +1934,14 @@ function MessageBlockRow({
   // revised: below-the-bubble added vertical height; then row-level inline
   // centered against bubble+reaction-pills together instead of the bubble
   // alone; then bubble-centered, which the owner revised to bottom-hugging).
-  // Absolutely positioned *inside the bubble div* (which is `relative`),
+  // Absolutely positioned inside a `relative` wrapper (the bubble div for
+  // `showBubble`; a dedicated `relative` wrapper around `AlbumCard`/the
+  // captioned-media container otherwise, docs/MEDIA_ATTACHMENTS.md §5.3),
   // hanging out past its edge and hugging its bottom (`bottom-0.5` keeps it
   // just off the rounded corner) — adds no layout size anywhere, and rides
-  // along with swipe-to-reply translation for free. Only rendered on the `showBubble` branch: edited
-  // messages always have a non-empty body, so there is always a bubble (a
-  // bare-media caption bubble included) — and never a stack.
+  // along with swipe-to-reply translation for free. An edited message always
+  // has a non-empty body, so it always lands in exactly one of those three
+  // slots — and never a stack (stacks can't be edited, see the doc above).
   const editedLabel = !isStack && m.editedAt && (
     <span
       className={
@@ -1767,16 +2017,80 @@ function MessageBlockRow({
           transition: snappingBack ? `transform ${SWIPE_SNAP_BACK_MS}ms ease-out` : undefined,
         }}
       >
-        {/* Bare media's quote sits just above the media itself, as its own
-            small standalone card — there's no bubble to render it inside. */}
-        {quote && bare && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone onJump={onJumpToMessage} />}
+        {/* Bare media, an album, and captioned media all share this
+            standalone quote slot just above the card — none of them have a
+            bubble to render it inline inside (docs/MEDIA_ATTACHMENTS.md
+            §5.3). */}
+        {quote && standaloneQuote && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone onJump={onJumpToMessage} />}
         {isStack && <MediaStack messages={msgs} onOpen={() => onOpenStack(msgs)} />}
         {bare &&
           (m.embed ? (
             <EmbedCard message={m} onOpen={() => onOpenEmbed(m)} interactive={!selectionMode} />
           ) : (
-            <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
+            <MediaBubble media={singleMedia!} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
           ))}
+        {/* docs §5.3 — an album's mosaic card, with its own caption strip
+            appended when the message has a body. Wrapped in its own
+            `relative` div so `editedLabel` (computed once, below) can anchor
+            to this card's own bottom edge, same as every other slot. */}
+        {isAlbum && (
+          <div className="relative">
+            <AlbumCard
+              media={m.media}
+              body={m.body}
+              mine={mine}
+              isRunHead={isRunHead}
+              interactive={!selectionMode}
+              onOpenViewer={(index) => onOpenAlbumViewer(m, index)}
+              onCaptionClick={(e) => {
+                e.stopPropagation();
+                onClickBlock(e, msgs, false);
+              }}
+              onOpenOverflow={() => onOpenAlbumOverflow(m)}
+            />
+            {editedLabel}
+          </div>
+        )}
+        {/* docs §5.3 D3 — captioned single media: ONE container (media flush
+            to the top/sides, caption strip below in the bubble fill), not a
+            bare photo with a separate bubble hanging under it. Container
+            radius = the radius bare media uses today (`rounded-md`), with
+            the same run-position corner tightening the classic bubble uses
+            moved onto this container instead. */}
+        {captionedMedia && (
+          <div className="relative">
+            <div
+              className={
+                'overflow-hidden rounded-md ' +
+                (isRunHead ? '' : mine ? 'rounded-tr-[4px] ' : 'rounded-tl-[4px] ') +
+                (mine ? 'rounded-br-[4px]' : 'rounded-bl-[4px]')
+              }
+            >
+              {/* The image loses its own radius here (`rounded={false}`) —
+                  this container's `overflow-hidden` clips it instead, which
+                  is what makes the photo + caption read as one object. */}
+              <MediaBubble media={singleMedia!} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} rounded={false} />
+              {/* The caption strip is NOT a media tap — routing its clicks
+                  back through `onClickBlock` with `hasMediaTap: false` gives
+                  it the same double-tap-to-react and selection-toggle
+                  behavior a plain text bubble has. Without this the strip was
+                  inert, because the block wrapper skips its own tap handling
+                  whenever the block owns a media tap (owner report,
+                  2026-08-12). `stopPropagation` keeps the wrapper from also
+                  firing, which would toggle selection twice. */}
+              <div
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClickBlock(e, msgs, false);
+                }}
+                className={'px-3.5 py-2 text-sm ' + (mine ? 'bg-accent text-white' : 'bg-surface-sunken text-text-primary')}
+              >
+                <p className="whitespace-pre-wrap break-words">{m.body}</p>
+              </div>
+            </div>
+            {editedLabel}
+          </div>
+        )}
         {showBubble && (
           <div
             className={
@@ -1791,11 +2105,12 @@ function MessageBlockRow({
                 : 'bg-surface-sunken text-text-primary ')
             }
           >
-            {/* Not `bare`, so this is a text and/or voice bubble — the quote
-                renders inline, above whatever the bubble already holds. */}
-            {quote && !bare && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone={false} onJump={onJumpToMessage} />}
-            {!bare && m.media && (
-              <MediaBubble message={m} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
+            {/* Not standalone, so this is a text and/or voice bubble — the
+                quote renders inline, above whatever the bubble already
+                holds. */}
+            {quote && <QuotedBlock replyTo={quote} chat={chat} mine={mine} standalone={false} onJump={onJumpToMessage} />}
+            {isVoice && singleMedia && (
+              <MediaBubble media={singleMedia} onOpen={() => onOpenViewer(m)} interactive={!selectionMode} />
             )}
             {m.body && <p className="whitespace-pre-wrap break-words">{m.body}</p>}
             {editedLabel}

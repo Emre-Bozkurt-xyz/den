@@ -28,19 +28,36 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: CreateUploadRequest }>('/media/uploads', { preHandler: requireAuth }, async (req) => {
     const body = req.body ?? ({} as CreateUploadRequest);
     if (!body.chatId || typeof body.chatId !== 'string') throw validation('chatId required');
-    if (!MEDIA_KINDS.has(body.kind)) throw validation('kind must be image, video, or voice');
-    if (typeof body.mime !== 'string' || !body.mime) throw validation('mime required');
-    if (typeof body.sizeBytes !== 'number') throw validation('sizeBytes required');
+    if (!Array.isArray(body.items) || body.items.length === 0) throw validation('items must be a non-empty array');
+
+    const items = body.items.map((item, i) => {
+      if (!item || !MEDIA_KINDS.has(item.kind)) throw validation(`items[${i}].kind must be image, video, or voice`);
+      if (typeof item.mime !== 'string' || !item.mime) throw validation(`items[${i}].mime required`);
+      if (typeof item.sizeBytes !== 'number') throw validation(`items[${i}].sizeBytes required`);
+      return { kind: item.kind, mime: item.mime, sizeBytes: item.sizeBytes };
+    });
 
     const chatId = parseId(body.chatId);
     await assertMember(req.user!.id, chatId);
 
-    const { mediaId, presignedPutUrl } = await createUpload(chatId, req.user!.id, body.kind, body.mime, body.sizeBytes);
+    let replyToId: bigint | undefined;
+    if (typeof body.replyToId === 'string' && body.replyToId) {
+      try {
+        replyToId = BigInt(body.replyToId);
+      } catch {
+        throw validation('invalid replyToId');
+      }
+    }
+
+    const result = await createUpload(chatId, req.user!.id, items, body.caption, replyToId);
 
     const res: CreateUploadResponse = {
-      mediaId: mediaId.toString(),
-      presignedPutUrl,
-      requiredContentType: body.mime,
+      messageId: result.messageId.toString(),
+      items: result.items.map((it, i) => ({
+        mediaId: it.mediaId.toString(),
+        presignedPutUrl: it.presignedPutUrl,
+        requiredContentType: items[i]!.mime,
+      })),
     };
     return res;
   });
@@ -54,21 +71,22 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       if (chatId === null) throw validation('media not found');
       await assertMember(req.user!.id, chatId);
 
-      let replyToId: bigint | undefined;
-      if (typeof req.body?.replyToId === 'string' && req.body.replyToId) {
-        try {
-          replyToId = BigInt(req.body.replyToId);
-        } catch {
-          throw validation('invalid replyToId');
-        }
-      }
+      const tags = Array.isArray(req.body?.tags)
+        ? req.body.tags.filter((t): t is string => typeof t === 'string')
+        : undefined;
 
-      const result = await completeUpload(mediaId, req.user!.id, req.body?.body, replyToId);
+      const result = await completeUpload(mediaId, req.user!.id, tags);
 
-      // Placeholder fanout now (§7 step 4) — receivers see "processing", not silence.
+      // Placeholder fanout now (§7 step 4) — receivers see "processing", not
+      // silence. Fanout rule (docs/MEDIA_ATTACHMENTS.md §4.4): the first item
+      // of a message to complete emits message.new; every later one rides
+      // media.ready instead (its payload already carries the whole message).
+      // One push per album, not one per item — only the first completion
+      // notifies.
       if (app.io) {
-        app.io.to(chatRoom(result.chatId)).emit('ws', makeEnvelope(WsType.MessageNew, { message: result.message }));
-        void notifyChatMembers(app.io, result.chatId, result.message);
+        const wsType = result.isFirstComplete ? WsType.MessageNew : WsType.MediaReady;
+        app.io.to(chatRoom(result.chatId)).emit('ws', makeEnvelope(wsType, { message: result.message }));
+        if (result.isFirstComplete) void notifyChatMembers(app.io, result.chatId, result.message);
       }
 
       // Run the sharp/ffmpeg pipeline in the background; don't make the

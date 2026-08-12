@@ -101,13 +101,32 @@ function previewFor(message: Message, meId: string): ReactNode {
   const prefix = message.senderId === meId ? 'You: ' : '';
   const body = message.body?.trim();
   if (body) return `${prefix}${body}`;
-  if (message.media) {
-    const Icon = MEDIA_ICON[message.media.kind];
+  // docs/MEDIA_ATTACHMENTS.md §6 "ChatList / reply previews" — derived from
+  // `media.length`: 2+ is an album (D2), rendered as "📷 3 photos"/"🎥 2
+  // videos" rather than the single-item icon+label row below. A mixed-kind
+  // album (an image and a video staged together) still leans on the first
+  // item's kind for the icon/word, matching how `Message.kind` itself is
+  // derived (shared/src/api.ts) — good enough for a one-line preview.
+  if (message.media.length > 1) {
+    const kind = message.media[0]!.kind;
+    const Icon = MEDIA_ICON[kind];
+    const noun = kind === 'video' ? 'videos' : kind === 'voice' ? 'voice messages' : 'photos';
     return (
       <span className="inline-flex items-center gap-1">
         {prefix}
         <Icon size={13} className="shrink-0" />
-        {MEDIA_LABEL[message.media.kind]}
+        {message.media.length} {noun}
+      </span>
+    );
+  }
+  const media = message.media[0];
+  if (media) {
+    const Icon = MEDIA_ICON[media.kind];
+    return (
+      <span className="inline-flex items-center gap-1">
+        {prefix}
+        <Icon size={13} className="shrink-0" />
+        {MEDIA_LABEL[media.kind]}
       </span>
     );
   }

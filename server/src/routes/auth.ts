@@ -14,7 +14,13 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull, sql } from 'drizzle-orm';
-import { AuthLimits, type AuthResponse, type MeResponse } from '@den/shared';
+import {
+  AuthLimits,
+  DEFAULT_USER_SETTINGS,
+  type AuthResponse,
+  type MeResponse,
+  type UserSettings,
+} from '@den/shared';
 import type { LoginRequest, RegisterRequest, UpdateMeRequest } from '@den/shared';
 import { db } from '../db/index.js';
 import { inviteCodes, users } from '../db/schema.js';
@@ -22,6 +28,7 @@ import { hashPassword, verifyPassword } from '../auth/password.js';
 import { createSession, destroySession, requireAuth } from '../auth/session.js';
 import { toPublicUser } from '../mappers.js';
 import { AppError } from '../errors.js';
+import { validation } from '../errors.js';
 import { ErrorCode } from '@den/shared';
 
 const USERNAME_RE = new RegExp(AuthLimits.usernamePattern);
@@ -65,6 +72,75 @@ function checkDisplayName(raw: unknown, fallback: string): string {
     throw new AppError(400, ErrorCode.Validation, `display name too long (max ${AuthLimits.displayNameMax})`);
   }
   return name;
+}
+
+const SETTINGS_KEYS = Object.keys(DEFAULT_USER_SETTINGS) as (keyof UserSettings)[];
+
+/**
+ * Sanitize a value read back from `users.settings` (docs/MEDIA_ATTACHMENTS.md
+ * §4.2/§4.3, D11). Trusted-but-verify: only the server ever writes this
+ * column, but a row may predate a key (pre-migration `{}`, or a key added
+ * after the user's last PATCH) or — in principle — hold a shape from a buggy
+ * prior version. Any key that's missing or wrong-typed is silently dropped;
+ * callers fill the gap from `DEFAULT_USER_SETTINGS`. Never throws.
+ */
+function pickStoredSettings(stored: unknown): Partial<UserSettings> {
+  if (typeof stored !== 'object' || stored === null) return {};
+  const out: Partial<UserSettings> = {};
+  for (const key of SETTINGS_KEYS) {
+    const value = (stored as Record<string, unknown>)[key];
+    if (typeof value === typeof DEFAULT_USER_SETTINGS[key]) {
+      (out as Record<string, unknown>)[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * Sanitize a client-supplied `PATCH /me` settings patch. Unlike the stored
+ * side, client input that's wrong-typed is a validation error, not something
+ * to silently coerce — the client should know better. Unknown keys are
+ * dropped (never persisted, never an error) so an older/newer client can't
+ * accidentally write junk just by sending an extra field.
+ */
+function pickPatchSettings(patch: unknown): Partial<UserSettings> {
+  if (patch === undefined) return {};
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+    throw validation('settings must be an object');
+  }
+  const out: Partial<UserSettings> = {};
+  for (const key of SETTINGS_KEYS) {
+    if (!(key in (patch as Record<string, unknown>))) continue;
+    const value = (patch as Record<string, unknown>)[key];
+    const expected = typeof DEFAULT_USER_SETTINGS[key];
+    if (typeof value !== expected) {
+      throw validation(`settings.${key} must be a ${expected}`);
+    }
+    (out as Record<string, unknown>)[key] = value;
+  }
+  return out;
+}
+
+/**
+ * Merge a stored settings value with an optional client patch into a
+ * complete, valid `UserSettings` — the one function both GET and PATCH /me
+ * route through. `patch` omitted (or `{}`) returns the stored settings
+ * layered on the defaults, unchanged: `PATCH /me {settings:{}}` must not
+ * wipe anything, and an older client's request for an unrelated field must
+ * not clobber a newer preference it doesn't know about.
+ */
+export function mergeUserSettings(stored: unknown, patch: unknown): UserSettings {
+  return {
+    ...DEFAULT_USER_SETTINGS,
+    ...pickStoredSettings(stored),
+    ...pickPatchSettings(patch),
+  };
+}
+
+/** Re-reads just the settings column — `req.user` (session.ts) doesn't carry it. */
+async function fetchStoredSettings(userId: bigint): Promise<unknown> {
+  const rows = await db.select({ settings: users.settings }).from(users).where(eq(users.id, userId)).limit(1);
+  return rows[0]?.settings;
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -163,16 +239,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   // ── me ──────────────────────────────────────────────────────────────────
   app.get('/me', { preHandler: requireAuth }, async (req) => {
-    const res: MeResponse = toPublicUser(req.user!);
+    const me = req.user!;
+    const stored = await fetchStoredSettings(me.id);
+    const res: MeResponse = { ...toPublicUser(me), settings: mergeUserSettings(stored, undefined) };
     return res;
   });
 
-  // ── settings stub: update display name (avatar upload = Stage 3/R2) ─────────
+  // ── settings: display name + user preferences (avatar upload = Stage 3/R2) ──
   app.patch<{ Body: UpdateMeRequest }>('/me', { preHandler: requireAuth }, async (req) => {
     const me = req.user!;
     const displayName = checkDisplayName(req.body?.displayName, me.displayName);
-    await db.update(users).set({ displayName }).where(eq(users.id, me.id));
-    const res: MeResponse = toPublicUser({ ...me, displayName });
+    const stored = await fetchStoredSettings(me.id);
+    const settings = mergeUserSettings(stored, req.body?.settings);
+    await db.update(users).set({ displayName, settings }).where(eq(users.id, me.id));
+    const res: MeResponse = { ...toPublicUser({ ...me, displayName }), settings };
     return res;
   });
 }

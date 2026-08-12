@@ -14,6 +14,7 @@ import type {
   PublicUser,
   ReactionSummary,
   ReplyPreview,
+  Sensitivity,
 } from '@den/shared';
 
 export interface UserRow {
@@ -59,8 +60,16 @@ export interface MediaRow {
 }
 
 /** `urls` is null until status='ready' — the worker hasn't minted a
- *  processed asset yet, so there's nothing to presign a GET for. */
-export function toMediaInfo(m: MediaRow, urls: { url: string; thumbUrl: string | null } | null): MediaInfo {
+ *  processed asset yet, so there's nothing to presign a GET for.
+ *  `sensitivity` is DERIVED (docs/MEDIA_ATTACHMENTS.md §4.3) from this item's
+ *  attached tags via `sensitivityOf()` — callers batch-load tag names (never
+ *  a query per item) and pass the already-computed result in; this mapper
+ *  never touches the tags tables itself. */
+export function toMediaInfo(
+  m: MediaRow,
+  urls: { url: string; thumbUrl: string | null } | null,
+  sensitivity: Sensitivity | null,
+): MediaInfo {
   return {
     id: m.id.toString(),
     kind: m.kind as MediaKind,
@@ -73,12 +82,13 @@ export function toMediaInfo(m: MediaRow, urls: { url: string; thumbUrl: string |
     waveform: m.waveform,
     url: urls?.url ?? null,
     thumbUrl: urls?.thumbUrl ?? null,
+    sensitivity,
   };
 }
 
 export function toMessage(
   m: MessageRow,
-  media: MediaInfo | null = null,
+  media: MediaInfo[] = [],
   replyTo: ReplyPreview | null = null,
   reactions: ReactionSummary[] = [],
   embed: EmbedInfo | null = null,

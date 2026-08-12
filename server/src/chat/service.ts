@@ -56,7 +56,7 @@ async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
     embedInfoForMessages([row.id]),
     replyPreviewFor(row.replyToMessageId),
   ]);
-  return toMessage(row, mediaMap.get(row.id.toString()) ?? null, replyTo, [], embedMap.get(row.id.toString()) ?? null);
+  return toMessage(row, mediaMap.get(row.id.toString()) ?? [], replyTo, [], embedMap.get(row.id.toString()) ?? null);
 }
 
 async function unreadCountFor(chatId: bigint, viewerId: bigint, lastReadId: bigint | null): Promise<number> {
@@ -225,7 +225,7 @@ export async function getMessagesPage(
     messages: rows.map((r) =>
       toMessage(
         r,
-        mediaMap.get(r.id.toString()) ?? null,
+        mediaMap.get(r.id.toString()) ?? [],
         r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
         reactionsMap.get(r.id.toString()) ?? [],
         embedMap.get(r.id.toString()) ?? null,
@@ -317,7 +317,7 @@ export async function searchMessages(
     messages: page.map((r) =>
       toMessage(
         r,
-        mediaMap.get(r.id.toString()) ?? null,
+        mediaMap.get(r.id.toString()) ?? [],
         r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
         reactionsMap.get(r.id.toString()) ?? [],
         embedMap.get(r.id.toString()) ?? null,
@@ -431,7 +431,7 @@ export async function sendTextMessage(
     .returning();
   const row = inserted[0]!;
   const replyTo = await replyPreviewFor(row.replyToMessageId);
-  return toMessage(row, null, replyTo, []);
+  return toMessage(row, [], replyTo, []);
 }
 
 // ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/archive/MESSAGE_DELETE.md) ──
@@ -510,7 +510,7 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
   return restoredRows.map((r) =>
     toMessage(
       r,
-      mediaMap.get(r.id.toString()) ?? null,
+      mediaMap.get(r.id.toString()) ?? [],
       r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
       reactionsMap.get(r.id.toString()) ?? [],
       embedMap.get(r.id.toString()) ?? null,
@@ -542,7 +542,7 @@ async function messageDtoFor(row: typeof messages.$inferSelect, viewerId: bigint
   ]);
   return toMessage(
     row,
-    mediaMap.get(row.id.toString()) ?? null,
+    mediaMap.get(row.id.toString()) ?? [],
     replyTo,
     reactionsMap.get(row.id.toString()) ?? [],
     embedMap.get(row.id.toString()) ?? null,

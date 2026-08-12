@@ -1,8 +1,10 @@
-import { Layers, Play, X } from 'lucide-react';
-import type { Message } from '@den/shared';
+import { Eye, Layers, Play, X } from 'lucide-react';
+import type { MediaInfo, Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
+import { blurredIdsOf, useIsBlurred, useSensitivity } from '../lib/sensitivity';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
 import { PreviewImage } from './PreviewImage';
+import { SensitiveOverlay } from './SensitiveOverlay';
 
 /**
  * Fanned photo/video stack (docs/archive/UI_REVAMP.md UI-7).
@@ -18,6 +20,12 @@ import { PreviewImage } from './PreviewImage';
  * stack as a unit — entering multi-select expands it back into individual
  * bubbles, and long-pressing a stack selects all of its messages
  * individually. Nothing here can produce an action scoped to "the stack".
+ *
+ * A **fan is not an album** (docs/MEDIA_ATTACHMENTS.md D4): it's several
+ * separate sends grouped by proximity, each independently addressable — so,
+ * unlike an album's mosaic, revealing a blurred stack doesn't batch-reveal
+ * its siblings. The top card reveals just itself; the grid sheet's explicit
+ * "Reveal all" is the deliberate opt-in for the whole pile (§5.4).
  */
 
 /** Rotation/offset of the cards *behind* the top one, back to front. Kept
@@ -30,12 +38,16 @@ const BACK_CARDS = [
 ] as const;
 
 function thumbOf(m: Message): string | undefined {
-  return m.media?.thumbUrl ?? m.media?.url ?? undefined;
+  const media = m.media[0];
+  return media?.thumbUrl ?? media?.url ?? undefined;
 }
 
 export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: () => void }) {
+  const { reveal } = useSensitivity();
   const [top, ...rest] = messages;
-  if (!top) return null;
+  const topMedia = top?.media[0] ?? null;
+  const topBlurred = useIsBlurred(topMedia ?? { id: '', sensitivity: null });
+  if (!top || !topMedia) return null;
   // Back cards are drawn from the *end* of the stack so the card immediately
   // behind the top one is the next item, not the last.
   const backs = rest.slice(0, BACK_CARDS.length);
@@ -63,8 +75,18 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
         />
       ))}
       {/* In-flow top card establishes the pile's box — reserve it pre-load so
-          the open-chat scroll-to-bottom isn't measuring a collapsed stack. */}
-      <PreviewImage media={top.media} src={thumbOf(top)} alt="" className="relative z-10 max-h-72 max-w-full rounded-md object-cover" />
+          the open-chat scroll-to-bottom isn't measuring a collapsed stack.
+          Blur is scoped to this one item only (a fan's items are
+          independently addressable, D4) — tapping the reveal pill reveals
+          just the top card, not the whole pile. */}
+      <SensitiveOverlay
+        sensitivity={topMedia.sensitivity}
+        blurred={topBlurred}
+        onReveal={() => reveal(topMedia.id)}
+        className="relative z-10"
+      >
+        <PreviewImage media={top.media[0]} src={thumbOf(top)} alt="" className="max-h-72 max-w-full rounded-md object-cover" />
+      </SensitiveOverlay>
       <span className="absolute right-2 top-2 z-20 flex items-center gap-1 rounded-pill bg-black/60 px-2 py-0.5 text-[11px] font-semibold text-white">
         <Layers size={12} />
         {messages.length}
@@ -73,27 +95,70 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
   );
 }
 
-/** Grid sheet listing every item in a tapped stack. Deliberately a plain
- *  square grid (not the gallery's masonry) — this is a handful of items from
- *  one moment, and uniform tiles make "which one do I want" the only
- *  question on screen. */
+/** One tile in the grid sheet below — its own `SensitiveOverlay` (blur is
+ *  per item, docs §5.4/§5.8) so a clean tile in the pile is never hidden
+ *  because a sibling is marked. */
+function GridTile({ media, thumbUrl, onClick }: { media: MediaInfo; thumbUrl: string | undefined; onClick: () => void }) {
+  const { reveal } = useSensitivity();
+  const blurred = useIsBlurred(media);
+  return (
+    <button
+      onClick={onClick}
+      onContextMenu={suppressTouchContextMenu}
+      className="media-preview relative aspect-square overflow-hidden rounded-sm bg-white/5"
+      style={{ touchAction: 'manipulation' }}
+    >
+      <SensitiveOverlay sensitivity={media.sensitivity} blurred={blurred} onReveal={() => reveal(media.id)} compact className="h-full w-full">
+        <img src={thumbUrl} alt="" className="h-full w-full object-cover" />
+      </SensitiveOverlay>
+      {media.kind === 'video' && (
+        <span className="pointer-events-none absolute inset-0 grid place-items-center">
+          <span className="grid h-9 w-9 place-items-center rounded-pill bg-black/50 text-white">
+            <Play size={16} fill="currentColor" />
+          </span>
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** Grid sheet listing every item passed to it. Deliberately a plain square
+ *  grid (not the gallery's masonry) — this is a handful of items from one
+ *  moment, and uniform tiles make "which one do I want" the only question on
+ *  screen. Takes `MediaInfo[]` directly (not `Message[]`) as of
+ *  docs/MEDIA_ATTACHMENTS.md §5.3/§5.7 — a legacy stack's caller derives one
+ *  `MediaInfo` per message (`thumbOf`/`m.media[0]`), while `AlbumCard`'s "+N"
+ *  overflow tile hands this the same message's `media` array directly (all N
+ *  items already belong to one message, so there's no per-message thumbUrl
+ *  lookup to do). */
 export function MediaGridSheet({
-  messages,
+  items,
   onPick,
   onClose,
 }: {
-  messages: Message[];
+  items: { media: MediaInfo; thumbUrl: string | undefined }[];
   onPick: (index: number) => void;
   onClose: () => void;
 }) {
+  const { isRevealed, reveal } = useSensitivity();
   // System back gesture / browser back closes the sheet (matches the X and the
   // backdrop tap), instead of unwinding the chat → chat list. Opening the
   // viewer from a tile registers the viewer's own handler on top (LIFO), so
   // back there closes the viewer first, then this sheet, then leaves the chat.
-  useBackHandler(true, onClose);
+  useBackHandler(true, onClose, { escape: true });
+
+  // docs §5.4 — legacy fans don't batch-reveal on a single tap (each item is
+  // an independent send, D4); this explicit "Reveal all" is the deliberate
+  // opt-in for the whole pile instead. An album opened here (the "+N"
+  // overflow tile) gets the same affordance for free.
+  const blurredIds = blurredIdsOf(
+    items.map((i) => i.media),
+    isRevealed,
+  );
+
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/90"
+      className="fixed inset-0 z-50 flex flex-col bg-black/90 md:items-center md:justify-center"
       onClick={onClose}
       style={{
         paddingTop: 'env(safe-area-inset-top)',
@@ -101,34 +166,40 @@ export function MediaGridSheet({
         touchAction: 'manipulation',
       }}
     >
-      <div className="flex items-center justify-between px-4 py-3 text-white">
-        <span className="text-sm font-semibold">{messages.length} items</span>
-        <button onClick={onClose} aria-label="Close" style={{ touchAction: 'manipulation' }}>
-          <X size={22} />
-        </button>
-      </div>
+      {/* Full-bleed on a phone; a bounded centered panel on desktop, where
+          filling a whole monitor with a handful of thumbnails "feels too
+          much" (owner, 2026-08-12). `md:h-auto` lets the panel shrink to its
+          content for small albums instead of always being 80vh tall. */}
       <div
-        className="grid flex-1 auto-rows-min grid-cols-3 gap-1 overflow-y-auto p-1"
+        className="flex min-h-0 flex-1 flex-col md:h-auto md:max-h-[80vh] md:w-[min(90vw,880px)] md:flex-none md:overflow-hidden md:rounded-lg md:bg-neutral-900 md:shadow-strong"
         onClick={(e) => e.stopPropagation()}
       >
-        {messages.map((m, i) => (
-          <button
-            key={m.id}
-            onClick={() => onPick(i)}
-            onContextMenu={suppressTouchContextMenu}
-            className="media-preview relative aspect-square overflow-hidden rounded-sm bg-white/5"
-            style={{ touchAction: 'manipulation' }}
-          >
-            <img src={thumbOf(m)} alt="" className="h-full w-full object-cover" />
-            {m.media?.kind === 'video' && (
-              <span className="absolute inset-0 grid place-items-center">
-                <span className="grid h-9 w-9 place-items-center rounded-pill bg-black/50 text-white">
-                  <Play size={16} fill="currentColor" />
-                </span>
-              </span>
+        <div className="flex items-center justify-between px-4 py-3 text-white">
+          <span className="text-sm font-semibold">{items.length} items</span>
+          <div className="flex items-center gap-3">
+            {blurredIds.length > 0 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  reveal(blurredIds);
+                }}
+                className="flex items-center gap-1.5 rounded-pill bg-white/10 px-2.5 py-1 text-xs font-semibold"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Eye size={13} />
+                Reveal all ({blurredIds.length})
+              </button>
             )}
-          </button>
-        ))}
+            <button onClick={onClose} aria-label="Close" style={{ touchAction: 'manipulation' }}>
+              <X size={22} />
+            </button>
+          </div>
+        </div>
+        <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-3 gap-1 overflow-y-auto p-1">
+          {items.map((item, i) => (
+            <GridTile key={item.media.id} media={item.media} thumbUrl={item.thumbUrl} onClick={() => onPick(i)} />
+          ))}
+        </div>
       </div>
     </div>
   );

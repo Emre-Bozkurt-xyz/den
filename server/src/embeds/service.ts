@@ -123,7 +123,7 @@ export async function createEmbedMessage(
   const replyTo = await replyPreviewFor(messageRow.replyToMessageId);
 
   return {
-    message: toMessage(messageRow, null, replyTo, [], toEmbedInfo(row, null)),
+    message: toMessage(messageRow, [], replyTo, [], toEmbedInfo(row, null)),
     chatId: row.chatId,
     embedId,
   };
@@ -178,5 +178,5 @@ export async function finalizeEmbed(embedId: bigint): Promise<MessageDto> {
     replyPreviewFor(messageRow.replyToMessageId),
     updated.thumbKey ? presignGet(updated.thumbKey) : Promise.resolve(null),
   ]);
-  return toMessage(messageRow, null, replyTo, [], toEmbedInfo(updated, thumbUrl));
+  return toMessage(messageRow, [], replyTo, [], toEmbedInfo(updated, thumbUrl));
 }

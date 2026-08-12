@@ -4,10 +4,10 @@
  * client never needs a second fetch to render a reply strip — even if the
  * referenced message is off-page or was since soft-deleted.
  */
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type { MessageKind, ReplyPreview } from '@den/shared';
 import { db } from '../db/index.js';
-import { messages } from '../db/schema.js';
+import { media, messages } from '../db/schema.js';
 import { validation } from '../errors.js';
 
 const MEDIA_LABEL: Record<MessageKind, string> = {
@@ -19,27 +19,51 @@ const MEDIA_LABEL: Record<MessageKind, string> = {
   embed: '🔗 Link', // docs/EMBEDS.md — the reply-preview snippet for an embed message with no caption
 };
 
+/** Album wording (docs/MEDIA_ATTACHMENTS.md §6: "ChatList / reply previews:
+ *  derived from media.length → '📷 3 photos'"). Only image/video can be
+ *  staged into an album (voice is never staged, §6), so those are the only
+ *  kinds with a plural form; anything else falls back to `MEDIA_LABEL`. */
+const MEDIA_LABEL_ALBUM: Partial<Record<MessageKind, (n: number) => string>> = {
+  image: (n) => `📷 ${n} photos`,
+  video: (n) => `🎥 ${n} videos`,
+};
+
+/** Single media keeps today's exact wording; 2+ switches to the album form. */
+function mediaLabel(kind: MessageKind, mediaCount: number): string {
+  if (mediaCount > 1) return MEDIA_LABEL_ALBUM[kind]?.(mediaCount) ?? MEDIA_LABEL[kind];
+  return MEDIA_LABEL[kind];
+}
+
 /** Batch-resolve reply previews for a page of messages, keyed by the
  *  REFERENCED message id (chat/service.ts, media/service.ts). */
 export async function replyPreviewsForMessages(replyToIds: bigint[]): Promise<Map<string, ReplyPreview>> {
   if (replyToIds.length === 0) return new Map();
 
-  const rows = await db
-    .select({
-      id: messages.id,
-      senderId: messages.senderId,
-      kind: messages.kind,
-      body: messages.body,
-      deletedAt: messages.deletedAt,
-    })
-    .from(messages)
-    .where(inArray(messages.id, replyToIds));
+  const [rows, mediaCountRows] = await Promise.all([
+    db
+      .select({
+        id: messages.id,
+        senderId: messages.senderId,
+        kind: messages.kind,
+        body: messages.body,
+        deletedAt: messages.deletedAt,
+      })
+      .from(messages)
+      .where(inArray(messages.id, replyToIds)),
+    db
+      .select({ messageId: media.messageId, count: sql<number>`count(*)::int` })
+      .from(media)
+      .where(inArray(media.messageId, replyToIds))
+      .groupBy(media.messageId),
+  ]);
+  const mediaCountByMessage = new Map(mediaCountRows.map((r) => [r.messageId.toString(), r.count]));
 
   const map = new Map<string, ReplyPreview>();
   for (const row of rows) {
     const deleted = row.deletedAt !== null;
     const kind = row.kind as MessageKind;
-    const preview = deleted ? '' : (row.body?.slice(0, 120) ?? '') || MEDIA_LABEL[kind];
+    const count = mediaCountByMessage.get(row.id.toString()) ?? 0;
+    const preview = deleted ? '' : (row.body?.slice(0, 120) ?? '') || mediaLabel(kind, count);
     map.set(row.id.toString(), {
       id: row.id.toString(),
       senderId: row.senderId.toString(),

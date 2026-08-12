@@ -1,17 +1,21 @@
 /**
- * Media business logic (BACKBONE §5/§6/§7). Mirrors chat/service.ts's split:
- * DB access lives here; the routes/WS layer owns realtime side effects.
+ * Media business logic (BACKBONE §5/§6/§7; albums/captions/sensitivity per
+ * docs/MEDIA_ATTACHMENTS.md §4.4). Mirrors chat/service.ts's split: DB access
+ * lives here; the routes/WS layer owns realtime side effects.
  *
- * Upload flow (§7):
- *   1. createUpload  — mints a `messages` row (kind=image|video|voice,
- *      body=null) + a `media` row (status='processing') in one transaction,
- *      then presigns a PUT for the client. The message row must exist first
- *      because `media.message_id` is NOT NULL (§5 DDL) — but nothing is
+ * Upload flow (§7, extended by MEDIA_ATTACHMENTS §4.4):
+ *   1. createUpload  — mints ONE `messages` row (kind = the first item's
+ *      kind, body = caption) + N `media` rows (status='processing') in one
+ *      transaction, then presigns a PUT per item. The message row must exist
+ *      first because `media.message_id` is NOT NULL (§5 DDL) — but nothing is
  *      broadcast over WS yet, so other members never see it mid-upload.
- *   2. Client PUTs bytes directly to R2 (never through this server).
+ *   2. Client PUTs bytes directly to R2 (never through this server), one item
+ *      at a time.
  *   3. completeUpload — HEAD-verifies the object landed (never trust the
- *      client's claimed mime/size), optionally sets a caption, and returns
- *      the message with a 'processing' placeholder for the route to fan out.
+ *      client's claimed mime/size), attaches any tags BEFORE fanout (D7),
+ *      and returns the whole message (with a 'processing' placeholder for
+ *      this item) for the route to fan out — `message.new` for the first
+ *      item of the message to complete, `media.ready` for every later one.
  *   4. finalizeProcessing — runs the sharp/ffmpeg pipeline (media/process.ts)
  *      and flips the row to 'ready' (or 'failed'); the route fans out
  *      `media.ready` afterward.
@@ -20,6 +24,8 @@ import { eq, inArray } from 'drizzle-orm';
 import { fileTypeFromBuffer } from 'file-type';
 import {
   ChatLimits,
+  MediaLimits,
+  sensitivityOf,
   type MediaInfo,
   type MediaKind,
   type Message as MessageDto,
@@ -32,6 +38,7 @@ import { getObjectHead, headObject, mediaKey, maxBytesFor, presignGet, presignPu
 import { processMedia } from './process.js';
 import { reactionsForMessages } from '../chat/reactions.js';
 import { assertReplyTarget, replyPreviewFor } from '../chat/replies.js';
+import { addTag, tagsForMediaIds } from './tags.js';
 
 /** Containers MediaRecorder emits (webm, mp4) don't always let magic-number
  *  sniffing distinguish "video with no video track" from "actual video" —
@@ -87,69 +94,197 @@ async function mediaRowById(mediaId: bigint): Promise<MediaJoinRow | null> {
 
 /** Batch-fetch + presign media for a page of messages (chat/service.ts).
  *  Presigning is a local HMAC computation, not a network call, so doing it
- *  per-row for a page of ~50 messages is cheap. */
-export async function mediaInfoForMessages(messageIds: bigint[]): Promise<Map<string, MediaInfo>> {
+ *  per-row for a page of ~50 messages is cheap.
+ *
+ *  Returns EVERY media row per message (docs/MEDIA_ATTACHMENTS.md §4.1: an
+ *  album is N media rows on one message), ordered by media id ASC — the
+ *  contract `Message.media`'s doc comment promises. `Promise.all` resolves
+ *  its results in the same order as the input array regardless of which
+ *  presign call finishes first, so building `infos` first and only THEN
+ *  grouping by message id (rather than pushing into the map from inside the
+ *  async callback) is what keeps that ordering intact. */
+export async function mediaInfoForMessages(messageIds: bigint[]): Promise<Map<string, MediaInfo[]>> {
   if (messageIds.length === 0) return new Map();
   const rows = await db
     .select(mediaOnlyShape)
     .from(media)
-    .where(inArray(media.messageId, messageIds));
+    .where(inArray(media.messageId, messageIds))
+    .orderBy(media.id);
 
-  const out = new Map<string, MediaInfo>();
-  await Promise.all(
+  const tagMap = await tagsForMediaIds(rows.map((r) => r.id));
+
+  const infos = await Promise.all(
     rows.map(async (row) => {
       const urls =
         row.status === 'ready'
           ? { url: await presignGet(row.r2Key), thumbUrl: row.thumbKey ? await presignGet(row.thumbKey) : null }
           : null;
-      out.set(row.messageId.toString(), toMediaInfo(row, urls));
+      const tagNames = (tagMap.get(row.id.toString()) ?? []).map((t) => t.name);
+      return { messageId: row.messageId, info: toMediaInfo(row, urls, sensitivityOf(tagNames)) };
     }),
   );
+
+  const out = new Map<string, MediaInfo[]>();
+  for (const { messageId, info } of infos) {
+    const list = out.get(messageId.toString()) ?? [];
+    list.push(info);
+    out.set(messageId.toString(), list);
+  }
   return out;
 }
 
-export interface CreateUploadResult {
+// ─── album mint (docs/MEDIA_ATTACHMENTS.md §4.4) ────────────────────────────
+
+export interface CreateUploadItemInput {
+  kind: MediaKind;
+  mime: string;
+  sizeBytes: number;
+}
+
+export interface CreateUploadItemResult {
   mediaId: bigint;
   presignedPutUrl: string;
 }
 
+export interface CreateUploadResult {
+  messageId: bigint;
+  items: CreateUploadItemResult[];
+}
+
+/** POST /media/uploads. Mints ONE message row + N media rows (one per item)
+ *  in a single transaction, then returns a presigned PUT per item, same
+ *  order as `items`. All-or-nothing: every item is validated BEFORE the
+ *  transaction opens, so a bad item anywhere in the batch means nothing is
+ *  written — never a partial mint. `caption`/`replyToId` belong to the
+ *  message (D2: an album is one message), so they're validated and applied
+ *  here rather than at complete-time. */
 export async function createUpload(
   chatId: bigint,
   uploaderId: bigint,
-  kind: MediaKind,
-  mime: string,
-  sizeBytes: number,
+  items: CreateUploadItemInput[],
+  caption: string | undefined,
+  replyToId: bigint | undefined,
 ): Promise<CreateUploadResult> {
-  if (!mime.trim()) throw validation('mime is required');
-  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) throw validation('sizeBytes must be positive');
-  if (sizeBytes > maxBytesFor(kind)) {
-    throw validation(`${kind} uploads are limited to ${Math.floor(maxBytesFor(kind) / (1024 * 1024))}MB`);
+  if (items.length === 0) throw validation('at least one item is required');
+  if (items.length > MediaLimits.maxAttachments) {
+    throw validation(`albums are limited to ${MediaLimits.maxAttachments} items`);
+  }
+  for (const item of items) {
+    if (!item.mime || !item.mime.trim()) throw validation('mime is required for every item');
+    if (!Number.isFinite(item.sizeBytes) || item.sizeBytes <= 0) {
+      throw validation('sizeBytes must be positive for every item');
+    }
+    if (item.sizeBytes > maxBytesFor(item.kind)) {
+      throw validation(`${item.kind} uploads are limited to ${Math.floor(maxBytesFor(item.kind) / (1024 * 1024))}MB`);
+    }
   }
 
-  const mediaId = await db.transaction(async (tx) => {
-    const msgInserted = await tx.insert(messages).values({ chatId, senderId: uploaderId, kind, body: null }).returning();
-    const messageRow = msgInserted[0]!;
-    const mediaInserted = await tx
-      .insert(media)
-      .values({
-        messageId: messageRow.id,
-        uploaderId,
-        kind,
-        r2Key: '', // filled in below once the media id (part of the key) exists
-        mime,
-        sizeBytes: BigInt(sizeBytes),
-        status: 'processing',
-      })
+  let trimmedCaption: string | null = null;
+  if (caption?.trim()) {
+    trimmedCaption = caption.trim();
+    if (trimmedCaption.length > ChatLimits.messageBodyMax) {
+      throw validation(`message too long (max ${ChatLimits.messageBodyMax} characters)`);
+    }
+  }
+  if (replyToId !== undefined) await assertReplyTarget(chatId, replyToId);
+
+  const firstKind = items[0]!.kind;
+
+  const { messageId, mediaIds } = await db.transaction(async (tx) => {
+    const msgInserted = await tx
+      .insert(messages)
+      .values({ chatId, senderId: uploaderId, kind: firstKind, body: trimmedCaption, replyToMessageId: replyToId ?? null })
       .returning();
-    const mediaRow = mediaInserted[0]!;
-    const key = mediaKey(chatId, mediaRow.id, 'orig');
-    await tx.update(media).set({ r2Key: key }).where(eq(media.id, mediaRow.id));
-    return mediaRow.id;
+    const messageRow = msgInserted[0]!;
+
+    const ids: bigint[] = [];
+    for (const item of items) {
+      const mediaInserted = await tx
+        .insert(media)
+        .values({
+          messageId: messageRow.id,
+          uploaderId,
+          kind: item.kind,
+          r2Key: '', // filled in below once the media id (part of the key) exists
+          mime: item.mime,
+          sizeBytes: BigInt(item.sizeBytes),
+          status: 'processing',
+        })
+        .returning();
+      const mediaRow = mediaInserted[0]!;
+      const key = mediaKey(chatId, mediaRow.id, 'orig');
+      await tx.update(media).set({ r2Key: key }).where(eq(media.id, mediaRow.id));
+      ids.push(mediaRow.id);
+    }
+    return { messageId: messageRow.id, mediaIds: ids };
   });
 
-  const key = mediaKey(chatId, mediaId, 'orig');
-  const presignedPutUrl = await presignPut(key, mime);
-  return { mediaId, presignedPutUrl };
+  const resultItems: CreateUploadItemResult[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const mediaId = mediaIds[i]!;
+    const key = mediaKey(chatId, mediaId, 'orig');
+    const presignedPutUrl = await presignPut(key, items[i]!.mime);
+    resultItems.push({ mediaId, presignedPutUrl });
+  }
+
+  return { messageId, items: resultItems };
+}
+
+// ─── per-item complete + album fanout race (docs/MEDIA_ATTACHMENTS.md §4.4) ─
+
+/**
+ * Which item "wins" `message.new` for a message with 2+ media (all others
+ * ride `media.ready`, whose payload already carries the whole `Message` — see
+ * docs/MEDIA_ATTACHMENTS.md §4.4). "First" can't be read off `media.status`
+ * alone: every item sits at 'processing' from mint until ITS OWN
+ * finalizeProcessing flips it to ready/failed, so two siblings racing through
+ * completeUpload while both are still 'processing' look identical by status.
+ *
+ * There's no room to add a persisted "verified" state to close that gap:
+ * `media_status_check` only allows processing/ready/failed, and widening it
+ * is a migration — out of scope here, and db/schema.ts is owned by a
+ * different change landing in parallel this session. Instead:
+ *
+ *  - If a sibling media row has ALREADY left 'processing' (ready/failed),
+ *    this call is definitely not first — that's a real DB fact, checked
+ *    every time, and is what makes a post-restart completeUpload call (see
+ *    below) resolve correctly.
+ *  - Otherwise, a process-local claim breaks the tie. Den runs a single API
+ *    process (deploy/docker-compose.yml has exactly one `api` service), so
+ *    this is airtight for the actual deployment: the check-then-set below has
+ *    no `await` in it, so it can never interleave with another call's
+ *    check-then-set, and whichever call reaches it first wins.
+ *
+ * The one gap this doesn't close: a process restart between "item A claimed
+ * first" and "item A's media row leaves 'processing'" would let a later
+ * caller re-claim first for the same message (in-memory claims don't survive
+ * a restart). Accepted — it needs an actual mid-album-upload restart to hit,
+ * and the failure mode is a harmless duplicate `message.new` for a message
+ * that already exists, not data loss.
+ */
+const firstCompleteClaimed = new Set<string>();
+
+async function claimFirstComplete(messageId: bigint, mediaId: bigint): Promise<boolean> {
+  const siblings = await db.select({ id: media.id, status: media.status }).from(media).where(eq(media.messageId, messageId));
+  const aSiblingAlreadyFinished = siblings.some((s) => s.id !== mediaId && s.status !== 'processing');
+  if (aSiblingAlreadyFinished) return false;
+
+  const key = messageId.toString();
+  if (firstCompleteClaimed.has(key)) return false; // no `await` since the check above — atomic w.r.t. other calls
+  firstCompleteClaimed.add(key);
+  return true;
+}
+
+/** Drops the claim-bookkeeping for a message once every one of its media
+ *  items has left 'processing' — after that point `claimFirstComplete`'s DB
+ *  check alone is authoritative for any further (e.g. retried) call, so
+ *  there's nothing left for the in-memory claim to protect. Keeps the Set
+ *  from growing unboundedly over the server's lifetime. */
+async function pruneFirstCompleteClaimIfDone(messageId: bigint): Promise<void> {
+  const siblings = await db.select({ status: media.status }).from(media).where(eq(media.messageId, messageId));
+  if (siblings.length > 0 && siblings.every((s) => s.status !== 'processing')) {
+    firstCompleteClaimed.delete(messageId.toString());
+  }
 }
 
 export interface CompleteUploadResult {
@@ -157,24 +292,23 @@ export interface CompleteUploadResult {
   chatId: bigint;
   mediaId: bigint;
   mediaKind: MediaKind;
+  /** True iff the route should fan out `message.new` for this completion;
+   *  false means `media.ready` (see the claimFirstComplete doc comment). */
+  isFirstComplete: boolean;
 }
 
-/** Verifies the object landed, applies an optional caption, and returns the
- *  message with a 'processing' media placeholder. Does not run the
- *  sharp/ffmpeg pipeline itself — call finalizeProcessing after fanning out
- *  the placeholder so members see it immediately (§7 step 4/5).
+/** Verifies the object landed, attaches any tags, and returns the whole
+ *  message (every sibling media item included) for the route to fan out.
+ *  Does not run the sharp/ffmpeg pipeline itself — call finalizeProcessing
+ *  after fanning out the placeholder so members see it immediately (§7).
  *
- *  `replyToId` (post-MVP): the message row is created up front in
- *  `createUpload` (before the client PUTs bytes), so a reply can only be
- *  attached here, at complete-time, once the client actually has one to set
- *  (CompleteUploadRequest.replyToId) — set via an UPDATE after validating it
- *  references a non-deleted message in the same chat. */
-export async function completeUpload(
-  mediaId: bigint,
-  userId: bigint,
-  caption: string | undefined,
-  replyToId?: bigint,
-): Promise<CompleteUploadResult> {
+ *  Tags are attached BEFORE the fanout decision below — this ordering is
+ *  load-bearing and NOT an optimization target (docs/MEDIA_ATTACHMENTS.md
+ *  D7): tagging over separate calls after the message went out would show
+ *  every other member an unblurred `nsfw` image for a few hundred ms, which
+ *  is the one thing this feature exists to prevent. Do not reorder this to
+ *  "attach tags after fanout, it's faster" — it isn't a valid trade. */
+export async function completeUpload(mediaId: bigint, userId: bigint, tags: string[] | undefined): Promise<CompleteUploadResult> {
   const row = await mediaRowById(mediaId);
   if (!row) throw notFound('media not found');
   if (row.uploaderId !== userId) throw notFound('media not found'); // don't leak existence to non-uploaders
@@ -204,24 +338,28 @@ export async function completeUpload(
     }
   }
 
-  if (caption?.trim()) {
-    const trimmed = caption.trim().slice(0, ChatLimits.messageBodyMax);
-    await db.update(messages).set({ body: trimmed }).where(eq(messages.id, row.messageId));
+  // D7: tags attach here, before the fanout decision below — see this
+  // function's doc comment. addTag is idempotent (onConflictDoNothing), so
+  // re-attaching on a retried complete-call is harmless.
+  if (tags && tags.length > 0) {
+    for (const name of tags) {
+      await addTag(row.chatId, mediaId, userId, name);
+    }
   }
 
-  if (replyToId !== undefined) {
-    await assertReplyTarget(row.chatId, replyToId);
-    await db.update(messages).set({ replyToMessageId: replyToId }).where(eq(messages.id, row.messageId));
-  }
+  const isFirstComplete = await claimFirstComplete(row.messageId, row.id);
 
   const messageRow = await messageById(row.messageId);
-  const mediaInfo = toMediaInfo(row, null); // still 'processing' — no URLs yet
-  const replyTo = await replyPreviewFor(messageRow.replyToMessageId);
+  const [replyTo, mediaMap] = await Promise.all([
+    replyPreviewFor(messageRow.replyToMessageId),
+    mediaInfoForMessages([row.messageId]),
+  ]);
   return {
-    message: toMessage(messageRow, mediaInfo, replyTo, []), // brand-new message: no reactions yet
+    message: toMessage(messageRow, mediaMap.get(row.messageId.toString()) ?? [], replyTo, []), // brand-new message: no reactions yet
     chatId: row.chatId,
     mediaId: row.id,
     mediaKind: row.kind as MediaKind,
+    isFirstComplete,
   };
 }
 
@@ -233,8 +371,8 @@ async function messageById(id: bigint): Promise<MessageRow> {
 }
 
 /** Runs the processing pipeline and flips the row to ready/failed. Returns
- *  the updated message DTO (with fresh presigned URLs) for the caller to
- *  broadcast as `media.ready`. */
+ *  the updated message DTO (with every sibling media item, fresh presigned
+ *  URLs included) for the caller to broadcast as `media.ready`. */
 export async function finalizeProcessing(mediaId: bigint): Promise<MessageDto> {
   const row = await mediaRowById(mediaId);
   if (!row) throw notFound('media not found');
@@ -263,25 +401,25 @@ export async function finalizeProcessing(mediaId: bigint): Promise<MessageDto> {
     await db.update(media).set({ status: 'failed' }).where(eq(media.id, mediaId));
   }
 
-  const updated = await mediaRowById(mediaId);
   const messageRow = await messageById(row.messageId);
-  if (!updated) throw notFound('media not found');
-
-  const urls =
-    updated.status === 'ready'
-      ? { url: await presignGet(updated.r2Key), thumbUrl: updated.thumbKey ? await presignGet(updated.thumbKey) : null }
-      : null;
 
   // Room broadcast, not per-viewer — there's no single "viewer" for `mine`
   // here, so it resolves as false for everyone; each client's own
   // reaction.added/removed frames (ws.ts) keep `mine` accurate afterward.
   // A reaction landing during the processing window is a rare race, not a
   // reason to skip resolving replyTo for every media.ready frame.
-  const [replyTo, reactionsMap] = await Promise.all([
+  const [replyTo, reactionsMap, mediaMap] = await Promise.all([
     replyPreviewFor(messageRow.replyToMessageId),
     reactionsForMessages([messageRow.id], 0n),
+    mediaInfoForMessages([row.messageId]),
   ]);
-  return toMessage(messageRow, toMediaInfo(updated, urls), replyTo, reactionsMap.get(messageRow.id.toString()) ?? []);
+  void pruneFirstCompleteClaimIfDone(row.messageId);
+  return toMessage(
+    messageRow,
+    mediaMap.get(row.messageId.toString()) ?? [],
+    replyTo,
+    reactionsMap.get(messageRow.id.toString()) ?? [],
+  );
 }
 
 /** Caller must assertMember on the chat before calling this (chatIdForMedia

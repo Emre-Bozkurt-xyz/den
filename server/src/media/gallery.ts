@@ -11,7 +11,15 @@
  * ("raw SQL allowed only for the gallery tag query... keep the SQL visible").
  */
 import { and, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
-import { parseTagQuery, type GalleryAlbum, type GalleryItem, type GalleryKindFilter, type GalleryResponse } from '@den/shared';
+import {
+  parseTagQuery,
+  sensitivityOf,
+  type GalleryAlbum,
+  type GalleryItem,
+  type GalleryKindFilter,
+  type GalleryResponse,
+  type Sensitivity,
+} from '@den/shared';
 import { db } from '../db/index.js';
 import { media, messages } from '../db/schema.js';
 import { toMediaInfo } from '../mappers.js';
@@ -96,13 +104,17 @@ export async function getGalleryPage(
   const items: GalleryItem[] = await Promise.all(
     rows.map(async (row) => {
       const urls = { url: await presignGet(row.r2Key), thumbUrl: row.thumbKey ? await presignGet(row.thumbKey) : null };
+      // Reuse the tag lookup already done for `tags` below (docs/MEDIA_ATTACHMENTS.md
+      // §4.4 work item 4) — sensitivity is derived from the same rows, never a
+      // second query per item.
+      const tags = tagMap.get(row.id.toString()) ?? [];
       return {
-        media: toMediaInfo(row, urls),
+        media: toMediaInfo(row, urls, sensitivityOf(tags.map((t) => t.name))),
         messageId: row.messageId.toString(),
         chatId: row.messageChatId.toString(),
         senderId: row.messageSenderId.toString(),
         createdAt: row.messageCreatedAt.toISOString(),
-        tags: tagMap.get(row.id.toString()) ?? [],
+        tags,
       };
     }),
   );
@@ -113,22 +125,34 @@ export async function getGalleryPage(
 
 interface ChatMediaSummary {
   coverThumbKey: string | null;
+  /** docs/MEDIA_ATTACHMENTS.md §7 "Album covers on the Gallery tab": non-null
+   *  only when EVERY thumb-having candidate was sensitive, i.e. the chosen
+   *  cover itself needs blurring. Null whenever a non-sensitive cover was
+   *  found (the common case) or there's no cover at all. */
+  coverSensitivity: Sensitivity | null;
   count: number;
 }
 
+/** How many of the newest thumb-having ready items to scan when picking a
+ *  cover (below) — bounded rather than unlimited so a chat with a long run of
+ *  `nsfw`-tagged uploads can't turn this into a full-table scan. Large enough
+ *  that "every one of the last 40 uploads is tagged nsfw" is the only case
+ *  that falls through to the sensitive-cover fallback. */
+const COVER_CANDIDATE_SCAN_LIMIT = 40;
+
 async function mediaSummaryFor(chatId: bigint): Promise<ChatMediaSummary> {
-  const [countRows, latestWithThumbRows] = await Promise.all([
+  const [countRows, candidateRows] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
       .from(media)
       .innerJoin(messages, eq(messages.id, media.messageId))
       .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready'))),
-    // Cover = latest ready media *that has a thumbnail* (BACKBONE §15
-    // 2026-07-22), not just the latest ready item overall — voice never has
-    // a thumb_key, so picking the bare-latest item previously left the album
-    // tile blank whenever the newest upload in a chat was a voice message.
+    // Cover candidates = ready media *that has a thumbnail* (BACKBONE §15
+    // 2026-07-22), newest first — voice never has a thumb_key, so picking the
+    // bare-latest item previously left the album tile blank whenever the
+    // newest upload in a chat was a voice message.
     db
-      .select({ thumbKey: media.thumbKey })
+      .select({ id: media.id, thumbKey: media.thumbKey })
       .from(media)
       .innerJoin(messages, eq(messages.id, media.messageId))
       .where(
@@ -140,12 +164,32 @@ async function mediaSummaryFor(chatId: bigint): Promise<ChatMediaSummary> {
         ),
       )
       .orderBy(desc(media.id))
-      .limit(1),
+      .limit(COVER_CANDIDATE_SCAN_LIMIT),
   ]);
+
+  if (candidateRows.length === 0) {
+    return { count: countRows[0]?.count ?? 0, coverThumbKey: null, coverSensitivity: null };
+  }
+
+  // docs/MEDIA_ATTACHMENTS.md §7: the Gallery tab's album tile is chat
+  // decoration, not something the viewer navigated to on purpose — showing
+  // an `nsfw` photo there full-size is the exact thing sensitivity marking
+  // exists to prevent. Prefer the newest NON-sensitive candidate; only fall
+  // back to the newest candidate overall (and surface its sensitivity, so
+  // the client blurs the tile) when every one of the scanned candidates is
+  // marked.
+  const tagMap = await tagsForMediaIds(candidateRows.map((r) => r.id));
+  const withSensitivity = candidateRows.map((row) => ({
+    ...row,
+    sensitivity: sensitivityOf((tagMap.get(row.id.toString()) ?? []).map((t) => t.name)),
+  }));
+  const nonSensitive = withSensitivity.find((c) => c.sensitivity === null);
+  const chosen = nonSensitive ?? withSensitivity[0]!;
 
   return {
     count: countRows[0]?.count ?? 0,
-    coverThumbKey: latestWithThumbRows[0]?.thumbKey ?? null,
+    coverThumbKey: chosen.thumbKey,
+    coverSensitivity: nonSensitive ? null : chosen.sensitivity,
   };
 }
 
@@ -169,6 +213,7 @@ export async function getAlbumsForUser(userId: bigint): Promise<GalleryAlbum[]> 
       isGroup: chat.isGroup,
       members: chat.members,
       coverThumbUrl: summary.coverThumbKey ? await presignGet(summary.coverThumbKey) : null,
+      coverSensitivity: summary.coverSensitivity,
       mediaCount: summary.count,
     });
   }

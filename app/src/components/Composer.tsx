@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Mic, Paperclip, Send, Square, X } from 'lucide-react';
-import { detectEmbedUrl, type EmbedProvider } from '@den/shared';
+import { Check, EyeOff, FileQuestion, Mic, Paperclip, Play, Plus, Send, Square, X } from 'lucide-react';
+import { detectEmbedUrl, sensitivityOf, type EmbedProvider } from '@den/shared';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
+import type { StagedAttachment } from '../lib/media';
+import { suppressTouchContextMenu } from '../lib/nativeMenu';
 import { RecordingBar, type RecState } from './RecordingBar';
+import { SensitiveOverlay } from './SensitiveOverlay';
 
 // docs/EMBEDS.md §4.4 — the composer's paste/type-detect chip: "picking is
 // sending" precedent, so this is purely informational (send behaves exactly
@@ -19,11 +22,14 @@ const EMBED_CHIP_LABEL: Record<EmbedProvider, string> = {
  * has somewhere to live that isn't the message-list component. Owns: text
  * input + attach + mic/send, and the full hold-to-record / slide-up-to-lock
  * / slide-left-to-cancel gesture + live-waveform recording bar. `ChatView`
- * still owns the *draft text* (per-chat cache, see its own doc comment) and
- * the *upload* orchestration (`runUpload`, `handleFilePicked`) — this
- * component is handed `draft`/`onDraftChange` as a controlled input and
- * calls back out via `onSend`/`onPickFiles`/`onRecordingComplete` rather
- * than reimplementing any of that.
+ * still owns the *draft text* (per-chat cache, see its own doc comment), the
+ * *staged attachments* array, and the album/voice upload orchestration
+ * (`sendAlbum`/`handleRecordingComplete`, docs/MEDIA_ATTACHMENTS.md §5.1) —
+ * this component is handed `draft`/`onDraftChange`/`attachments` as
+ * controlled props and calls back out via `onSend`/`onAddFiles`/
+ * `onRecordingComplete` rather than reimplementing any of that. It DOES own
+ * the tray's own rendering, attach/paste validation staging, and per-thumb
+ * object-URL lifecycle (see the tray effects below).
  *
  * ⚠️ iOS: `getUserMedia` and `AudioContext` both need a user gesture.
  * `onMicPointerDown`/`onMicClick` create+resume the `AudioContext`
@@ -73,7 +79,10 @@ export function Composer({
   draft,
   onDraftChange,
   onSend,
-  onPickFiles,
+  attachments,
+  onAddFiles,
+  onRemoveAttachment,
+  onOpenAttachment,
   uploading,
   onRecordingComplete,
   onError,
@@ -83,12 +92,24 @@ export function Composer({
   draft: string;
   onDraftChange: (value: string) => void;
   onSend: () => void;
-  onPickFiles: (files: File[]) => void;
-  /** Disables attach/mic while a media upload is already in flight — same
-   *  guard the pre-UI-8e composer applied. */
+  /** docs/MEDIA_ATTACHMENTS.md §5.1 — staged, not-yet-uploaded picks. Lives
+   *  in `ChatView` state; this component only renders the tray and mutates
+   *  it through the callbacks below. */
+  attachments: StagedAttachment[];
+  /** Attach button / file input / paste all funnel here. Validation
+   *  (`stageFiles` — kind, size, `MediaLimits.maxAttachments`) happens once,
+   *  centrally, in `ChatView`, which also owns surfacing the result through
+   *  `onError`. */
+  onAddFiles: (files: File[]) => void;
+  onRemoveAttachment: (localId: string) => void;
+  /** A tray thumbnail was tapped — opens `ChatView`'s `AttachmentSheet`. */
+  onOpenAttachment: (localId: string) => void;
+  /** Disables attach/mic while an album send is already in flight — same
+   *  guard the pre-album composer applied to the old per-file upload. */
   uploading: boolean;
-  /** Hands a finished recording off to `ChatView`'s existing `runUpload`
-   *  path — this component never talks to the media API directly. */
+  /** Hands a finished recording off to `ChatView`'s existing upload path —
+   *  this component never talks to the media API directly. Voice is
+   *  unchanged by staging (docs §5.1): push-to-talk still sends immediately. */
   onRecordingComplete: (blob: Blob, mime: string) => void;
   /** Generalized from `onRecordingError` (docs/IMAGE_PASTE.md) once paste
    *  needed the same "surface a message, don't touch upload state" callback
@@ -99,7 +120,10 @@ export function Composer({
    *  mic are hidden (only the submit control remains, restyled Update), and
    *  `onSend` submits the edit instead of a new message. Recording/gesture
    *  code paths are unreachable in this mode simply because the mic button
-   *  isn't rendered — no mode checks needed inside those handlers. */
+   *  isn't rendered — no mode checks needed inside those handlers.
+   *  docs/MEDIA_ATTACHMENTS.md §5.1: `ChatView` blocks entering edit mode
+   *  while attachments are staged, so `attachments` is always `[]` here
+   *  whenever `editing` is true. */
   editing: boolean;
 }) {
   // docs/IOS_KEYBOARD.md — 0 on Android/desktop (the hook's iOS gate is off),
@@ -171,6 +195,29 @@ export function Composer({
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
   }, [draft]);
 
+  // docs/MEDIA_ATTACHMENTS.md §5.1 — revokes an attachment's `previewUrl`
+  // (created by `handleFileInputChange`/`handlePaste` below) the moment it
+  // stops being staged, however that happens: the tray's own ✕, a
+  // successful send clearing `ChatView`'s attachments array, or this
+  // component unmounting outright (chat switch) mid-stage. Diffing against
+  // the previous render's array (rather than only revoking in the ✕
+  // handler) covers all three with one effect instead of three call sites
+  // that could drift out of sync — "leaking object URLs is a real bug here"
+  // per the task brief.
+  const prevAttachmentsRef = useRef<StagedAttachment[]>([]);
+  useEffect(() => {
+    const nextIds = new Set(attachments.map((a) => a.localId));
+    for (const a of prevAttachmentsRef.current) {
+      if (!nextIds.has(a.localId) && a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    }
+    prevAttachmentsRef.current = attachments;
+  }, [attachments]);
+  useEffect(() => {
+    return () => {
+      for (const a of prevAttachmentsRef.current) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    };
+  }, []);
+
   // docs/MESSAGE_EDIT.md §4.2 "focus the composer" on entering edit mode.
   // The textarea element itself never unmounts across the `editing` toggle
   // (only the leading/trailing slots change), so a plain focus() call here
@@ -187,7 +234,11 @@ export function Composer({
   }, [editing]);
 
   function submit() {
-    if (!draft.trim()) return;
+    // docs/MEDIA_ATTACHMENTS.md §5.1 — Send appears (and now fires) whenever
+    // there's a draft OR staged attachments; an empty draft with attachments
+    // sends a caption-less album, same as an empty draft with no attachments
+    // used to just no-op.
+    if (!draft.trim() && attachments.length === 0) return;
     onSend();
     // Keep focus in the field so the on-screen keyboard doesn't collapse
     // after every send (user feedback: Samsung PWA dropped the keyboard and
@@ -408,7 +459,7 @@ export function Composer({
   function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ''; // allow picking the same file(s) again
-    onPickFiles(files);
+    onAddFiles(files);
   }
 
   /** docs/IMAGE_PASTE.md — desktop Ctrl+V of a screenshot, or mobile
@@ -418,8 +469,11 @@ export function Composer({
    *  Files present → this *is* the paste, even on a mixed clipboard (e.g.
    *  copied off a web page, file + filename text): we take the file and
    *  drop the text, matching Discord/Slack. Routes into the same
-   *  `onPickFiles` the attach button uses — `ChatView.handleFilesPicked`
-   *  already filters kinds and reports skips, so no filtering here.
+   *  `onAddFiles` the attach button uses — `ChatView`'s `stageFiles` already
+   *  filters kinds and reports skips, so no filtering here.
+   *  docs/MEDIA_ATTACHMENTS.md §5.1 — pasting while attachments are already
+   *  staged now APPENDS instead of erroring ("Upload in progress" is gone as
+   *  a concept: nothing uploads until Send).
    *  ⚠️ iOS Safari / Android Samsung Keyboard clipboard-image paste is
    *  unverified on real hardware — see PROJECT.md §12. */
   function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
@@ -427,16 +481,12 @@ export function Composer({
     if (!files || files.length === 0) return;
     e.preventDefault();
     // docs/MESSAGE_EDIT.md §4.3 — an edit only ever touches `body`; a pasted
-    // file is silently ignored (not routed into the upload path, no error
-    // surfaced) rather than treated as an upload the way it is outside edit
-    // mode. Text paste is unaffected either way (handled above, before this
-    // branch is ever reached).
+    // file is silently ignored (not routed into the staging path, no error
+    // surfaced) rather than staged the way it is outside edit mode. Text
+    // paste is unaffected either way (handled above, before this branch is
+    // ever reached).
     if (editing) return;
-    if (uploading) {
-      onError('Upload in progress');
-      return;
-    }
-    onPickFiles(Array.from(files));
+    onAddFiles(Array.from(files));
   }
 
   const lockProgress = clamp01(dragY / LOCK_THRESHOLD_DY);
@@ -475,6 +525,33 @@ export function Composer({
       }}
     >
       <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple hidden onChange={handleFileInputChange} />
+
+      {/* docs/MEDIA_ATTACHMENTS.md §5.1 — the attachment tray. Rendered
+          *inside* this form, above the input row, so it inherits the
+          `--kb-inset` iOS keyboard padding this form already carries (see
+          the form's own `style` below) instead of needing a second copy of
+          that logic. */}
+      {attachments.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-0.5">
+          {attachments.map((item) => (
+            <AttachmentTrayThumb
+              key={item.localId}
+              item={item}
+              onOpen={() => onOpenAttachment(item.localId)}
+              onRemove={() => onRemoveAttachment(item.localId)}
+            />
+          ))}
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Add another attachment"
+            className="grid h-14 w-14 shrink-0 place-items-center rounded-md border border-dashed border-border text-text-muted"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <Plus size={18} />
+          </button>
+        </div>
+      )}
 
       {detectedEmbed && (
         <p className="px-1 text-xs text-text-secondary">{EMBED_CHIP_LABEL[detectedEmbed.provider]}</p>
@@ -577,7 +654,7 @@ export function Composer({
         >
           <Square size={16} fill="currentColor" />
         </button>
-      ) : recState === 'idle' && draft.trim() ? (
+      ) : recState === 'idle' && (draft.trim() || attachments.length > 0) ? (
         <button
           type="submit"
           // Suppress the button's own focus-steal so tapping Send doesn't blur
@@ -612,5 +689,75 @@ export function Composer({
       )}
       </div>
     </form>
+  );
+}
+
+/** One 56px tray thumbnail (docs/MEDIA_ATTACHMENTS.md §5.1). Images decode
+ *  via `URL.createObjectURL`; videos use `<video preload="metadata" muted>`,
+ *  which renders a first frame with no playback controls needed for a static
+ *  thumb. `onerror` on either falls back to a plain file-icon tile — the
+ *  HEIC-outside-Safari case (⚠️ iOS: this fallback path is the one that
+ *  should *never* fire there, since Safari decodes HEIC object URLs natively
+ *  — unverified on real hardware, PROJECT.md §12). Sensitivity marks blur the
+ *  thumb via the one shared `SensitiveOverlay` and show a small `EyeOff`
+ *  badge; tapping (blurred or not) always opens `AttachmentSheet` — there is
+ *  no separate "peek" affordance out here in the tray. */
+function AttachmentTrayThumb({
+  item,
+  onOpen,
+  onRemove,
+}: {
+  item: StagedAttachment;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const sensitivity = sensitivityOf(item.tags);
+
+  return (
+    <div
+      className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border bg-surface-sunken"
+      onContextMenu={suppressTouchContextMenu}
+    >
+      <SensitiveOverlay sensitivity={sensitivity} blurred={sensitivity !== null} onReveal={onOpen} compact className="h-full w-full">
+        <button
+          type="button"
+          onClick={onOpen}
+          aria-label={`Edit attachment — ${item.file.name}`}
+          className="media-preview block h-14 w-14"
+          style={{ touchAction: 'manipulation' }}
+        >
+          {previewFailed || !item.previewUrl ? (
+            <span className="flex h-full w-full flex-col items-center justify-center gap-0.5 px-1 text-text-muted">
+              <FileQuestion size={16} />
+              <span className="w-full truncate text-center text-[9px] leading-tight">{item.file.name}</span>
+            </span>
+          ) : item.kind === 'image' ? (
+            <img src={item.previewUrl} alt="" onError={() => setPreviewFailed(true)} className="h-full w-full object-cover" />
+          ) : (
+            <span className="relative block h-full w-full">
+              <video src={item.previewUrl} preload="metadata" muted onError={() => setPreviewFailed(true)} className="h-full w-full object-cover" />
+              <span className="pointer-events-none absolute inset-0 grid place-items-center bg-black/10">
+                <Play size={14} fill="white" className="text-white" />
+              </span>
+            </span>
+          )}
+        </button>
+      </SensitiveOverlay>
+      {sensitivity && (
+        <span className="pointer-events-none absolute left-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white">
+          <EyeOff size={10} />
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="Remove attachment"
+        className="absolute right-0.5 top-0.5 grid h-4 w-4 place-items-center rounded-pill bg-black/70 text-white"
+        style={{ touchAction: 'manipulation' }}
+      >
+        <X size={10} />
+      </button>
+    </div>
   );
 }

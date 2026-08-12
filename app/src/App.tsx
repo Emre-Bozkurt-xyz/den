@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatSummary, GalleryAlbum, MeResponse } from '@den/shared';
-import { Images, MessageCircle, User } from 'lucide-react';
+import type { StagedAttachment } from './lib/media';
+import { ChevronRight, Images, LogOut, MessageCircle, User } from 'lucide-react';
 import { useMe } from './hooks/useMe';
 import { useIsMobile } from './hooks/useIsMobile';
 import { INITIAL_SEARCH_STATE, type SearchFormState } from './hooks/useMessageSearch';
 import { BackStackProvider, useBackHandler } from './lib/backStack';
 import { AuthScreen } from './components/AuthScreen';
-import { Profile, VaultLinkSection } from './components/Profile';
+import { Profile } from './components/Profile';
+import { Settings } from './components/Settings';
 import { InstallInstructions } from './components/InstallInstructions';
-import { PushPoc } from './components/PushPoc';
-import { VoicePoc } from './components/VoicePoc';
-import { WsProbe } from './components/WsProbe';
 import { RealtimeProvider } from './lib/realtime';
+import { SensitivityProvider } from './lib/sensitivity';
 import { ChatList } from './components/ChatList';
 import { ChatView } from './components/ChatView';
 import { FriendsScreen } from './components/FriendsScreen';
@@ -19,7 +19,8 @@ import { NewGroupScreen } from './components/NewGroupScreen';
 import { GalleryScreen } from './components/GalleryScreen';
 import { ChatGallery } from './components/ChatGallery';
 import { createChat, fetchChats } from './lib/chats';
-import { useQueryClient } from '@tanstack/react-query';
+import { logout } from './lib/auth';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 /**
  * App shell + auth gate. Server is the source of truth: we render off the
@@ -42,9 +43,14 @@ export default function App() {
 
   return (
     <RealtimeProvider>
-      <BackStackProvider>
-        <AuthedApp me={me} />
-      </BackStackProvider>
+      {/* Sits above both the chat and gallery views (they share one reveal
+          set, docs/MEDIA_ATTACHMENTS.md §5.4/D8) — mounted once here rather
+          than per-view. */}
+      <SensitivityProvider>
+        <BackStackProvider>
+          <AuthedApp me={me} />
+        </BackStackProvider>
+      </SensitivityProvider>
     </RealtimeProvider>
   );
 }
@@ -55,8 +61,13 @@ type View =
   | { name: 'friends' }
   | { name: 'newGroup' }
   | { name: 'profile' }
+  | { name: 'settings' }
   | { name: 'gallery' }
   | { name: 'chatGallery'; album: GalleryAlbum };
+
+/** Stable identity for "no staged attachments", so an uncached chat doesn't
+ *  hand `ChatView` a fresh `[]` on every render of `AuthedApp`. */
+const EMPTY_ATTACHMENTS: StagedAttachment[] = [];
 
 type ChatView_ = Extract<View, { name: 'chat' }>;
 type Tab = 'chats' | 'gallery' | 'profile';
@@ -67,7 +78,7 @@ type Tab = 'chats' | 'gallery' | 'profile';
  *  tab because that's where its own back button returns to, regardless of
  *  whether it was opened from the Gallery tab or from an open chat. */
 function tabOf(view: View): Tab {
-  if (view.name === 'profile') return 'profile';
+  if (view.name === 'profile' || view.name === 'settings') return 'profile';
   if (view.name === 'gallery' || view.name === 'chatGallery') return 'gallery';
   return 'chats';
 }
@@ -86,6 +97,8 @@ function parentOf(view: View): View | null {
     case 'gallery':
     case 'profile':
       return { name: 'chats' };
+    case 'settings':
+      return { name: 'profile' };
     case 'chatGallery':
       return { name: 'gallery' };
     case 'chats':
@@ -118,6 +131,15 @@ function AuthedApp({ me }: { me: MeResponse }) {
   // Same pattern, same reason, for the search panel's per-chat state
   // (query text, filters, open/closed) — docs/MESSAGE_SEARCH.md §4.1.
   const searchStateCacheRef = useRef(new Map<string, SearchFormState>());
+  // And again for staged-but-unsent attachments (docs/MEDIA_ATTACHMENTS.md
+  // §5.1). Same reasoning as the draft cache, with more at stake: an album
+  // the user picked AND tagged item-by-item shouldn't evaporate because they
+  // ducked into another chat to check something. Holds `File` references
+  // (cheap — the bytes are already in memory, nothing is copied); the
+  // entries' object URLs are dead on the way out and re-minted by `ChatView`
+  // on the way back in, so `Composer` can keep revoking them on unmount and
+  // a chat that's never revisited leaks nothing.
+  const attachmentCacheRef = useRef(new Map<string, StagedAttachment[]>());
   // docs/EMBEDS.md §4.4 — Android Web Share Target lands here as a plain GET
   // navigation to `/share-target?url=&text=&title=` (vite.config.ts's
   // `share_target` manifest entry). Consumed once, on mount: extract the
@@ -187,7 +209,15 @@ function AuthedApp({ me }: { me: MeResponse }) {
   function openGalleryFor(chat: ChatSummary) {
     setView({
       name: 'chatGallery',
-      album: { chatId: chat.id, name: chat.name, isGroup: chat.isGroup, members: chat.members, coverThumbUrl: null, mediaCount: 0 },
+      album: {
+        chatId: chat.id,
+        name: chat.name,
+        isGroup: chat.isGroup,
+        members: chat.members,
+        coverThumbUrl: null,
+        coverSensitivity: null,
+        mediaCount: 0,
+      },
     });
   }
 
@@ -218,6 +248,8 @@ function AuthedApp({ me }: { me: MeResponse }) {
           onDraftChange={(draft) => draftCacheRef.current.set(view.chat.id, draft)}
           initialSearchState={searchStateCacheRef.current.get(view.chat.id) ?? INITIAL_SEARCH_STATE}
           onSearchStateChange={(state) => searchStateCacheRef.current.set(view.chat.id, state)}
+          initialAttachments={attachmentCacheRef.current.get(view.chat.id) ?? EMPTY_ATTACHMENTS}
+          onAttachmentsChange={(attachments) => attachmentCacheRef.current.set(view.chat.id, attachments)}
         />
       );
     } else if (view.name === 'chatGallery') {
@@ -229,12 +261,14 @@ function AuthedApp({ me }: { me: MeResponse }) {
           onJumpToMessage={(chatId, messageId) => void jumpToMessage(chatId, messageId)}
         />
       );
+    } else if (view.name === 'settings') {
+      content = <Settings me={me} onBack={() => setView({ name: 'profile' })} />;
     } else {
       content = (
         <div className="flex h-full flex-col bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
           <div className="flex-1 overflow-y-auto">
             {view.name === 'profile' ? (
-              <ProfileTab me={me} />
+              <ProfileTab me={me} onOpenSettings={() => setView({ name: 'settings' })} />
             ) : view.name === 'gallery' ? (
               <GalleryScreen me={me} onOpenAlbum={(album) => setView({ name: 'chatGallery', album })} />
             ) : (
@@ -309,6 +343,10 @@ function AuthedApp({ me }: { me: MeResponse }) {
                   onDraftChange={(draft) => draftCacheRef.current.set(rightPaneChat.chat.id, draft)}
                   initialSearchState={searchStateCacheRef.current.get(rightPaneChat.chat.id) ?? INITIAL_SEARCH_STATE}
                   onSearchStateChange={(state) => searchStateCacheRef.current.set(rightPaneChat.chat.id, state)}
+                  initialAttachments={attachmentCacheRef.current.get(rightPaneChat.chat.id) ?? EMPTY_ATTACHMENTS}
+                  onAttachmentsChange={(attachments) =>
+                    attachmentCacheRef.current.set(rightPaneChat.chat.id, attachments)
+                  }
                 />
               ) : (
                 <EmptyChatState />
@@ -317,8 +355,10 @@ function AuthedApp({ me }: { me: MeResponse }) {
           </div>
         ) : view.name === 'profile' ? (
           <div className="h-full overflow-y-auto">
-            <ProfileTab me={me} />
+            <ProfileTab me={me} onOpenSettings={() => setView({ name: 'settings' })} />
           </div>
+        ) : view.name === 'settings' ? (
+          <Settings me={me} onBack={() => setView({ name: 'profile' })} />
         ) : view.name === 'gallery' ? (
           <div className="h-full overflow-y-auto">
             <GalleryScreen me={me} onOpenAlbum={(album) => setView({ name: 'chatGallery', album })} />
@@ -459,7 +499,17 @@ function EmptyChatState() {
   );
 }
 
-function ProfileTab({ me }: { me: MeResponse }) {
+/** Profile tab landing page (docs/MEDIA_ATTACHMENTS.md §5.6): identity card,
+ *  a Settings nav row, install instructions, log out. Vault linking and
+ *  debug tools moved into the pushed Settings screen — this tab is now just
+ *  the entry point. */
+function ProfileTab({ me, onOpenSettings }: { me: MeResponse; onOpenSettings: () => void }) {
+  const qc = useQueryClient();
+  const signOut = useMutation({
+    mutationFn: logout,
+    onSuccess: () => qc.setQueryData(['me'], null),
+  });
+
   return (
     <div
       className="mx-auto flex max-w-lg flex-col gap-4 px-4 pb-4 pt-4"
@@ -468,34 +518,28 @@ function ProfileTab({ me }: { me: MeResponse }) {
         paddingRight: 'max(env(safe-area-inset-right), 1rem)',
       }}
     >
-      <InstallInstructions />
       <Profile me={me} />
-      <VaultLinkSection />
-      <DebugTools />
-    </div>
-  );
-}
 
-/** Collapsible home for the Stage 0 PoCs — handy for real-device testing
- *  (CLAUDE.md: "keeping debugging easy for future testing"). */
-function DebugTools() {
-  const [open, setOpen] = useState(false);
-  return (
-    <section className="rounded-lg border border-black/10 bg-white dark:border-white/10 dark:bg-neutral-900">
       <button
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-semibold"
+        onClick={onOpenSettings}
+        className="flex items-center justify-between rounded-lg border border-border bg-surface-raised p-4 text-left transition-colors hover:bg-surface-sunken"
+        style={{ touchAction: 'manipulation' }}
       >
-        Debug tools
-        <span className="text-neutral-400">{open ? '▲' : '▼'}</span>
+        <span className="text-sm font-semibold text-text-primary">Settings</span>
+        <ChevronRight size={18} className="text-text-muted" />
       </button>
-      {open && (
-        <div className="flex flex-col gap-4 border-t border-black/10 p-4 dark:border-white/10">
-          <PushPoc />
-          <VoicePoc />
-          <WsProbe />
-        </div>
-      )}
-    </section>
+
+      <InstallInstructions />
+
+      <button
+        onClick={() => signOut.mutate()}
+        disabled={signOut.isPending}
+        className="flex items-center justify-center gap-1.5 rounded-lg border border-border bg-surface-raised p-4 text-sm font-medium text-red-600 transition-colors hover:bg-surface-sunken disabled:pointer-events-none disabled:opacity-40 dark:text-red-400"
+        style={{ touchAction: 'manipulation' }}
+      >
+        <LogOut size={15} />
+        Log out
+      </button>
+    </div>
   );
 }

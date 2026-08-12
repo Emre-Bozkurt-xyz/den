@@ -322,7 +322,7 @@ export function MessageSearchOverlay(props: {
   onClose: () => void;
   onJumpToMessage: (messageId: string) => void;
 }) {
-  useBackHandler(true, props.onClose);
+  useBackHandler(true, props.onClose, { escape: true });
   return (
     <div
       className="fixed inset-0 z-40 flex flex-col bg-surface"

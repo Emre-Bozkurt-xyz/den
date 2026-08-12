@@ -39,10 +39,10 @@ import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode }
  * for the stage gate since we don't dev on iOS.
  */
 
-type Handler = { id: symbol; onBack: () => void };
+type Handler = { id: symbol; onBack: () => void; escape: boolean };
 
 type BackStackApi = {
-  register: (id: symbol, onBack: () => void) => void;
+  register: (id: symbol, onBack: () => void, escape: boolean) => void;
   unregister: (id: symbol) => void;
 };
 
@@ -68,14 +68,34 @@ export function BackStackProvider({ children }: { children: ReactNode }) {
       window.history.pushState({ den: 'back-trap' }, '');
     };
 
+    // Desktop's equivalent of the back gesture (owner request, 2026-08-12).
+    // Escape closes the TOPMOST layer, and only if that layer opted in
+    // (`escape: true` — overlays do, plain views don't): Escape inside a chat
+    // shouldn't fling you back to the chat list, and it must never reach past
+    // an overlay to close something behind it. So if the top handler isn't
+    // escape-eligible we do nothing rather than searching down the stack.
+    // Runs on the same LIFO stack as the back gesture, so a viewer stacked on
+    // a grid sheet unwinds one layer per press either way.
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const top = handlersRef.current[handlersRef.current.length - 1];
+      if (!top?.escape) return;
+      e.preventDefault();
+      top.onBack();
+    };
+
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('keydown', onKeyDown);
+    };
   }, []);
 
   const api = useMemo<BackStackApi>(
     () => ({
-      register(id, onBack) {
-        handlersRef.current = [...handlersRef.current.filter((h) => h.id !== id), { id, onBack }];
+      register(id, onBack, escape) {
+        handlersRef.current = [...handlersRef.current.filter((h) => h.id !== id), { id, onBack, escape }];
       },
       unregister(id) {
         handlersRef.current = handlersRef.current.filter((h) => h.id !== id);
@@ -96,17 +116,23 @@ export function BackStackProvider({ children }: { children: ReactNode }) {
  * Typical use: `useBackHandler(true, onClose)` inside an overlay that only
  * mounts while open, or `useBackHandler(isDeep, () => navigateUp())` for a
  * view that should intercept back only at certain depths.
+ *
+ * `escape: true` additionally makes the desktop Escape key close this layer —
+ * opt-in, and only honoured while this layer is the topmost one (see the
+ * keydown handler in the provider). Overlays and modals want it; plain views
+ * don't, because Escape shouldn't navigate you out of a chat mid-sentence.
  */
-export function useBackHandler(active: boolean, onBack: () => void) {
+export function useBackHandler(active: boolean, onBack: () => void, opts?: { escape?: boolean }) {
   const api = useContext(BackStackContext);
   const idRef = useRef<symbol>(Symbol('back-handler'));
   const onBackRef = useRef(onBack);
   onBackRef.current = onBack;
+  const escape = opts?.escape ?? false;
 
   useEffect(() => {
     if (!api || !active) return;
     const id = idRef.current;
-    api.register(id, () => onBackRef.current());
+    api.register(id, () => onBackRef.current(), escape);
     return () => api.unregister(id);
-  }, [api, active]);
+  }, [api, active, escape]);
 }
