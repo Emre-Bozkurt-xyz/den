@@ -73,7 +73,9 @@ The unresolvable-positive-tag early return (`{items: [], nextCursor: null}`) ret
 - Slot count = `max(items.length, totalCount ?? 0)`; anything past `items.length` renders as a ghost.
 - Centring: on `index` change, `scrollTo({ left: index * (SLOT_W + GAP) - width / 2 + SLOT_W / 2, behavior: 'smooth' })`. Driven by index changes only, so a user's own scroll is never yanked back.
 - Windowing: derive the visible range from `scrollLeft` / container width, render that ± buffer, and give the row an explicit total width so the scrollbar and ghosts stay proportional.
-- Loading: when the visible range comes within a page of `items.length`, call `onLoadMore()`.
+- Loading: when the rail **settles** (`LOAD_MORE_SETTLE_MS`) with its window past `items.length`, call `onLoadMore()` — at most once per distinct loaded length.
+  - ⚠️ The naive version of this (fire as soon as the window reaches the frontier, guarded only by the caller's `loadingMore` flag) **crashed the tab on mobile** and is the one thing in this component most worth not regressing. Three causes compounded: `onLoadMore` is a fresh closure each parent render so the effect re-ran constantly; the in-flight flag doesn't flip synchronously, so a fling fired several page requests before any reported as loading; and every loaded page also lands in the gallery's **un-virtualized grid** still mounted behind the viewer. One flick walked the whole gallery into memory. The settle timer (cancelled by the effect's cleanup on every scroll-driven change) means a fling requests nothing, and the frontier ref means a repeat needs `items` to have actually grown.
+- Scroll state is rAF-coalesced — scroll events outpace paint on a phone, and each one would otherwise re-render a row of blurred, transformed thumbnails.
 - **Sensitive items are blurred in the rail too** — a thumbnail rail is exactly where an `nsfw` item would otherwise be shown unguarded, at the moment the viewer is blurring the same image. Reuses `SensitiveOverlay` with `compact` + `interactive={false}`: the rail's tap belongs to navigation, and revealing happens in the main view.
 
 ### 5.2 `MediaViewer` props

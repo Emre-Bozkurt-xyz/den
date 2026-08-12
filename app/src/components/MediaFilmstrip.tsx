@@ -31,17 +31,23 @@ import { SensitiveOverlay } from './SensitiveOverlay';
  *    taps near the loaded frontier, so no offset-jump API is needed.
  */
 
-const SLOT_W = 40; // px — the fixed grid unit; hit precision comes from this, not from the visual scale
+const SLOT_W = 36; // px — the fixed grid unit; hit precision comes from this, not from the visual scale
 const GAP = 4;
-const STRIP_H = 84; // px — owner-chosen (F4); fits a 1.7x-scaled 40px slot plus padding
+// Retuned down from 40/84/1.7 after the owner saw it on a phone: the rail was
+// taking too much of the image, and the magnification was overstated.
+const STRIP_H = 64; // px — fits a 1.35x-scaled 36px slot plus padding
 const PITCH = SLOT_W + GAP;
 const WINDOW_BUFFER = 8; // slots rendered beyond each edge of the viewport
+/** How long the rail must sit still near the frontier before asking for the
+ *  next page. Long enough that a fling across the whole rail requests
+ *  nothing, short enough to feel automatic when you stop and look. */
+const LOAD_MORE_SETTLE_MS = 350;
 
 /** Scale falloff around the active slot — the "dent". Purely decorative. */
 function scaleFor(distance: number): number {
-  if (distance === 0) return 1.7;
-  if (distance === 1) return 1.25;
-  if (distance === 2) return 1.1;
+  if (distance === 0) return 1.35;
+  if (distance === 1) return 1.15;
+  if (distance === 2) return 1.05;
   return 1;
 }
 
@@ -69,6 +75,25 @@ export function MediaFilmstrip({
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ scrollLeft: 0, width: 0 });
+  // Scroll events fire far faster than paint on a phone, and each one would
+  // otherwise re-render a row of blurred, transformed thumbnails. Coalesce to
+  // one state write per frame — same posture as useKeyboardInset's rAF
+  // coalescing (docs/IOS_KEYBOARD.md).
+  const scrollRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current);
+    };
+  }, []);
+
+  function onScroll(e: React.UIEvent<HTMLDivElement>) {
+    const next = e.currentTarget.scrollLeft;
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      setViewport((v) => (v.scrollLeft === next ? v : { ...v, scrollLeft: next }));
+    });
+  }
 
   // Ghosts only ever extend the rail — never shorten it below what's actually
   // loaded (a stale/absent count must not hide real items).
@@ -104,14 +129,39 @@ export function MediaFilmstrip({
     ] as const;
   }, [viewport, slotCount]);
 
-  // Page in more when the rendered window reaches the loaded frontier. Guarded
-  // on `loadingMore` so a scroll that lingers near the edge doesn't fire a
-  // burst of requests.
+  // Page in more when the rail settles with its window past the loaded
+  // frontier.
+  //
+  // The first version of this fired as soon as the window reached the
+  // frontier, guarded only by `loadingMore` — and that took the tab out on a
+  // phone. Three things compounded: `onLoadMore` is a fresh closure on every
+  // parent render so this effect re-ran constantly; the caller's in-flight
+  // flag doesn't flip synchronously, so a fling could fire several page
+  // requests before any reported itself as loading; and every loaded page
+  // also lands in the gallery's un-virtualized grid behind the viewer. One
+  // flick of the rail could therefore walk the whole gallery into memory.
+  //
+  // Two guards, both necessary:
+  //  - `requestedAtRef` — at most one request per distinct loaded length, so
+  //    a repeat can only happen after `items` genuinely grew.
+  //  - the settle delay — the effect's cleanup cancels the pending timer on
+  //    every scroll-driven change, so a fling across the rail requests
+  //    nothing; only stopping near the frontier does. `onLoadMore` is read
+  //    through a ref so an unstable closure identity can't retrigger this.
+  const requestedAtRef = useRef(-1);
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
   useEffect(() => {
-    if (!onLoadMore || loadingMore) return;
+    if (!onLoadMoreRef.current || loadingMore) return;
     if (items.length === 0 || items.length >= slotCount) return;
-    if (last >= items.length) onLoadMore();
-  }, [last, items.length, slotCount, onLoadMore, loadingMore]);
+    if (last < items.length) return;
+    if (requestedAtRef.current === items.length) return;
+    const timer = window.setTimeout(() => {
+      requestedAtRef.current = items.length;
+      onLoadMoreRef.current?.();
+    }, LOAD_MORE_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [last, items.length, slotCount, loadingMore]);
 
   if (items.length <= 1 && slotCount <= 1) return null;
 
@@ -129,7 +179,7 @@ export function MediaFilmstrip({
     >
       <div
         ref={scrollerRef}
-        onScroll={(e) => setViewport((v) => ({ ...v, scrollLeft: e.currentTarget.scrollLeft }))}
+        onScroll={onScroll}
         className="h-full overflow-x-auto overflow-y-hidden"
         // ⚠️ iOS: `pan-x` keeps this rail from fighting the viewer image's own
         // pointer-driven swipe/pinch handlers. Unverified on real hardware.
