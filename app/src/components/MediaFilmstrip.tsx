@@ -42,6 +42,14 @@ const WINDOW_BUFFER = 8; // slots rendered beyond each edge of the viewport
  *  next page. Long enough that a fling across the whole rail requests
  *  nothing, short enough to feel automatic when you stop and look. */
 const LOAD_MORE_SETTLE_MS = 350;
+/** How long the rail must sit still before the centred slot becomes the
+ *  selection. Short enough to feel immediate, long enough that scrubbing past
+ *  ten slots fetches one full-size image instead of ten. */
+const SELECT_SETTLE_MS = 140;
+/** How long a centring scroll we initiated is treated as "not the user".
+ *  Covers a smooth-scroll animation; a real gesture during the window simply
+ *  commits on the next settle instead. */
+const PROGRAMMATIC_SCROLL_MS = 500;
 
 /** Scale falloff around the active slot — the "dent". Purely decorative. */
 function scaleFor(distance: number): number {
@@ -75,6 +83,10 @@ export function MediaFilmstrip({
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ scrollLeft: 0, width: 0 });
+  // Read through a ref so an unstable parent closure can't retrigger the
+  // settle effects (the same footgun that made auto-paging run away).
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
   // Scroll events fire far faster than paint on a phone, and each one would
   // otherwise re-render a row of blurred, transformed thumbnails. Coalesce to
   // one state write per frame — same posture as useKeyboardInset's rAF
@@ -109,15 +121,60 @@ export function MediaFilmstrip({
     return () => ro.disconnect();
   }, []);
 
-  // Centre the active slot whenever the index changes — driven by index only,
-  // never by the user's own scrolling, so manually browsing the rail is never
-  // yanked back mid-gesture.
+  // Half-gutters so the FIRST and LAST slots can actually reach the centre.
+  // Without them the rail can't scroll far enough for slot 0 to be centred,
+  // `scrollLeft: 0` maps to some positive index, and "scroll picks the centred
+  // slot" oscillates forever at the ends. With them the maths collapses to
+  // `centred = round(scrollLeft / PITCH)` and `scrollLeft(i) = i * PITCH`,
+  // which are exact inverses — that's what makes the loop below converge.
+  const sidePad = viewport.width > 0 ? Math.max(0, (viewport.width - SLOT_W) / 2) : 0;
+
+  /** Which slot is under the rail's centre line right now. */
+  const centredSlot = useMemo(() => {
+    if (viewport.width === 0 || slotCount === 0) return index;
+    return Math.min(slotCount - 1, Math.max(0, Math.round(viewport.scrollLeft / PITCH)));
+  }, [viewport, slotCount, index]);
+
+  // Centre the active slot when the index changes from OUTSIDE the rail
+  // (swipe on the image, arrow keys, a tap on a slot) — and also right after
+  // the rail commits its own selection, where re-centring is exactly the
+  // snap-into-place a phone gallery does. It converges rather than fighting
+  // the user because the target position maps back to the same slot.
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
-    const target = index * PITCH - el.clientWidth / 2 + SLOT_W / 2;
-    el.scrollTo({ left: Math.max(0, target), behavior: 'smooth' });
+    // Mark the scroll that follows as ours. Without this, opening the viewer
+    // deep in a list would commit a spurious selection: the rail mounts at
+    // scrollLeft 0 (i.e. "slot 0 is centred") a frame before this scroll
+    // starts, and the settle effect below would happily act on that and drag
+    // the viewer back to the first item.
+    programmaticUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_MS;
+    el.scrollTo({ left: index * PITCH, behavior: 'smooth' });
   }, [index]);
+
+  // Scrolling the rail selects the centred slot — the whole point of a
+  // gallery scrubber (owner: "scrolling should auto focus on the centered
+  // slot, phone gallery style").
+  //
+  // Committed on settle rather than live, deliberately: the main view shows
+  // FULL-SIZE media, so selecting on every scroll frame would fetch a
+  // full-size image per slot crossed. The rail's own highlight follows the
+  // finger immediately (it reads `centredSlot`, not `index`), so the gesture
+  // still feels live — it's only the expensive part that waits for you to
+  // stop. Ghost slots are never committed: the viewer would have nothing to
+  // show, so the selection stays put until that page lands.
+  const programmaticUntilRef = useRef(0);
+  useEffect(() => {
+    if (centredSlot === index) return;
+    if (centredSlot >= items.length) return;
+    const timer = window.setTimeout(() => {
+      // A centring scroll we started is still in flight — its intermediate
+      // positions are not a user choice.
+      if (Date.now() < programmaticUntilRef.current) return;
+      onSelectRef.current(centredSlot);
+    }, SELECT_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [centredSlot, index, items.length]);
 
   const [first, last] = useMemo(() => {
     if (viewport.width === 0) return [0, Math.min(slotCount, 2 * WINDOW_BUFFER)] as const;
@@ -183,16 +240,22 @@ export function MediaFilmstrip({
         className="h-full overflow-x-auto overflow-y-hidden"
         // ⚠️ iOS: `pan-x` keeps this rail from fighting the viewer image's own
         // pointer-driven swipe/pinch handlers. Unverified on real hardware.
-        style={{ touchAction: 'pan-x', scrollbarWidth: 'none' }}
+        style={{ touchAction: 'pan-x', scrollbarWidth: 'none', paddingLeft: sidePad, paddingRight: sidePad }}
       >
         {/* Full-width spacer so the scrollbar and ghost proportions reflect
             the whole result set even though only a window is mounted. */}
         <div className="relative h-full" style={{ width: Math.max(0, slotCount * PITCH - GAP) }}>
           {windowed.map((i) => {
             const item = items[i];
-            const distance = Math.abs(i - index);
+            // Distance from the CENTRED slot, not the committed index, so the
+            // dent tracks the finger during a scrub instead of lagging behind
+            // the settle delay.
+            const distance = Math.abs(i - centredSlot);
             const scale = scaleFor(distance);
-            const active = i === index;
+            // The ring follows the centred slot too, so mid-scrub the rail
+            // reads as "this is what you're about to land on" rather than
+            // pointing at whatever was selected before the gesture started.
+            const active = i === centredSlot;
             return (
               <button
                 key={item?.id ?? `ghost:${i}`}

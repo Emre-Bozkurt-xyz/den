@@ -17,7 +17,9 @@ It does **not** appear when the viewer was opened on a single chat image (a one-
 | # | Decision | Why |
 |---|---|---|
 | F1 | **Scrollable rail that keeps the active item centred.** Not a fit-to-width strip. | The only thing that works for a chat with hundreds of items, and it's what the phone galleries this imitates actually do. |
-| F2 | **No drag-to-seek.** Tap a thumbnail to jump; the rail re-centres when the active index changes. | Dropped by the owner after we worked through it. Worth recording *why* it's dangerous, so nobody adds it casually: if the item under your finger magnifies, it displaces its neighbours, which can put a different item under a stationary finger, which re-magnifies — a feedback loop. Any future drag-seek MUST map finger-x to **fixed slot positions** and treat magnification as a paint-only transform. |
+| F2 | **Scrolling the rail selects the centred slot** (revised 2026-08-12 after the owner used it: tap-only "does nothing but scroll the rail"). Committed on **settle**, not live. | Phone-gallery behaviour. Settle-not-live because the main view shows full-size media: selecting on every scroll frame would fetch a full-size image per slot crossed. The rail's own highlight and dent track `centredSlot` immediately, so the gesture still feels live — only the expensive part waits. Note this is *scroll*-driven, not a pointer-drag: no custom gesture, so magnification can never displace what's under the finger (the original drag-seek hazard). Any future pointer-driven seek MUST still map finger-x to **fixed slot positions** with magnification paint-only. |
+| F2a | **Half-gutters (`sidePad`) so the first and last slots can reach the centre.** | Not cosmetic — it is what makes the loop converge. With them, `centred = round(scrollLeft / PITCH)` and `scrollLeft(i) = i * PITCH` are exact inverses. Without them the rail can't scroll far enough to centre slot 0, `scrollLeft: 0` maps to some positive index, and select-on-scroll oscillates forever at the ends. |
+| F2b | **Scrolls we initiate are marked** (`PROGRAMMATIC_SCROLL_MS`) and never commit a selection. | The rail mounts at `scrollLeft: 0` a frame before the centring scroll starts, so opening the viewer deep in a list would otherwise commit "slot 0 is centred" and drag the viewer back to the first item. |
 | F3 | **Magnification is decorative**: active ~1.7×, neighbours ~1.25× / ~1.1×, all `transform: scale()` about the slot centre. | Transform-only means it never reflows the rail, so centring maths and hit targets stay on the fixed slot grid regardless of what the pixels do. With F2 there's no interaction for it to fight. |
 | F4 | **Always visible**, ~84px tall (40px slots, 1.7× active, plus padding and safe-area inset). | Owner's call, including the cost: it's a permanent bite out of the image on a phone. |
 | F5 | **Video controls sit above the strip**, i.e. the rail is in normal flow and shrinks the media stage rather than overlaying it. | Falls out nicely: the `<video>` element ends where the rail begins, so `VIDEO_CONTROLS_EXCLUSION_HEIGHT` keeps working unchanged — it's measured against the video element, not the screen. An overlaying rail would have covered the native controls. |
@@ -104,6 +106,10 @@ The strip renders only when `items.length > 1`. `onPrev`/`onNext` stay exactly a
 - `scroll-behavior: smooth` / `scrollTo({behavior:'smooth'})` support and feel in an installed PWA.
 - More `filter: blur()` surfaces in a scrolling container (the existing perf risk, now in a rail).
 - The strip's 84px plus `env(safe-area-inset-bottom)` against the home indicator.
+
+## 5.5 Known, not yet addressed
+
+The gallery grid behind the viewer is **not virtualized**. The filmstrip no longer force-feeds it (§5.1), but paging far through a large chat by hand still grows the DOM without bound. Raised by the owner as a future concern; it predates this feature and is the natural next thing to do if a chat's gallery ever gets heavy.
 
 ## 6. Verification
 
