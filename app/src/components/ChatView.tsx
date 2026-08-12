@@ -1472,6 +1472,13 @@ export function ChatView({
           tags={viewerTags.data?.tags ?? []}
           onAddTag={(nameRaw) => void addTag(viewerMedia.id, nameRaw).then(() => void viewerTags.refetch())}
           onRemoveTag={(tagId) => void removeTag(viewerMedia.id, tagId).then(() => void viewerTags.refetch())}
+          // docs/GALLERY_FILMSTRIP.md §5.3 — an album (or a legacy fan's grid
+          // sheet) is a real list worth striping; a lone chat photo is a
+          // one-item list and `MediaFilmstrip` renders nothing for it. No
+          // lazy-load props: everything here is already loaded.
+          items={viewer ? viewer.list.map((m) => ({ id: m.id, thumbUrl: m.thumbUrl, sensitivity: m.sensitivity })) : []}
+          index={viewer?.index ?? 0}
+          onSelect={(i) => viewer && setViewer({ ...viewer, index: i })}
         />
       )}
 

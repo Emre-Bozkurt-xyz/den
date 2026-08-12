@@ -58,20 +58,28 @@ export async function getGalleryPage(
   before: bigint | null,
   limit: number,
 ): Promise<GalleryResponse> {
-  const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready')];
+  // Split deliberately (docs/GALLERY_FILMSTRIP.md §4): `filters` is everything
+  // that defines the RESULT SET, and the keyset cursor is layered on top only
+  // for the page query. `totalCount` reuses `filters` verbatim so the count
+  // and the page can never drift apart — two hand-maintained copies of the
+  // tag-matching predicates is exactly the bug that would silently mis-size
+  // the filmstrip's ghost slots.
+  const filters = [eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready')];
   // 'visual' = image OR video — the Media segment's grid (BACKBONE §15
   // 2026-07-22); any other value is a single MediaKind (Voice segment uses
   // 'voice').
-  if (kind === 'visual') conditions.push(inArray(media.kind, ['image', 'video']));
-  else if (kind) conditions.push(eq(media.kind, kind));
-  if (before !== null) conditions.push(lt(media.id, before));
+  if (kind === 'visual') filters.push(inArray(media.kind, ['image', 'video']));
+  else if (kind) filters.push(eq(media.kind, kind));
 
   if (rawQuery?.trim()) {
     const { positive, negative } = parseTagQuery(rawQuery);
     const [positiveIds, negativeIds] = await Promise.all([resolveTagIds(chatId, positive), resolveTagIds(chatId, negative)]);
 
     if (positive.length > 0 && positiveIds.length < positive.length) {
-      return { items: [], nextCursor: null }; // an unknown positive tag can never match anything
+      // An unknown positive tag can never match anything. `totalCount` is an
+      // honest 0 on a first page (not "unknown"), so the filmstrip renders no
+      // ghost slots rather than a rail of placeholders that will never fill.
+      return { items: [], nextCursor: null, totalCount: before === null ? 0 : null };
     }
     // Each required tag gets its own EXISTS clause, ANDed together —
     // equivalent to §5's unnest-based reference query ("media must have ALL
@@ -80,16 +88,18 @@ export async function getGalleryPage(
     // bind a JS array to a `::bigint[]` cast (errors "cannot cast type
     // record to bigint[]"), so this sidesteps that rather than fighting it.
     for (const id of positiveIds) {
-      conditions.push(sql`EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = ${media.id} AND mt.tag_id = ${id})`);
+      filters.push(sql`EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = ${media.id} AND mt.tag_id = ${id})`);
     }
     if (negativeIds.length > 0) {
       const idList = sql.join(
         negativeIds.map((id) => sql`${id}`),
         sql`, `,
       );
-      conditions.push(sql`NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = ${media.id} AND mt.tag_id IN (${idList}))`);
+      filters.push(sql`NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.media_id = ${media.id} AND mt.tag_id IN (${idList}))`);
     }
   }
+
+  const conditions = before !== null ? [...filters, lt(media.id, before)] : filters;
 
   const rows = await db
     .select(gallerySelectShape)
@@ -98,6 +108,22 @@ export async function getGalleryPage(
     .where(and(...conditions))
     .orderBy(desc(media.id))
     .limit(limit);
+
+  // First page only — later pages return null and the client keeps the count
+  // it already has (docs/GALLERY_FILMSTRIP.md §4). Runs without the cursor, so
+  // it counts the whole filtered set, not the remainder.
+  const totalCount =
+    before === null
+      ? Number(
+          (
+            await db
+              .select({ count: sql<number>`count(*)::int` })
+              .from(media)
+              .innerJoin(messages, eq(messages.id, media.messageId))
+              .where(and(...filters))
+          )[0]?.count ?? 0,
+        )
+      : null;
 
   const tagMap = await tagsForMediaIds(rows.map((r) => r.id));
 
@@ -120,7 +146,7 @@ export async function getGalleryPage(
   );
 
   const nextCursor = rows.length === limit ? rows[rows.length - 1]!.id.toString() : null;
-  return { items, nextCursor };
+  return { items, nextCursor, totalCount };
 }
 
 interface ChatMediaSummary {

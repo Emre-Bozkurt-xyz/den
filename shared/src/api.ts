@@ -502,6 +502,14 @@ export const GALLERY_KIND_FILTERS: readonly GalleryKindFilter[] = ['image', 'vid
 export interface GalleryResponse {
   items: GalleryItem[];
   nextCursor: string | null;
+  /** docs/GALLERY_FILMSTRIP.md §4 — total matches for the CURRENT filter
+   *  (kind + tag query), populated on the first page only (no `before`) and
+   *  null on later pages, exactly like `SearchMessagesResponse.totalCount`.
+   *
+   *  Filter-aware is the whole point: the viewer's filmstrip sizes its ghost
+   *  slots off this, so counting the whole chat would make the rail claim
+   *  hundreds of items while `beach -screenshots` matched thirty. */
+  totalCount: number | null;
 }
 
 /** One row of the top-level Gallery tab's chats-as-albums grid. */

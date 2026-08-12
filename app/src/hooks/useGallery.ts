@@ -21,3 +21,12 @@ export function flattenGallery(pages: GalleryResponse[] | undefined): GalleryIte
   if (!pages) return [];
   return pages.flatMap((p) => p.items);
 }
+
+/** docs/GALLERY_FILMSTRIP.md §4 — the server sends `totalCount` on the FIRST
+ *  page only (null thereafter), so read it off page 0 rather than the last
+ *  page. Null until the first page lands; the filmstrip then falls back to
+ *  "as many slots as we have items", which is correct, just not yet honest
+ *  about the tail. */
+export function galleryTotalCount(pages: GalleryResponse[] | undefined): number | null {
+  return pages?.[0]?.totalCount ?? null;
+}

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Check, CheckSquare, ChevronDown, ChevronUp, Eye, Play, X } from 'lucide-react';
 import type { GalleryAlbum, GalleryItem, GalleryKindFilter, MeResponse, Tag } from '@den/shared';
-import { flattenGallery, useGallery } from '../hooks/useGallery';
+import { flattenGallery, galleryTotalCount, useGallery } from '../hooks/useGallery';
 import { useElementWidth } from '../hooks/useElementWidth';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { chatDisplayName } from '../lib/chats';
@@ -156,6 +156,7 @@ export function ChatGallery({
   const kind: GalleryKindFilter = segment === 'voice' ? 'voice' : mediaFilter;
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useGallery(album.chatId, kind, query);
   const items = flattenGallery(data?.pages);
+  const totalCount = galleryTotalCount(data?.pages);
   const name = chatDisplayName(album, me.id);
 
   // Server already filters to exactly this segment's kind(s) — no client-side
@@ -643,6 +644,20 @@ export function ChatGallery({
           onAddTag={(tagName) => void addTag(viewerItem.media.id, tagName).then(invalidateGallery)}
           onRemoveTag={(tagId) => void removeTag(viewerItem.media.id, tagId).then(invalidateGallery)}
           revealOverride={galleryOverride}
+          // docs/GALLERY_FILMSTRIP.md §5.3 — the rail spans the CURRENT
+          // filtered result set (`gridItems`, i.e. what the grid behind the
+          // viewer is showing), and sizes its ghost slots off the server's
+          // filter-aware `totalCount`. Scrolling it pages in more (F7).
+          items={gridItems.map((item) => ({
+            id: item.media.id,
+            thumbUrl: item.media.thumbUrl,
+            sensitivity: galleryOverride ? null : item.media.sensitivity,
+          }))}
+          index={viewerIndex!}
+          onSelect={(i) => setViewerIndex(i)}
+          totalCount={totalCount}
+          onLoadMore={hasNextPage ? () => void fetchNextPage() : undefined}
+          loadingMore={isFetchingNextPage}
         />
       )}
     </div>

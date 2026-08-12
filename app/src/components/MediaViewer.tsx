@@ -5,6 +5,7 @@ import { fetchTagAutocomplete } from '../lib/tags';
 import { useBackHandler } from '../lib/backStack';
 import { useIsBlurred, useSensitivity } from '../lib/sensitivity';
 import { SensitiveOverlay } from './SensitiveOverlay';
+import { MediaFilmstrip, type FilmstripItem } from './MediaFilmstrip';
 
 /** Full-screen viewer for a ready image/video. Voice messages render inline
  *  in the chat (§7: "row-style list items", not thumbnails) and never open
@@ -152,6 +153,12 @@ export function MediaViewer({
   onAddTag,
   onRemoveTag,
   revealOverride = false,
+  items,
+  index,
+  onSelect,
+  totalCount,
+  onLoadMore,
+  loadingMore,
 }: {
   media: MediaInfo;
   onClose: () => void;
@@ -168,6 +175,18 @@ export function MediaViewer({
    *  promised on the tile you tapped. Optional, defaults to `false` — chat's
    *  call sites pass nothing and keep exactly today's always-blur behavior. */
   revealOverride?: boolean;
+  /** docs/GALLERY_FILMSTRIP.md §5.2 — the bottom rail. All additive and
+   *  optional, so the single-image chat call sites are untouched: omit
+   *  `items` (or pass a one-item list) and no strip renders. The strip is a
+   *  third way to change the index alongside the chevrons/arrow keys and the
+   *  swipe gesture, never a replacement for them. */
+  items?: FilmstripItem[];
+  index?: number;
+  onSelect?: (index: number) => void;
+  /** Gallery only — the album viewer has everything loaded already. */
+  totalCount?: number | null;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
 }) {
   const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [interacting, setInteracting] = useState(false);
@@ -660,6 +679,17 @@ export function MediaViewer({
         <div onClick={(e) => e.stopPropagation()} className="shrink-0 bg-black/60 p-3">
           <TagEditor chatId={chatId} tags={tags} onAddTag={onAddTag} onRemoveTag={onRemoveTag} />
         </div>
+      )}
+
+      {items && index !== undefined && onSelect && (
+        <MediaFilmstrip
+          items={items}
+          index={index}
+          onSelect={onSelect}
+          totalCount={totalCount}
+          onLoadMore={onLoadMore}
+          loadingMore={loadingMore}
+        />
       )}
     </div>
   );
