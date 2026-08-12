@@ -170,7 +170,8 @@ export function AttachmentSheet({
       }
       style={
         isMobile
-          ? { paddingBottom: 'env(safe-area-inset-bottom)', maxHeight: '70dvh' }
+          ? // `zIndex` is NOT decorative here — see the mobile return below.
+            { paddingBottom: 'env(safe-area-inset-bottom)', maxHeight: '70dvh', zIndex: 100 }
           : undefined
       }
       onClick={(e) => e.stopPropagation()}
@@ -317,7 +318,18 @@ export function AttachmentSheet({
     </div>
   );
 
-  if (isMobile) return content;
+  // Mobile: portalled to <body> with an EXPLICIT zIndex, for exactly the
+  // reason PROJECT.md §11 records as a hard-won lesson (and that
+  // MessageFocusMenu already had to be fixed for): a `position: fixed`
+  // element with `z-index: auto` paints at its PARENT's layer, not above the
+  // page. This sheet renders from inside the chat's composer subtree, so
+  // message blocks — which carry `relative z-10` — were painting over it and
+  // the sheet was invisible behind the message list.
+  //
+  // Deliberately no backdrop element on mobile: the sheet is opaque
+  // (`bg-surface-raised`) and the chat stays usable behind it, which is the
+  // behaviour it was built with. Only the stacking is being fixed here.
+  if (isMobile) return createPortal(content, document.body);
 
   // Desktop: centered modal, portalled with an EXPLICIT zIndex on the
   // outermost wrapper (PROJECT.md §11's stacking-context lesson — a
