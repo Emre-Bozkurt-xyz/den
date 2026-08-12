@@ -69,6 +69,7 @@ export function MediaFilmstrip({
   items,
   index,
   onSelect,
+  onPreview,
   totalCount,
   onLoadMore,
   loadingMore = false,
@@ -76,6 +77,12 @@ export function MediaFilmstrip({
   items: FilmstripItem[];
   index: number;
   onSelect: (index: number) => void;
+  /** Fired IMMEDIATELY as the centred slot changes, unlike `onSelect` which
+   *  waits for the rail to settle. The viewer uses it to swap in the already
+   *  cached thumbnail so scrubbing looks instant, while the full-size fetch
+   *  (and the parent state update behind it) still waits. Loaded slots only —
+   *  a ghost has no thumbnail to preview. */
+  onPreview?: (index: number) => void;
   /** Gallery only — the album viewer passes none of the lazy-load trio. */
   totalCount?: number | null;
   onLoadMore?: () => void;
@@ -87,6 +94,10 @@ export function MediaFilmstrip({
   // settle effects (the same footgun that made auto-paging run away).
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  /** Set while a centring scroll we started is in flight — see the effect
+   *  that scrolls on `index` changes. Declared up here because both the
+   *  preview and the commit path consult it. */
+  const programmaticUntilRef = useRef(0);
   // Scroll events fire far faster than paint on a phone, and each one would
   // otherwise re-render a row of blurred, transformed thumbnails. Coalesce to
   // one state write per frame — same posture as useKeyboardInset's rAF
@@ -163,7 +174,19 @@ export function MediaFilmstrip({
   // still feels live — it's only the expensive part that waits for you to
   // stop. Ghost slots are never committed: the viewer would have nothing to
   // show, so the selection stays put until that page lands.
-  const programmaticUntilRef = useRef(0);
+  // Immediate half of the pair: hand the viewer the centred slot the moment
+  // it changes so it can show the cached thumbnail. Cheap — the viewer keeps
+  // this in local state, so nothing above it re-renders (which matters: the
+  // gallery's un-virtualized grid sits behind the viewer, and re-rendering it
+  // on every scroll frame is exactly the pressure that crashed the tab).
+  const onPreviewRef = useRef(onPreview);
+  onPreviewRef.current = onPreview;
+  useEffect(() => {
+    if (centredSlot >= items.length) return;
+    if (Date.now() < programmaticUntilRef.current) return;
+    onPreviewRef.current?.(centredSlot);
+  }, [centredSlot, items.length]);
+
   useEffect(() => {
     if (centredSlot === index) return;
     if (centredSlot >= items.length) return;

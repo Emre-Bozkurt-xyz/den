@@ -196,8 +196,42 @@ export function MediaViewer({
 
   // docs/MEDIA_ATTACHMENTS.md §5.4 — the viewer can be swiped from a clean
   // item onto a blurred one, so it needs the overlay too.
-  const { reveal } = useSensitivity();
+  const { reveal, isRevealed } = useSensitivity();
   const blurred = useIsBlurred(media, revealOverride);
+
+  /**
+   * Which slot the filmstrip is currently centred on, ahead of it committing
+   * that as the real selection (docs/GALLERY_FILMSTRIP.md §5.2).
+   *
+   * The rail reports this immediately while the commit waits for the scroll
+   * to settle, so scrubbing shows the already-cached THUMBNAIL right away and
+   * only the full-size fetch is deferred. Without it the main view sat frozen
+   * for the settle delay, which read as lag (owner, 2026-08-12) even though
+   * the delay is what keeps a scrub from pulling a full-size image per slot.
+   *
+   * Local to the viewer on purpose: nothing above re-renders during a scrub.
+   */
+  const [standIn, setStandIn] = useState<FilmstripItem | null>(null);
+  const fullImgRef = useRef<HTMLImageElement>(null);
+  const standInBlurred =
+    standIn !== null && standIn.sensitivity !== null && !revealOverride && !isRevealed(standIn.id);
+
+  // The stand-in normally clears on the real media's load event. One case
+  // never fires that: the full-size image is already in cache, so it's
+  // `complete` before React attaches anything and no `onLoad` follows. Left
+  // alone, the viewer would sit on a soft thumbnail forever.
+  useEffect(() => {
+    if (!standIn) return;
+    if (standIn.id !== media.id) return; // the commit hasn't caught up yet
+    if (media.kind === 'image' && fullImgRef.current?.complete) setStandIn(null);
+  }, [standIn, media.id, media.kind]);
+
+  // A gesture on the media itself (swipe/zoom) means the user is done
+  // scrubbing — never let a stale stand-in sit over something they're
+  // interacting with.
+  useEffect(() => {
+    if (interacting) setStandIn(null);
+  }, [interacting]);
 
   // Video's swipe-nav/close drag feedback — deliberately separate state from
   // the image's `transform` (no scale component, no pinch/double-tap fields).
@@ -607,7 +641,7 @@ export function MediaViewer({
           is also what keeps landscape media out from under the close button
           and the prev/next chevrons, which sit in the margins it creates. */}
       <div className="flex flex-1 items-center justify-center overflow-hidden md:px-20 md:py-16">
-        <div className="flex h-full w-full items-center justify-center md:max-h-[80vh] md:max-w-[1100px]">
+        <div className="relative flex h-full w-full items-center justify-center md:max-h-[80vh] md:max-w-[1100px]">
         {/* When `media.sensitivity` is null (the overwhelming majority case)
             this renders `children` completely unwrapped — zero DOM/layout
             change from before this feature. When sensitive, the wrapper is
@@ -626,9 +660,16 @@ export function MediaViewer({
         >
           {media.kind === 'image' ? (
             <img
+              ref={fullImgRef}
               src={media.url}
               alt=""
               draggable={false}
+              // Clearing the scrub stand-in on LOAD, not on commit, is the
+              // whole point: dropping it the moment the selection commits
+              // would show thumb → blank → full-size, which is worse than the
+              // lag it was meant to fix.
+              onLoad={() => setStandIn(null)}
+              onError={() => setStandIn(null)}
               onDragStart={(e) => e.preventDefault()}
               onClick={(e) => e.stopPropagation()}
               onPointerDown={onImagePointerDown}
@@ -660,6 +701,8 @@ export function MediaViewer({
               controls
               autoPlay
               className="max-h-full max-w-full"
+              onLoadedData={() => setStandIn(null)}
+              onError={() => setStandIn(null)}
               onClick={(e) => e.stopPropagation()}
               onPointerDown={onVideoPointerDown}
               onPointerMove={onVideoPointerMove}
@@ -672,6 +715,26 @@ export function MediaViewer({
             />
           )}
         </SensitiveOverlay>
+
+        {standIn && (
+          // Scrub stand-in, layered OVER the real media rather than replacing
+          // it: the rail already painted this thumbnail so it appears
+          // instantly, while the full-size image loads underneath and takes
+          // over the moment it decodes. Deliberately inert — no gestures, no
+          // zoom, and `pointer-events-none` so it never eats a tap meant for
+          // the media beneath.
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black">
+            <SensitiveOverlay
+              sensitivity={standIn.sensitivity}
+              blurred={standInBlurred}
+              onReveal={() => reveal(standIn.id)}
+              interactive={false}
+              className="flex h-full w-full items-center justify-center"
+            >
+              <img src={standIn.thumbUrl ?? undefined} alt="" draggable={false} className="max-h-full max-w-full object-contain" />
+            </SensitiveOverlay>
+          </div>
+        )}
         </div>
       </div>
 
@@ -686,6 +749,10 @@ export function MediaViewer({
           items={items}
           index={index}
           onSelect={onSelect}
+          onPreview={(i) => {
+            const item = items[i];
+            if (item) setStandIn(item);
+          }}
           totalCount={totalCount}
           onLoadMore={onLoadMore}
           loadingMore={loadingMore}
