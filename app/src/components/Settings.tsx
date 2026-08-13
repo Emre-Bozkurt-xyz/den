@@ -6,6 +6,7 @@ import { VaultLinkSection } from './Profile';
 import { NotificationsSection, PushPoc } from './PushPoc';
 import { VoicePoc } from './VoicePoc';
 import { WsProbe } from './WsProbe';
+import { KeyboardProbe } from './KeyboardProbe';
 import { ScreenHeader } from './ScreenHeader';
 
 /**
@@ -122,6 +123,7 @@ function DebugTools() {
           <PushPoc />
           <VoicePoc />
           <WsProbe />
+          <KeyboardProbe />
         </div>
       )}
     </section>
