@@ -76,6 +76,11 @@ const DOUBLE_TAP_MS = 250;
 // px of momentum overscroll or a fractional layout height doesn't read as
 // "the reader deliberately scrolled up".
 const BOTTOM_LATCH_PX = 80;
+// How long to keep re-pinning the list to the bottom after the composer takes
+// focus — long enough to cover a soft keyboard's slide-in *and* the layout
+// resize some browsers only commit once it finishes. Cheap: one no-op
+// `scrollTop` write per frame.
+const KEYBOARD_PIN_MS = 900;
 
 // Swipe-to-reply gesture thresholds (mobile) — grouped here for later
 // real-device tuning, same convention as Composer.tsx's gesture constants.
@@ -272,6 +277,10 @@ export function ChatView({
   // the re-pin-on-shrink effect below (soft keyboard, growing composer).
   // Starts true because every chat opens scrolled to the bottom.
   const atBottomRef = useRef(true);
+  // The list's inner content wrapper — watched for *growth* (late-loading
+  // media changing height) by the same observer that watches the scroller for
+  // shrink; see that effect below.
+  const contentRef = useRef<HTMLDivElement>(null);
   const name = chatDisplayName(chat, me.id);
 
   // Post-MVP: the message the composer is currently replying to (the reply
@@ -474,52 +483,73 @@ export function ChatView({
     keyboardOpenRef.current = isOpen;
   }, [keyboardInset]);
 
-  // ...and the same thing everywhere else, by watching the scroller's own box
-  // instead of the keyboard (user feedback, 2026-08-13: "on my Samsung it's
-  // butt"). Android/Chrome resizes the *layout* viewport for the soft
-  // keyboard (docs/IOS_KEYBOARD.md §1), so `useKeyboardInset` above is a hard
-  // no-op there and nothing re-pinned the list: the scroller just got shorter
-  // with its `scrollTop` untouched, leaving the last messages below the fold
-  // behind the keyboard. A shrink of this element is the platform-agnostic
-  // signal — it covers the Android keyboard, the composer growing to
-  // multi-line, and the attachment tray appearing, none of which the
-  // visualViewport path sees. Only re-pins when the reader was already at the
-  // bottom (`atBottomRef`), so shrinking while reading history leaves the
-  // view alone; only on *shrink*, so the keyboard closing doesn't yank
-  // anything either.
+  // ...and the same thing everywhere else, by watching boxes instead of the
+  // keyboard (user feedback, 2026-08-13). Two independent ways the newest
+  // message slides out of view while the reader is parked at the bottom, both
+  // invisible to the `keyboardInset` path above:
+  //
+  //   1. The *scroller shrinks* — Android/Chrome resizes the layout viewport
+  //      for the soft keyboard (docs/IOS_KEYBOARD.md §1), so the hook above is
+  //      a hard no-op there and nothing re-pinned the list: the box just got
+  //      shorter with `scrollTop` untouched. Also covers the composer growing
+  //      to multi-line and the attachment tray appearing.
+  //   2. The *content grows* — a `MediaBubble` swapping its fixed 128px
+  //      "Processing…" card for the real image (up to `max-h-72`, so it can
+  //      more than double), an `EmbedCard` resolving, a late-decoding photo
+  //      whose stored dimensions were missing so `PreviewImage` had no box to
+  //      reserve. Every one of these lengthens the list *below* the fold
+  //      without firing a scroll event.
+  //
+  // Both re-pin only when the reader was already at the bottom
+  // (`atBottomRef`), so neither disturbs someone reading history, and both
+  // stand down while an older page is landing — `prependRef`'s layout effect
+  // owns the scroll position for that frame and would fight this.
   useEffect(() => {
     const el = scrollerRef.current;
+    const content = contentRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    let lastHeight = el.clientHeight;
+    let lastViewport = el.clientHeight;
+    let lastContent = content?.offsetHeight ?? 0;
     const ro = new ResizeObserver(() => {
-      const height = el.clientHeight;
-      const shrank = height < lastHeight;
-      lastHeight = height;
-      if (shrank && atBottomRef.current) el.scrollTop = el.scrollHeight;
+      const viewport = el.clientHeight;
+      const contentHeight = content?.offsetHeight ?? 0;
+      const shrank = viewport < lastViewport;
+      const grew = contentHeight > lastContent;
+      lastViewport = viewport;
+      lastContent = contentHeight;
+      if (!shrank && !grew) return;
+      if (prependRef.current) return; // an older page is landing — its restore effect owns the scroll
+      if (atBottomRef.current) el.scrollTop = el.scrollHeight;
     });
     ro.observe(el);
+    if (content) ro.observe(content);
     return () => ro.disconnect();
   }, []);
 
   /** The composer's text field took focus, so the soft keyboard is on its way
-   *  up — put the newest message back in view (the literal user ask: "focusing
-   *  the composer should bring the chat up so I can still see the bottom").
-   *  The shrink observer above covers this on its own wherever focusing
-   *  actually resizes the scroller, but the keyboard animates in over a few
-   *  hundred ms and different Android browsers settle the layout in different
-   *  numbers of steps — some pan the visual viewport instead of resizing
-   *  anything at all, where no resize ever fires. Re-pinning a few times
-   *  across that window is cheap and covers every variant. Respects the same
-   *  `atBottomRef` latch: tapping the composer to reply *while reading
-   *  history* must not fling the reader to the bottom. */
+   *  up — keep the newest message in view as it arrives (the literal user ask:
+   *  "focusing the composer should bring the chat up so I can still see the
+   *  bottom"). The observer above catches the layout change on its own, but
+   *  the keyboard animates in over a few hundred ms and browsers settle it in
+   *  differing numbers of steps — some pan the visual viewport rather than
+   *  resizing anything, where no resize fires at all. So: re-pin every frame
+   *  for `KEYBOARD_PIN_MS`, which tracks the animation instead of landing
+   *  after it (the first cut re-pinned at three fixed timeouts and read as a
+   *  visible lag). Each frame is one `scrollTop` write that's a no-op when
+   *  nothing moved. Respects the same `atBottomRef` latch: tapping the
+   *  composer to reply *while reading history* must not fling anyone to the
+   *  bottom, and the loop bails the moment the latch clears (i.e. the reader
+   *  scrolls up mid-animation). */
   function handleComposerFocus() {
     if (!atBottomRef.current) return;
-    const pin = () => {
+    const until = performance.now() + KEYBOARD_PIN_MS;
+    const step = () => {
       const el = scrollerRef.current;
-      if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+      if (!el || !atBottomRef.current) return;
+      el.scrollTop = el.scrollHeight;
+      if (performance.now() < until) requestAnimationFrame(step);
     };
-    pin();
-    for (const ms of [120, 300, 500]) window.setTimeout(pin, ms);
+    step();
   }
 
   // Short chats: if the first page doesn't even fill the viewport there's no
@@ -1405,7 +1435,7 @@ export function ChatView({
             apart so a burst of messages reads as one connected block, with
             the tail drawn only on the run's last bubble (UI-7). Date/time
             dividers (UI-8b) interleave between runs. */}
-        <div className="flex flex-col gap-3">
+        <div ref={contentRef} className="flex flex-col gap-3">
           {timeline.map((item) =>
             item.kind === 'divider' ? (
               <TimelineDivider key={item.id} label={item.label} />

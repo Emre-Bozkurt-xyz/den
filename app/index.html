@@ -2,10 +2,18 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <!-- viewport-fit=cover + safe-area padding is the #1 "feels native" tell on iOS (BACKBONE §9) -->
+    <!-- viewport-fit=cover + safe-area padding is the #1 "feels native" tell on iOS (BACKBONE §9)
+
+         interactive-widget=resizes-content (Chrome 108+, docs/IOS_KEYBOARD.md §3 flagged it as a
+         candidate complement; pulled in 2026-08-13 on Android field feedback): the soft keyboard
+         shrinks the *layout* viewport, so `100dvh` becomes keyboard-aware and the composer sits
+         above the keyboard by layout — promptly — instead of the browser panning the page and
+         committing the resize late, which is what read as "a noticeable delay till the chat is
+         pushed up". iOS Safari ignores the key entirely, so the JS `--kb-inset` path
+         (hooks/useKeyboardInset.ts) remains the iOS answer and the two cannot double-count. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, interactive-widget=resizes-content"
     />
     <meta name="theme-color" content="#0b0b0f" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
