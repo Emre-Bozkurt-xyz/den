@@ -132,6 +132,10 @@ export function KeyboardProbe() {
   // capture — the one that matters — is always the one you can't see.
   const [captures, setCaptures] = useState<{ open: Capture | null; close: Capture | null }>({ open: null, close: null });
   const [status, setStatus] = useState('Focus the field to record.');
+  // Latency of every run this session, so a single slow number can be told
+  // apart from a consistent one — the first focus of a session pays for the
+  // IME window being created, which is not what the app lives with.
+  const [history, setHistory] = useState<{ phase: 'open' | 'close'; ms: number | null }[]>([]);
   const [overlays, setOverlays] = useState(false);
   const [widgetMode, setWidgetMode] = useState(currentInteractiveWidget);
   const envRef = useRef<HTMLDivElement>(null);
@@ -199,6 +203,10 @@ export function KeyboardProbe() {
         markers,
       };
       setCaptures((prev) => ({ ...prev, [phase]: next }));
+      // "When did the page first learn anything" — the number that decides
+      // whether this is fixable in the app at all.
+      const firstChange = transitions(samples, (s) => s.inner)[0] ?? transitions(samples, (s) => s.vv)[0];
+      setHistory((prev) => [...prev.slice(-9), { phase, ms: firstChange?.t ?? null }]);
       setStatus(`Captured ${samples.length} frames on ${phase}.`);
     };
     requestAnimationFrame(step);
@@ -267,6 +275,21 @@ export function KeyboardProbe() {
       />
 
       <p className="text-xs text-neutral-500 dark:text-neutral-400">{status}</p>
+
+      {history.length > 0 && (
+        <p className="text-xs">
+          <span className="text-neutral-500 dark:text-neutral-400">Latency to first viewport change — </span>
+          {(['open', 'close'] as const).map((phase) => {
+            const runs = history.filter((h) => h.phase === phase);
+            if (runs.length === 0) return null;
+            return (
+              <span key={phase} className="mr-2 font-mono">
+                {phase}: {runs.map((r) => (r.ms === null ? 'none' : `${r.ms}ms`)).join(', ')}
+              </span>
+            );
+          })}
+        </p>
+      )}
 
       {(['open', 'close'] as const).map((phase) => {
         const capture = captures[phase];

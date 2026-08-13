@@ -47,6 +47,24 @@ Safari **and** installed PWA (standalone), both orientations:
 
 **Update 2026-08-13** (PROJECT.md §14): case 8 is no longer "exactly as before". The iOS-gated inset stays iOS-only, but the *scroll* half is now platform-agnostic: `ChatView` re-pins the message list to the bottom whenever the scroller **shrinks** (`ResizeObserver`) and again on composer focus across the keyboard's animation window, both latched on "was the reader already at the bottom". Android field report was that focusing the composer left the newest messages behind the keyboard. On iPhone this runs *in addition to* the `keyboardInset` edge-snap — check during the §4 matrix that they don't fight (expected: the inset changes the composer's padding, which shrinks the scroller, which the observer then re-pins — same destination, no oscillation, since re-pinning doesn't change the scroller's height).
 
+## 4b. Measured: Firefox for Android reports nothing until it's over (2026-08-13)
+
+Owner's dev device, installed PWA, `Firefox/153.0` on Android 16, captured with `KeyboardProbe` (Settings → Debug tools) at one sample per animation frame:
+
+| phase | viewport change | steps | events fired |
+|---|---|---|---|
+| focus (open) | 775 → 437 at **t+593ms** | 1 | `window.resize` + `vv.resize`, both at 593ms |
+| blur (close) | 437 → 775 at **t+173ms** | 1 | `window.resize` + `vv.resize`, both at 173ms |
+
+`env(keyboard-inset-height)` stayed 0 and `navigator.virtualKeyboard` was `null` throughout — **Gecko implements neither**, so the VirtualKeyboard API path is unavailable on Firefox regardless of what Chrome does. `visualViewport.height` moved in lockstep with `window.innerHeight` (never independently), which is Firefox resizing the *layout* viewport.
+
+Two conclusions, both load-bearing for anyone tempted to have another go at this:
+
+1. **There is no signal to track.** Across ~96 sampled frames the viewport has exactly two values, never an intermediate one. The iOS approach — glide the composer from a continuously-updating inset — has no input to run on here. This is an engine property, not a bug in the app.
+2. **The lateness is the browser's, and it is asymmetric.** 593ms to report the keyboard opening vs 173ms to report it closing, against an Android IME animation of roughly 250ms. The page cannot move content before it is told, so ~340ms of the perceived delay is unreachable from JS.
+
+What remains available is a browser choice, not a code change: Chromium implements the VirtualKeyboard API and may report sooner. Worth one probe run in Chrome before anyone spends more time here.
+
 ## 5. Bookkeeping (with implementation, not after)
 
 - PROJECT.md §12: move "`visualViewport` composer pinning against the iOS keyboard" out of *Known-unbuilt* once real-device-verified; note the verification date/device.
