@@ -71,6 +71,11 @@ const UNDO_TOAST_MS = 10_000;
 // Post-MVP double-tap-to-react: how long a single tap waits to see if a
 // second one arrives before performing its normal action — see `handleTap`.
 const DOUBLE_TAP_MS = 250;
+// How close to the bottom still counts as "at the bottom" for the re-pin on
+// shrink (soft keyboard opening, composer growing) — a little slack so a few
+// px of momentum overscroll or a fractional layout height doesn't read as
+// "the reader deliberately scrolled up".
+const BOTTOM_LATCH_PX = 80;
 
 // Swipe-to-reply gesture thresholds (mobile) — grouped here for later
 // real-device tuning, same convention as Composer.tsx's gesture constants.
@@ -229,6 +234,14 @@ export function ChatView({
   // failed anymore. A plain ref (not state): it never drives a render on its
   // own, only read inside the retry/discard handlers below.
   const failedAlbumMessageIdRef = useRef<string | null>(null);
+  // In-flight guard for album sends (user feedback, 2026-08-13: tapping Send
+  // repeatedly while an image uploaded sent it several times). The `upload`
+  // state alone can't cover this — it isn't set until `uploadAlbum`'s first
+  // progress callback, i.e. after the mint round-trip, so every tap during
+  // that window sees `upload === null` and starts a whole second album. Same
+  // posture as `loadingOlderRef` above: a ref, because the fix has to hold
+  // between the call and the re-render, not after it.
+  const sendingAlbumRef = useRef(false);
   const [viewer, setViewer] = useState<ViewerState>(null);
   // The items of whichever grid sheet is open (UI-7 legacy fan, or
   // docs/MEDIA_ATTACHMENTS.md §5.3's album "+N" overflow) — held as resolved
@@ -255,6 +268,10 @@ export function ChatView({
   // only flips true on the *next* render, so momentum-scroll events between the
   // fetch call and that render would double-fire without it.
   const loadingOlderRef = useRef(false);
+  // Was the reader parked at the bottom as of the last scroll event? Drives
+  // the re-pin-on-shrink effect below (soft keyboard, growing composer).
+  // Starts true because every chat opens scrolled to the bottom.
+  const atBottomRef = useRef(true);
   const name = chatDisplayName(chat, me.id);
 
   // Post-MVP: the message the composer is currently replying to (the reply
@@ -414,7 +431,14 @@ export function ChatView({
   // reach it.
   function onScrollerScroll() {
     const el = scrollerRef.current;
-    if (el && el.scrollTop < 300) loadOlder();
+    if (!el) return;
+    // Latch "is the reader parked at the bottom?" on every scroll, for the
+    // re-pin effect below. Recorded here rather than measured at re-pin time
+    // on purpose: by the time the scroller has already shrunk, the reader
+    // *looks* scrolled-up (the same scrollTop is now further from the bottom)
+    // and the answer we need is the one from before the shrink.
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_LATCH_PX;
+    if (el.scrollTop < 300) loadOlder();
   }
 
   // Scroll the container itself to its full scrollHeight rather than
@@ -449,6 +473,54 @@ export function ChatView({
     }
     keyboardOpenRef.current = isOpen;
   }, [keyboardInset]);
+
+  // ...and the same thing everywhere else, by watching the scroller's own box
+  // instead of the keyboard (user feedback, 2026-08-13: "on my Samsung it's
+  // butt"). Android/Chrome resizes the *layout* viewport for the soft
+  // keyboard (docs/IOS_KEYBOARD.md §1), so `useKeyboardInset` above is a hard
+  // no-op there and nothing re-pinned the list: the scroller just got shorter
+  // with its `scrollTop` untouched, leaving the last messages below the fold
+  // behind the keyboard. A shrink of this element is the platform-agnostic
+  // signal — it covers the Android keyboard, the composer growing to
+  // multi-line, and the attachment tray appearing, none of which the
+  // visualViewport path sees. Only re-pins when the reader was already at the
+  // bottom (`atBottomRef`), so shrinking while reading history leaves the
+  // view alone; only on *shrink*, so the keyboard closing doesn't yank
+  // anything either.
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let lastHeight = el.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const height = el.clientHeight;
+      const shrank = height < lastHeight;
+      lastHeight = height;
+      if (shrank && atBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  /** The composer's text field took focus, so the soft keyboard is on its way
+   *  up — put the newest message back in view (the literal user ask: "focusing
+   *  the composer should bring the chat up so I can still see the bottom").
+   *  The shrink observer above covers this on its own wherever focusing
+   *  actually resizes the scroller, but the keyboard animates in over a few
+   *  hundred ms and different Android browsers settle the layout in different
+   *  numbers of steps — some pan the visual viewport instead of resizing
+   *  anything at all, where no resize ever fires. Re-pinning a few times
+   *  across that window is cheap and covers every variant. Respects the same
+   *  `atBottomRef` latch: tapping the composer to reply *while reading
+   *  history* must not fling the reader to the bottom. */
+  function handleComposerFocus() {
+    if (!atBottomRef.current) return;
+    const pin = () => {
+      const el = scrollerRef.current;
+      if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+    };
+    pin();
+    for (const ms of [120, 300, 500]) window.setTimeout(pin, ms);
+  }
 
   // Short chats: if the first page doesn't even fill the viewport there's no
   // scrollbar, so the scroll handler alone could never trigger a fetch. Runs
@@ -972,6 +1044,8 @@ export function ChatView({
    *  complete, `media.ready` for the rest (§4.4) — this function never
    *  hand-inserts it into the query cache. */
   async function sendAlbum() {
+    if (sendingAlbumRef.current) return; // see `sendingAlbumRef` — repeated Send taps must not re-send the tray
+    sendingAlbumRef.current = true;
     const items = attachments;
     const caption = draft;
     const replyToId = replyingTo?.id;
@@ -1007,6 +1081,7 @@ export function ChatView({
       failedAlbumMessageIdRef.current = null;
       setUploadError('Upload failed — try again');
     } finally {
+      sendingAlbumRef.current = false;
       setUpload(null);
     }
   }
@@ -1019,6 +1094,8 @@ export function ChatView({
   async function retryAlbum() {
     const retryable = attachments.filter((a) => a.status === 'failed' && a.mediaId && a.presignedPutUrl && a.requiredContentType);
     if (retryable.length === 0) return;
+    if (sendingAlbumRef.current) return; // same in-flight guard as `sendAlbum` — Retry is just as tappable twice
+    sendingAlbumRef.current = true;
     setUploadError('');
     setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'uploading' as const, progress: 0 } : a)));
     try {
@@ -1059,6 +1136,7 @@ export function ChatView({
       setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'failed' as const, progress: 0 } : a)));
       setUploadError('Retry failed — try again');
     } finally {
+      sendingAlbumRef.current = false;
       setUpload(null);
     }
   }
@@ -1430,6 +1508,7 @@ export function ChatView({
         onAddFiles={handleAddFiles}
         onRemoveAttachment={handleRemoveAttachment}
         onOpenAttachment={setAttachmentSheetFor}
+        onInputFocus={handleComposerFocus}
         uploading={!!upload}
         onRecordingComplete={handleRecordingComplete}
         onError={setUploadError}

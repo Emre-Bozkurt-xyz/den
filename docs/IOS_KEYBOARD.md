@@ -45,6 +45,8 @@ Safari **and** installed PWA (standalone), both orientations:
 7. Notch/Dynamic-Island devices and a non-notch device (safe-area inset differs).
 8. **Android regression check** (Samsung, dev device): keyboard open/close behaves exactly as before — the gate did not engage the iOS path.
 
+**Update 2026-08-13** (PROJECT.md §14): case 8 is no longer "exactly as before". The iOS-gated inset stays iOS-only, but the *scroll* half is now platform-agnostic: `ChatView` re-pins the message list to the bottom whenever the scroller **shrinks** (`ResizeObserver`) and again on composer focus across the keyboard's animation window, both latched on "was the reader already at the bottom". Android field report was that focusing the composer left the newest messages behind the keyboard. On iPhone this runs *in addition to* the `keyboardInset` edge-snap — check during the §4 matrix that they don't fight (expected: the inset changes the composer's padding, which shrinks the scroller, which the observer then re-pins — same destination, no oscillation, since re-pinning doesn't change the scroller's height).
+
 ## 5. Bookkeeping (with implementation, not after)
 
 - PROJECT.md §12: move "`visualViewport` composer pinning against the iOS keyboard" out of *Known-unbuilt* once real-device-verified; note the verification date/device.

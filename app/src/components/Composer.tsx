@@ -83,6 +83,7 @@ export function Composer({
   onAddFiles,
   onRemoveAttachment,
   onOpenAttachment,
+  onInputFocus,
   uploading,
   onRecordingComplete,
   onError,
@@ -104,6 +105,11 @@ export function Composer({
   onRemoveAttachment: (localId: string) => void;
   /** A tray thumbnail was tapped — opens `ChatView`'s `AttachmentSheet`. */
   onOpenAttachment: (localId: string) => void;
+  /** The text field took focus, i.e. the soft keyboard is coming up —
+   *  `ChatView` re-pins the message list to the bottom (see its
+   *  `handleComposerFocus`). The scroll behavior stays over there with the
+   *  rest of the scroller logic; this component only reports the event. */
+  onInputFocus: () => void;
   /** Disables attach/mic while an album send is already in flight — same
    *  guard the pre-album composer applied to the old per-file upload. */
   uploading: boolean;
@@ -239,13 +245,21 @@ export function Composer({
     // sends a caption-less album, same as an empty draft with no attachments
     // used to just no-op.
     if (!draft.trim() && attachments.length === 0) return;
+    if (sending) return; // belt-and-braces alongside the button's own `disabled`
+    // Whether the composer already had focus decides whether we *keep* it
+    // below — read before `onSend`, since sending can re-render this subtree.
+    const hadFocus = document.activeElement === textareaRef.current;
     onSend();
     // Keep focus in the field so the on-screen keyboard doesn't collapse
     // after every send (user feedback: Samsung PWA dropped the keyboard and
     // forced a re-tap). The send button itself also suppresses its own
     // focus-steal via onPointerDown (see the JSX) — this refocus covers the
-    // Enter-to-send path and is a harmless no-op when focus never left.
-    textareaRef.current?.focus();
+    // Enter-to-send path.
+    // Only when the field *was* focused, though (user feedback, 2026-08-13):
+    // sending staged media usually happens with the keyboard down — you pick
+    // photos, then tap Send — and an unconditional focus() there yanked the
+    // keyboard open on a composer the user had deliberately left alone.
+    if (hadFocus) textareaRef.current?.focus();
   }
 
   function stopLevelLoop() {
@@ -489,6 +503,19 @@ export function Composer({
     onAddFiles(Array.from(files));
   }
 
+  // An album send is in flight, so Send is spent — the tray stays on screen
+  // for the whole upload (docs/MEDIA_ATTACHMENTS.md §5.1: a failed send keeps
+  // its files), which used to leave the button live and let a second tap send
+  // the same photos again (user feedback, 2026-08-13). `uploading` alone
+  // isn't enough: `ChatView` doesn't have upload progress to report until the
+  // mint round-trip returns, whereas it flips the staged items to 'uploading'
+  // synchronously, so that's what covers the gap. `ChatView.sendAlbum` holds
+  // the authoritative in-flight guard; this is the affordance for it.
+  // Scoped to attachment sends deliberately: a plain text Send has nothing in
+  // flight to double-submit, and shouldn't go dead just because some *other*
+  // upload (a voice message) is still running.
+  const sending = attachments.length > 0 && (uploading || attachments.some((a) => a.status === 'uploading'));
+
   const lockProgress = clamp01(dragY / LOCK_THRESHOLD_DY);
   const cancelProgress = clamp01(dragX / CANCEL_THRESHOLD_DX);
   // Desktop shows explicit Stop/Cancel buttons for the whole recording
@@ -595,6 +622,7 @@ export function Composer({
           key="text"
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
+          onFocus={onInputFocus}
           onPaste={handlePaste}
           onKeyDown={(e) => {
             // Desktop: Enter sends, Shift+Enter inserts a newline. Mobile:
@@ -657,12 +685,13 @@ export function Composer({
       ) : recState === 'idle' && (draft.trim() || attachments.length > 0) ? (
         <button
           type="submit"
+          disabled={sending}
           // Suppress the button's own focus-steal so tapping Send doesn't blur
           // the textarea and collapse the on-screen keyboard (user feedback:
           // Samsung PWA). The click/submit still fires normally; only the
           // default focus shift is cancelled.
           onPointerDown={(e) => e.preventDefault()}
-          className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
+          className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
           style={{ touchAction: 'manipulation' }}
         >
           <Send size={15} />
