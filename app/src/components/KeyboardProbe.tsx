@@ -127,7 +127,10 @@ function verdict(steps: { t: number; value: number }[]): { text: string; good: b
 }
 
 export function KeyboardProbe() {
-  const [capture, setCapture] = useState<Capture | null>(null);
+  // Both phases are kept side by side, not in one slot: blurring the field to
+  // go read the result *is* the close capture, so a single slot means the open
+  // capture — the one that matters — is always the one you can't see.
+  const [captures, setCaptures] = useState<{ open: Capture | null; close: Capture | null }>({ open: null, close: null });
   const [status, setStatus] = useState('Focus the field to record.');
   const [overlays, setOverlays] = useState(false);
   const [widgetMode, setWidgetMode] = useState(currentInteractiveWidget);
@@ -187,29 +190,30 @@ export function KeyboardProbe() {
       vv?.removeEventListener('scroll', onVvScroll);
       api?.removeEventListener('geometrychange', onGeometry);
       runningRef.current = false;
-      setCapture({
+      const next: Capture = {
         phase,
         ua: navigator.userAgent,
         interactiveWidget: currentInteractiveWidget(),
         overlaysContent: api?.overlaysContent ?? false,
         samples,
         markers,
-      });
+      };
+      setCaptures((prev) => ({ ...prev, [phase]: next }));
       setStatus(`Captured ${samples.length} frames on ${phase}.`);
     };
     requestAnimationFrame(step);
     setStatus(`Recording ${phase}…`);
   }
 
-  const rows = capture
-    ? ([
-        ['window.innerHeight', transitions(capture.samples, (s) => s.inner)],
-        ['visualViewport.height', transitions(capture.samples, (s) => s.vv)],
-        ['visualViewport.offsetTop', transitions(capture.samples, (s) => s.vvTop)],
-        ['env(keyboard-inset-height)', transitions(capture.samples, (s) => s.kbEnv)],
-        ['virtualKeyboard.boundingRect', transitions(capture.samples, (s) => s.vk)],
-      ] as const)
-    : [];
+  function rowsFor(capture: Capture) {
+    return [
+      ['window.innerHeight', transitions(capture.samples, (s) => s.inner)],
+      ['visualViewport.height', transitions(capture.samples, (s) => s.vv)],
+      ['visualViewport.offsetTop', transitions(capture.samples, (s) => s.vvTop)],
+      ['env(keyboard-inset-height)', transitions(capture.samples, (s) => s.kbEnv)],
+      ['virtualKeyboard.boundingRect', transitions(capture.samples, (s) => s.vk)],
+    ] as const;
+  }
 
   return (
     <section className="flex flex-col gap-2 text-sm">
@@ -264,42 +268,53 @@ export function KeyboardProbe() {
 
       <p className="text-xs text-neutral-500 dark:text-neutral-400">{status}</p>
 
-      {capture && (
-        <>
-          <table className="w-full text-left text-xs">
-            <tbody>
-              {rows.map(([label, steps]) => {
-                const v = verdict(steps);
-                return (
-                  <tr key={label} className="border-t border-black/5 dark:border-white/5">
-                    <td className="py-1 pr-2 align-top font-mono">{label}</td>
-                    <td className="py-1 pr-2 align-top">{v.text}</td>
-                    <td
-                      className={
-                        'py-1 align-top font-semibold ' +
-                        (v.good ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400')
-                      }
-                    >
-                      {steps.length === 0 ? '—' : v.good ? 'tracks' : 'jumps'}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+      {(['open', 'close'] as const).map((phase) => {
+        const capture = captures[phase];
+        if (!capture) return null;
+        return (
+          <div key={phase} className="flex flex-col gap-1">
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+              {phase === 'open' ? 'Keyboard opening (focus)' : 'Keyboard closing (blur)'}
+            </h4>
+            <table className="w-full text-left text-xs">
+              <tbody>
+                {rowsFor(capture).map(([label, steps]) => {
+                  const v = verdict(steps);
+                  return (
+                    <tr key={label} className="border-t border-black/5 dark:border-white/5">
+                      <td className="py-1 pr-2 align-top font-mono">{label}</td>
+                      <td className="py-1 pr-2 align-top">{v.text}</td>
+                      <td
+                        className={
+                          'py-1 align-top font-semibold ' +
+                          (v.good ? 'text-green-600 dark:text-green-400' : 'text-amber-600 dark:text-amber-400')
+                        }
+                      >
+                        {steps.length === 0 ? '—' : v.good ? 'tracks' : 'jumps'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
 
+      {(captures.open || captures.close) && (
+        <>
           <button
-            onClick={() => void navigator.clipboard?.writeText(JSON.stringify(capture)).then(() => setStatus('Copied.'))}
+            onClick={() => void navigator.clipboard?.writeText(JSON.stringify(captures)).then(() => setStatus('Copied.'))}
             className="self-start rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white"
           >
-            Copy raw JSON
+            Copy raw JSON (both phases)
           </button>
 
           {/* Readable without a desktop attached — the point of the probe is
               that the device can report its own findings. */}
           <textarea
             readOnly
-            value={JSON.stringify(capture)}
+            value={JSON.stringify(captures)}
             className="h-24 w-full rounded border border-black/10 bg-white p-2 font-mono text-[10px] dark:border-white/10 dark:bg-neutral-800"
           />
         </>
