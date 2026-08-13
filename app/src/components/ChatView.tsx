@@ -76,11 +76,12 @@ const DOUBLE_TAP_MS = 250;
 // px of momentum overscroll or a fractional layout height doesn't read as
 // "the reader deliberately scrolled up".
 const BOTTOM_LATCH_PX = 80;
-// How long to keep re-pinning the list to the bottom after the composer takes
-// focus — long enough to cover a soft keyboard's slide-in *and* the layout
-// resize some browsers only commit once it finishes. Cheap: one no-op
-// `scrollTop` write per frame.
-const KEYBOARD_PIN_MS = 900;
+// One late re-pin after the composer takes focus, for the case where the
+// browser pans the page instead of resizing anything and the observer below
+// therefore never fires. Comfortably past a soft keyboard's slide-in; a single
+// write, not a loop — see `handleComposerFocus` for why that distinction
+// matters to how the list feels.
+const KEYBOARD_SETTLE_MS = 400;
 
 // Swipe-to-reply gesture thresholds (mobile) — grouped here for later
 // real-device tuning, same convention as Composer.tsx's gesture constants.
@@ -527,29 +528,28 @@ export function ChatView({
   }, []);
 
   /** The composer's text field took focus, so the soft keyboard is on its way
-   *  up — keep the newest message in view as it arrives (the literal user ask:
-   *  "focusing the composer should bring the chat up so I can still see the
-   *  bottom"). The observer above catches the layout change on its own, but
-   *  the keyboard animates in over a few hundred ms and browsers settle it in
-   *  differing numbers of steps — some pan the visual viewport rather than
-   *  resizing anything, where no resize fires at all. So: re-pin every frame
-   *  for `KEYBOARD_PIN_MS`, which tracks the animation instead of landing
-   *  after it (the first cut re-pinned at three fixed timeouts and read as a
-   *  visible lag). Each frame is one `scrollTop` write that's a no-op when
-   *  nothing moved. Respects the same `atBottomRef` latch: tapping the
-   *  composer to reply *while reading history* must not fling anyone to the
-   *  bottom, and the loop bails the moment the latch clears (i.e. the reader
-   *  scrolls up mid-animation). */
+   *  up. The observer above is what actually keeps the newest message in view
+   *  — it fires in the same layout pass as the resize, which is as early as
+   *  any of this can happen — so all this adds is one immediate pin (a no-op
+   *  in the common case where the list is already pinned) plus one late one
+   *  as a safety net for a browser that pans instead of resizing, where no
+   *  observer would ever fire.
+   *
+   *  Deliberately NOT a rAF loop across the keyboard animation, which is what
+   *  the previous cut did: writing `scrollTop` every frame for most of a
+   *  second means a swipe during that window gets overwritten, and the list
+   *  reads as rigid rather than merely late (user feedback, 2026-08-13 —
+   *  "feels forced"). It also bought nothing: content cannot move before the
+   *  browser moves the layout, so the frames before the resize were all
+   *  no-ops. */
   function handleComposerFocus() {
-    if (!atBottomRef.current) return;
-    const until = performance.now() + KEYBOARD_PIN_MS;
-    const step = () => {
+    const pin = () => {
       const el = scrollerRef.current;
-      if (!el || !atBottomRef.current) return;
-      el.scrollTop = el.scrollHeight;
-      if (performance.now() < until) requestAnimationFrame(step);
+      if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
     };
-    step();
+    if (!atBottomRef.current) return;
+    pin();
+    window.setTimeout(pin, KEYBOARD_SETTLE_MS);
   }
 
   // Short chats: if the first page doesn't even fill the viewport there's no
