@@ -191,9 +191,16 @@ export async function uploadAlbum(
   replyToId: string | undefined,
   onProgress?: (itemIndex: number, itemPct: number, total: number) => void,
 ): Promise<AlbumUploadOutcome> {
+  // docs/MEDIA_ATTACHMENTS.md §4.6 — measure intrinsic sizes before minting so
+  // every other member's 'processing' placeholder has the right aspect from
+  // the moment the album appears. Measured here rather than in `stageFiles`
+  // because that's a synchronous pure helper and this is the one place that
+  // already awaits; a failure to measure just omits the hint.
+  const sizes = await Promise.all(items.map((i) => intrinsicSize(i.file, i.kind)));
+
   const createBody: CreateUploadRequest = {
     chatId,
-    items: items.map((i) => ({ kind: i.kind, mime: i.mime, sizeBytes: i.file.size })),
+    items: items.map((i, idx) => ({ kind: i.kind, mime: i.mime, sizeBytes: i.file.size, ...(sizes[idx] ?? {}) })),
     ...(caption?.trim() ? { caption: caption.trim() } : {}),
     ...(replyToId ? { replyToId } : {}),
   };
@@ -210,6 +217,48 @@ export async function uploadAlbum(
     results.push({ ...result, localId: input.localId });
   }
   return { messageId: created.messageId, items: results };
+}
+
+/**
+ * Reads a file's intrinsic pixel size without decoding the whole thing into a
+ * canvas — `<img>`/`<video>` metadata is enough, and both report the
+ * *display* orientation the server will eventually store (the server re-derives
+ * it anyway, EXIF and rotation-matrix included; see PROJECT.md §14 2026-07-22).
+ *
+ * Best-effort by design: an unsupported/undecodable file (HEIC in Chrome is the
+ * common one — docs/MEDIA_ATTACHMENTS.md §5.7) resolves to `null` and the
+ * upload simply carries no hint, falling back to today's generic placeholder.
+ * It never rejects, never blocks the send, and is capped by a timeout so a
+ * pathological file can't stall an album behind metadata that will never load.
+ */
+async function intrinsicSize(file: Blob, kind: MediaKind): Promise<{ width: number; height: number } | null> {
+  if (kind !== 'image' && kind !== 'video') return null;
+
+  const url = URL.createObjectURL(file);
+  try {
+    return await new Promise<{ width: number; height: number } | null>((resolve) => {
+      const timeout = window.setTimeout(() => finish(null), 3000);
+      function finish(value: { width: number; height: number } | null) {
+        window.clearTimeout(timeout);
+        resolve(value);
+      }
+
+      if (kind === 'image') {
+        const img = new Image();
+        img.onload = () => finish(img.naturalWidth && img.naturalHeight ? { width: img.naturalWidth, height: img.naturalHeight } : null);
+        img.onerror = () => finish(null);
+        img.src = url;
+      } else {
+        const video = document.createElement('video');
+        video.preload = 'metadata';
+        video.onloadedmetadata = () => finish(video.videoWidth && video.videoHeight ? { width: video.videoWidth, height: video.videoHeight } : null);
+        video.onerror = () => finish(null);
+        video.src = url;
+      }
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 /** Retries already-minted items (mint succeeded, PUT and/or complete didn't)

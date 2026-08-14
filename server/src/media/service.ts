@@ -39,6 +39,7 @@ import { processMedia } from './process.js';
 import { reactionsForMessages } from '../chat/reactions.js';
 import { assertReplyTarget, replyPreviewFor } from '../chat/replies.js';
 import { addTag, tagsForMediaIds } from './tags.js';
+import { aspectHint } from '../aspectHint.js';
 
 /** Containers MediaRecorder emits (webm, mp4) don't always let magic-number
  *  sniffing distinguish "video with no video track" from "actual video" —
@@ -139,6 +140,11 @@ export interface CreateUploadItemInput {
   kind: MediaKind;
   mime: string;
   sizeBytes: number;
+  /** Client-declared aspect hint (docs/MEDIA_ATTACHMENTS.md §4.6) — clamped
+   *  through `aspectHint()` below, overwritten by real measurements at
+   *  processing time. */
+  width?: number;
+  height?: number;
 }
 
 export interface CreateUploadItemResult {
@@ -199,6 +205,12 @@ export async function createUpload(
 
     const ids: bigint[] = [];
     for (const item of items) {
+      // docs/MEDIA_ATTACHMENTS.md §4.6 — a provisional aspect so other
+      // members' 'processing' placeholder is the right shape immediately.
+      // Voice has no visual box, so it never carries one. Overwritten by
+      // process.ts's measured dims (sharp/ffprobe, EXIF-orientation aware) on
+      // success; on failure the row is never rendered by any read path.
+      const hint = item.kind === 'voice' ? undefined : aspectHint(item.width, item.height);
       const mediaInserted = await tx
         .insert(media)
         .values({
@@ -209,6 +221,7 @@ export async function createUpload(
           mime: item.mime,
           sizeBytes: BigInt(item.sizeBytes),
           status: 'processing',
+          ...(hint ? { width: hint.width, height: hint.height } : {}),
         })
         .returning();
       const mediaRow = mediaInserted[0]!;

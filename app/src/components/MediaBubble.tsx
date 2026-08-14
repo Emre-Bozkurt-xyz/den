@@ -59,8 +59,25 @@ export function MediaBubble({
   const blurred = useIsBlurred(media);
 
   if (media.status === 'processing') {
+    // docs/MEDIA_ATTACHMENTS.md §4.6 — reserve the real aspect when the sender
+    // sent a size hint, so this card is already the shape the finished image
+    // will be. The fixed `h-32` below is now only the fallback for rows with
+    // no dimensions (voice, a file the sender's browser couldn't measure, or
+    // anything uploaded before the hint existed). Without this the card grew
+    // when processing finished, shoving the message list under whoever was
+    // reading — the same class of bug `PreviewImage` fixes for loaded media
+    // (PROJECT.md §14, 2026-07-22).
+    const aspect = media.width && media.height ? `${media.width} / ${media.height}` : undefined;
     return (
-      <div className="flex h-32 w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-border bg-surface-sunken text-xs text-text-muted">
+      <div
+        className={
+          'flex w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-border bg-surface-sunken text-xs text-text-muted ' +
+          (aspect ? '' : 'h-32')
+        }
+        // Capped at the same max height a loaded image gets, so an extreme
+        // portrait hint can't reserve a taller box than the real thing will.
+        style={aspect ? { aspectRatio: aspect, maxHeight: '18rem' } : undefined}
+      >
         <Loader2 size={18} className="animate-spin" />
         Processing {LABEL[media.kind]}…
       </div>

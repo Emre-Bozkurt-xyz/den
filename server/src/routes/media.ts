@@ -34,7 +34,12 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
       if (!item || !MEDIA_KINDS.has(item.kind)) throw validation(`items[${i}].kind must be image, video, or voice`);
       if (typeof item.mime !== 'string' || !item.mime) throw validation(`items[${i}].mime required`);
       if (typeof item.sizeBytes !== 'number') throw validation(`items[${i}].sizeBytes required`);
-      return { kind: item.kind, mime: item.mime, sizeBytes: item.sizeBytes };
+      // width/height are the optional aspect hint (docs/MEDIA_ATTACHMENTS.md
+      // §4.6) — deliberately NOT validated here, because `aspectHint()` in the
+      // service already treats every non-number, non-finite and non-positive
+      // value as "no hint". Rejecting the request over a cosmetic field would
+      // fail an upload for something that costs nothing to ignore.
+      return { kind: item.kind, mime: item.mime, sizeBytes: item.sizeBytes, width: item.width, height: item.height };
     });
 
     const chatId = parseId(body.chatId);
