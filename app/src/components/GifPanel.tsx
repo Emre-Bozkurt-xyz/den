@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ArrowLeft, Loader2, Search, Star } from 'lucide-react';
 import { GifLimits, type GifSearchItem, type GifSearchResponse } from '@den/shared';
+import klipyLogoBlack from '../assets/klipy/powered-by-klipy-black.svg';
+import klipyLogoWhite from '../assets/klipy/powered-by-klipy-white.svg';
 import { fetchGifSearch, fetchGifTrending } from '../lib/gifs';
 import { useBackHandler } from '../lib/backStack';
 import { useElementWidth } from '../hooks/useElementWidth';
@@ -334,9 +336,22 @@ export function GifPanel({ onPick, onClose }: { onPick: (gif: GifSearchItem) => 
         )}
       </div>
 
-      {/* Attribution (KLIPY terms — self-hosted text, no remote asset, so
-          CLAUDE.md invariant 10 holds). */}
-      <div className="border-t border-border px-3 py-1.5 text-right text-[10px] uppercase tracking-wide text-text-muted">Powered by KLIPY</div>
+      {/* Attribution — "Logo in picker/selector", KLIPY's Brand Attribution
+          Guideline (docs/GIFS.md §9): *display the "Powered by KLIPY" logo …
+          near the search bar or preview area and keep it visible while the
+          selector is open*. Optional in their terms, but free to satisfy and
+          it is their own reference layout.
+
+          Their official SVGs, self-hosted from `app/src/assets/klipy/` — so
+          CLAUDE.md invariant 10 holds (no CDN, no remote asset), and the mark
+          is never recolored: the black and white files are theirs, swapped by
+          theme rather than filtered or tinted. Dark mode here is
+          `prefers-color-scheme` (index.css), which is exactly what Tailwind's
+          `dark:` variant keys off. */}
+      <div className="flex shrink-0 items-center justify-end border-t border-border px-3 py-1.5">
+        <img src={klipyLogoBlack} alt="Powered by KLIPY" className="h-3 w-auto opacity-70 dark:hidden" />
+        <img src={klipyLogoWhite} alt="Powered by KLIPY" className="hidden h-3 w-auto opacity-70 dark:block" />
+      </div>
 
       {popover && (
         <FavoritePopover

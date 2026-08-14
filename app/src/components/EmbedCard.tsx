@@ -1,6 +1,7 @@
 import { Clapperboard, ExternalLink, Link as LinkIcon, Loader2, TriangleAlert } from 'lucide-react';
 import type { EmbedProvider, Message } from '@den/shared';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
+import klipyWatermark from '../assets/klipy/klipy-watermark.svg';
 
 /**
  * The ONE shared card renderer for every embed provider (docs/EMBEDS.md
@@ -163,9 +164,32 @@ function InlineGif({ embed }: { embed: NonNullable<Message['embed']> }) {
       onContextMenu={suppressTouchContextMenu}
     >
       {embed.thumbUrl ? (
-        // Animated WebP in an <img> (D6) — no <video>, so none of iOS's
-        // autoplay gesture rules apply and it simply plays.
-        <img src={embed.thumbUrl} alt={embed.title ?? 'GIF'} className="h-full w-full object-cover" />
+        <>
+          {/* Animated WebP in an <img> (D6) — no <video>, so none of iOS's
+              autoplay gesture rules apply and it simply plays. */}
+          <img src={embed.thumbUrl} alt={embed.title ?? 'GIF'} className="h-full w-full object-cover" />
+          {/* KLIPY's "Watermark on sent card" (docs/GIFS.md §9) — their words:
+              *use the semi-transparent white logo in the bottom-left corner
+              for visibility with minimal distraction*. Optional in their
+              guideline, not required.
+
+              ⚠️ **Deliberately a CSS overlay, never baked into the stored
+              WebP.** The resolver could composite this at encode time, and
+              that would be a mistake: the R2 object is permanent and shared by
+              every member forever, so a baked mark could never be removed, and
+              a future KLIPY rebrand would leave every GIF ever sent carrying a
+              dead logo. As an overlay it is one line to change or drop.
+
+              The wordmark-only asset, not the one with the chicken mark: at
+              the ~10px this renders on a 192px card, the mark turns to mud
+              while the wordmark stays legible. */}
+          <img
+            src={klipyWatermark}
+            alt=""
+            aria-hidden
+            className="pointer-events-none absolute bottom-1 left-1 h-2.5 w-auto opacity-60 drop-shadow-[0_1px_1px_rgba(0,0,0,0.55)]"
+          />
+        </>
       ) : (
         <div className="grid h-full place-items-center text-text-muted">
           <Loader2 size={18} className="animate-spin" />
