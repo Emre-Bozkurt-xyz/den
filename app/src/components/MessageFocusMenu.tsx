@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { CheckSquare, Copy, EyeOff, Pencil, Plus, Reply, Trash2 } from 'lucide-react';
+import { CheckSquare, Copy, EyeOff, Pencil, Plus, Reply, Star, Trash2 } from 'lucide-react';
 import { ReactionLimits, type MeResponse, type Message } from '@den/shared';
 import { formatSendTime } from '../lib/datetime';
 import { useReducedMotion } from '../hooks/useReducedMotion';
@@ -61,6 +61,8 @@ export function MessageFocusMenu({
   onDelete,
   onEdit,
   onDiscard,
+  onFavorite,
+  favorited,
 }: {
   message: Message;
   /** Captured via `messageRefs.get(id).getBoundingClientRect()` at the
@@ -87,6 +89,12 @@ export function MessageFocusMenu({
   /** docs/RECEIPTS.md §5.4 — removes a `failed:` bubble for good. Same
    *  caller-closes contract as every other row here. */
   onDiscard: (m: Message) => void;
+  /** docs/GIF_FAVORITES.md §8.1 — undefined unless this message is an inline
+   *  GIF *and* GIFs are configured on this server, in which case no row
+   *  renders. This is the mobile half of the affordance; desktop reaches the
+   *  same action through the hover bar's star (`MessageActions`). */
+  onFavorite?: (m: Message) => void;
+  favorited?: boolean;
 }) {
   const reducedMotion = useReducedMotion();
   // System back gesture / browser back dismisses the menu (matches Escape and
@@ -339,6 +347,19 @@ export function MessageFocusMenu({
               >
                 <Pencil size={16} />
                 Edit
+              </button>
+            )}
+            {/* docs/GIF_FAVORITES.md §8.1 — sits above Select so the two
+                content actions (Reply, Favorite) stay together, ahead of the
+                list-management ones. */}
+            {onFavorite && (
+              <button
+                onClick={() => onFavorite(message)}
+                className="flex items-center gap-3 px-4 py-3 text-left text-sm text-text-primary transition-colors hover:bg-surface-sunken"
+                style={{ touchAction: 'manipulation' }}
+              >
+                <Star size={16} className={favorited ? 'fill-current text-accent' : undefined} />
+                {favorited ? 'Remove from favorites' : 'Save to favorites'}
               </button>
             )}
             <button

@@ -44,6 +44,7 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { useIntroIds } from '../hooks/useIntroIds';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { useMediaTags } from '../hooks/useMediaTags';
+import { useGifFavoriteActions, type GifFavoriteApi } from '../hooks/useGifFavorites';
 import { useBackHandler } from '../lib/backStack';
 import { AlbumCard } from './AlbumCard';
 import { AttachmentSheet } from './AttachmentSheet';
@@ -377,6 +378,14 @@ export function ChatView({
   // makes the existing gallery TagEditor reachable straight from a chat
   // bubble instead of only via the gallery screen.
   const viewerTags = useMediaTags(viewerMedia?.id ?? null);
+  // docs/GIF_FAVORITES.md §8.1 — built once here and threaded down as a single
+  // prop, rather than each message row subscribing to the same query itself.
+  // Gated on `gifsEnabled` so a server with no Klipy key never fetches keys and
+  // never renders a star.
+  const gifFavorites = useGifFavoriteActions(me.gifsEnabled);
+  // Null for every message except a ready inline GIF, which is what makes the
+  // focus menu's Favorite row appear only where it means something.
+  const menuGifState = actionMenuFor ? gifFavorites.stateFor(actionMenuFor.message) : null;
   const selectedMessages = messages.filter((m) => selectedIds.has(m.id));
   const allSelectedMine = selectedMessages.length > 0 && selectedMessages.every((m) => m.senderId === me.id);
   const canCopySelection = selectedMessages.some((m) => m.body);
@@ -1495,6 +1504,7 @@ export function ChatView({
                 onClickBlock={onBubbleClick}
                 receipts={receiptDerivation}
                 onRetryFailed={retrySend}
+                gifFavorites={gifFavorites}
               />
             ),
           )}
@@ -1643,6 +1653,15 @@ export function ChatView({
             setActionMenuFor(null);
             discardFailed(m.id);
           }}
+          favorited={menuGifState?.favorited}
+          onFavorite={
+            menuGifState
+              ? (m) => {
+                  setActionMenuFor(null);
+                  gifFavorites.toggle(m);
+                }
+              : undefined
+          }
         />
       )}
       </div>
@@ -1798,6 +1817,7 @@ function RunGroup({
   onClickBlock,
   receipts,
   onRetryFailed,
+  gifFavorites,
 }: {
   run: MessageRun;
   chat: ChatSummary;
@@ -1842,6 +1862,9 @@ function RunGroup({
    *  only). */
   receipts: ReceiptDerivation;
   onRetryFailed: (failedId: string) => void;
+  /** docs/GIF_FAVORITES.md §8.1 — one object rather than an
+   *  onFavorite/favorited pair, so this already-wide prop chain grows by one. */
+  gifFavorites: GifFavoriteApi;
 }) {
   const mine = run.senderId === me.id;
   const senderName = chat.members.find((mem) => mem.id === run.senderId)?.displayName ?? 'Unknown';
@@ -1896,6 +1919,7 @@ function RunGroup({
             seenAvatars={blockSeenAvatars}
             status={blockStatus}
             onRetryFailed={onRetryFailed}
+            gifFavorites={gifFavorites}
           />
         );
       })}
@@ -1963,6 +1987,7 @@ function MessageBlockRow({
   seenAvatars,
   status,
   onRetryFailed,
+  gifFavorites,
 }: {
   block: MessageBlock;
   chat: ChatSummary;
@@ -2007,6 +2032,7 @@ function MessageBlockRow({
   seenAvatars: PublicUser[];
   status: { messageId: string; kind: 'sent' | 'delivered' } | null;
   onRetryFailed: (failedId: string) => void;
+  gifFavorites: GifFavoriteApi;
 }) {
   const msgs = blockMessages(block);
   const m = msgs[0]!;
@@ -2063,8 +2089,20 @@ function MessageBlockRow({
   // exclusion as the quote above.
   const reactions = !isStack ? m.reactions : [];
 
+  // docs/GIF_FAVORITES.md §8.1 / D-F5 — the star joins the existing hover bar
+  // instead of overlaying the GIF's corner, so a GIF bubble keeps exactly one
+  // hover affordance. Null (and therefore no star) for every message that
+  // isn't a ready inline GIF.
+  const gifFavoriteState = gifFavorites.stateFor(m);
   const actionsButton = showActionsButton && !pending && (
-    <MessageActions onMore={() => onOpenActions(m)} onReply={() => onReply(m)} onReact={() => onOpenActions(m)} onlyMore={failed} />
+    <MessageActions
+      onMore={() => onOpenActions(m)}
+      onReply={() => onReply(m)}
+      onReact={() => onOpenActions(m)}
+      onlyMore={failed}
+      favorited={gifFavoriteState?.favorited}
+      onFavorite={gifFavoriteState ? () => gifFavorites.toggle(m) : undefined}
+    />
   );
 
   const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);

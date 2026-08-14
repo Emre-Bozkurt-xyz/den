@@ -1,4 +1,4 @@
-import { MoreVertical, Reply, Smile } from 'lucide-react';
+import { MoreVertical, Reply, Smile, Star } from 'lucide-react';
 
 /**
  * Desktop-only hover action bar next to a bubble (UI-8c request G,
@@ -19,11 +19,20 @@ export function MessageActions({
   onMore,
   onReply,
   onReact,
+  onFavorite,
+  favorited,
   onlyMore,
 }: {
   onMore: () => void;
   onReply: () => void;
   onReact: () => void;
+  /** docs/GIF_FAVORITES.md §8.1 / D-F5 — present only for an inline GIF, which
+   *  is the only message kind with anything to save. A star *overlaid* on the
+   *  GIF's corner was considered and rejected: it would appear on hover at the
+   *  same instant as this bar, giving one bubble two competing affordances.
+   *  Undefined for every other message, and then no star renders. */
+  onFavorite?: () => void;
+  favorited?: boolean;
   /** docs/RECEIPTS.md §5.4 — a failed send has no reply target and nothing
    *  to react to (it never reached the server); only the "More" icon (→ the
    *  Discard-only focus menu) applies. */
@@ -36,6 +45,14 @@ export function MessageActions({
         <>
           <IconButton icon={Reply} label="Reply" onClick={onReply} />
           <IconButton icon={Smile} label="React" onClick={onReact} />
+          {onFavorite && (
+            <IconButton
+              icon={Star}
+              label={favorited ? 'Remove from favorites' : 'Save to favorites'}
+              onClick={onFavorite}
+              filled={favorited}
+            />
+          )}
         </>
       )}
     </div>
@@ -46,10 +63,13 @@ function IconButton({
   icon: Icon,
   label,
   onClick,
+  filled,
 }: {
   icon: typeof MoreVertical;
   label: string;
   onClick: () => void;
+  /** Renders the glyph solid rather than outlined — the star's "on" state. */
+  filled?: boolean;
 }) {
   return (
     <button
@@ -58,10 +78,13 @@ function IconButton({
         onClick();
       }}
       aria-label={label}
-      className="rounded-pill p-1 text-text-muted transition-colors hover:bg-surface-sunken"
+      aria-pressed={filled}
+      className={
+        'rounded-pill p-1 transition-colors hover:bg-surface-sunken ' + (filled ? 'text-accent' : 'text-text-muted')
+      }
       style={{ touchAction: 'manipulation' }}
     >
-      <Icon size={14} />
+      <Icon size={14} className={filled ? 'fill-current' : undefined} />
     </button>
   );
 }

@@ -147,6 +147,10 @@ export function toEmbedInfo(e: EmbedRow, thumbUrl: string | null): EmbedInfo {
     description: e.description,
     thumbUrl,
     canonicalUrl: e.canonicalUrl,
+    // docs/GIF_FAVORITES.md D-F6 — the handle a chat GIF card favorites with.
+    // Not a new disclosure: for `klipy` this is the tail of `canonicalUrl`,
+    // which is already on this DTO.
+    providerRef: e.providerRef,
     contentKind: e.contentKind,
     actionType: e.actionType as EmbedActionType,
     width: dimensionFrom(e.data, 'width'),

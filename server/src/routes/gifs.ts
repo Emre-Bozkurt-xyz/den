@@ -15,13 +15,25 @@
  * a shared, rate-limited key.
  */
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_USER_SETTINGS, GIF_RATINGS, GifLimits, type GifRating, type GifSearchResponse } from '@den/shared';
+import {
+  DEFAULT_USER_SETTINGS,
+  GIF_RATINGS,
+  GifLimits,
+  type AddGifFavoriteRequest,
+  type GifFavorite,
+  type GifFavoriteKeysResponse,
+  type GifFavoritesResponse,
+  type GifRating,
+  type GifSearchResponse,
+} from '@den/shared';
 import { requireAuth } from '../auth/session.js';
-import { validation } from '../errors.js';
+import { unavailable, validation } from '../errors.js';
 import { db } from '../db/index.js';
 import { users } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { gifsEnabled } from '../env.js';
 import { searchGifs, trendingGifs } from '../gifs/klipy.js';
+import { addFavorite, favoriteKeys, listFavorites, removeFavorite } from '../gifs/favorites.js';
 
 /**
  * In-memory response cache (docs/GIFS.md §10). Not just a rate-limit dodge —
@@ -103,4 +115,70 @@ export async function gifRoutes(app: FastifyInstance): Promise<void> {
       return cached(`t|${rating}|${page}`, TRENDING_TTL_MS, () => trendingGifs(page, rating));
     },
   );
+
+  // ─── favorites (docs/GIF_FAVORITES.md §6) ────────────────────────────────
+  //
+  // All four are `requireAuth` and scoped to `req.user.id` inside
+  // `gifs/favorites.ts`. None takes a chat id, because a favorite references a
+  // public provider slug rather than any Den object — see that module's header
+  // for why invariant 1 has nothing to guard here.
+  //
+  // All four also refuse when the server has no Klipy key, so a deployment
+  // without one has no half-working surface: the client hides the whole GIF
+  // affordance on `gifsEnabled: false`, and anything reaching these anyway is
+  // a stale tab rather than a user in a working state.
+
+  /** Guard shared by the four routes below — `unavailable` is a 503, which is
+   *  the honest code: the caller did nothing wrong and nothing is broken. */
+  function requireGifs(): void {
+    if (!gifsEnabled) throw unavailable('GIFs are not configured');
+  }
+
+  function parseCursor(raw: unknown): bigint | undefined {
+    if (raw === undefined || raw === '') return undefined;
+    try {
+      return BigInt(String(raw));
+    } catch {
+      throw validation('invalid cursor');
+    }
+  }
+
+  app.get<{ Querystring: { before?: string } }>(
+    '/gifs/favorites',
+    { preHandler: requireAuth },
+    async (req): Promise<GifFavoritesResponse> => {
+      requireGifs();
+      return listFavorites(req.user!.id, parseCursor(req.query.before));
+    },
+  );
+
+  // Deliberately a separate, unpaginated route rather than something derived
+  // from the list above: all three surfaces (picker tile, chat card, favorites
+  // tab) need the same "is this starred?" answer but hold different handles,
+  // and paginating that answer would mean a star's correctness depended on how
+  // far the user had scrolled. Bounded by GifLimits.maxFavorites.
+  app.get('/gifs/favorites/keys', { preHandler: requireAuth }, async (req): Promise<GifFavoriteKeysResponse> => {
+    requireGifs();
+    return { keys: await favoriteKeys(req.user!.id) };
+  });
+
+  app.post<{ Body: AddGifFavoriteRequest }>(
+    '/gifs/favorites',
+    { preHandler: requireAuth },
+    async (req): Promise<GifFavorite> => {
+      requireGifs();
+      const slug = req.body?.slug;
+      if (typeof slug !== 'string' || !slug) throw validation('slug required');
+      // The slug may arrive suffixed (a search result) or canonical (a chat
+      // card or the favorites tab); `addFavorite` resolves either against
+      // Klipy and stores the canonical form.
+      return addFavorite(req.user!.id, slug);
+    },
+  );
+
+  app.delete<{ Params: { slug: string } }>('/gifs/favorites/:slug', { preHandler: requireAuth }, async (req) => {
+    requireGifs();
+    await removeFavorite(req.user!.id, req.params.slug);
+    return { ok: true };
+  });
 }

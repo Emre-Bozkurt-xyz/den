@@ -457,6 +457,74 @@ export const chatVaultDocs = pgTable(
   ],
 );
 
+// ─── GIF favorites (post-MVP, migration 015, docs/GIF_FAVORITES.md) ─────────
+
+/**
+ * Migration 015 (docs/GIF_FAVORITES.md §4): per-user GIF favorites.
+ *
+ * ⚠️ **This table HARD-DELETES on unfavorite** (D-F2), which is a deliberate
+ * carve-out from CLAUDE.md invariant 8, not an oversight. "Soft deletes only"
+ * governs *content* — messages, media, Stage docs — where disappearance is a
+ * loss and history matters. A favorite is a per-user toggle edge, and every
+ * comparable table in this schema already hard-deletes: `message_reactions`,
+ * `media_tags`, `friendships`, `vault_links`. A `deleted_at` here would also
+ * make re-favoriting an *un-delete* rather than an insert, which is strictly
+ * worse. See `server/src/gifs/favorites.ts`.
+ *
+ * Nothing here is chat-scoped: a favorite references a public provider id, not
+ * a Den object, so it crosses no chat boundary and needs no membership gate.
+ */
+export const gifFavorites = pgTable(
+  'gif_favorites',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    userId: bigint('user_id', { mode: 'bigint' })
+      .notNull()
+      .references(() => users.id),
+    // Mirrors embeds_provider_check deliberately. docs/GIFS.md §2 says to
+    // assume a provider swap will happen (this feature exists because Tenor's
+    // API was discontinued); a favorites table hardcoded to Klipy is exactly
+    // what would make that swap expensive.
+    provider: text('provider').notNull(),
+    /** CANONICAL slug — never a suffixed search-result one (docs/GIFS.md §12).
+     *  The unique index below sits on this rather than on `providerItemId`
+     *  because it is the handle both the send path and DELETE take; that is
+     *  also what makes a double-add a harmless no-op. */
+    providerRef: text('provider_ref').notNull(),
+    /** The provider's stable per-item id (docs/GIF_FAVORITES.md §2), which is
+     *  how a *search result* is matched against this row — its slug can't be.
+     *
+     *  `text`, not `bigint`: Klipy's ids are ~16 digits and would fit, but
+     *  they're opaque handles, not numbers. Nothing sorts, sums or ranges over
+     *  them, a future provider's ids may not be numeric at all, and text
+     *  sidesteps the bigint↔JSON dance for a value only ever compared for
+     *  equality.
+     *
+     *  **Nullable** — §2's floor again. If the provider ever stops reporting
+     *  an id, favoriting must still work; only the picker's pre-filled star is
+     *  lost. A NOT NULL here would have turned a cosmetic degradation into a
+     *  failed write. */
+    providerItemId: text('provider_item_id'),
+    /** Klipy CDN URL, derived server-side at favorite time — never accepted
+     *  from the client (D-F3), because this column is later loaded in an
+     *  <img>. Perishable third-party state (D-F4): when it rots the tile goes
+     *  dead, but the favorite stays sendable since the send path re-resolves
+     *  from `providerRef`. */
+    previewUrl: text('preview_url').notNull(),
+    width: integer('width').notNull(),
+    height: integer('height').notNull(),
+    title: text('title').notNull(), // alt text — an accessibility field
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('gif_favorites_provider_check', sql`${t.provider} IN ('klipy')`),
+    uniqueIndex('gif_favorites_user_item').on(t.userId, t.provider, t.providerRef),
+    // The list query: one user's favorites, newest first, keyset-paginated on
+    // id (PROJECT.md §6 — no OFFSET in new code).
+    index('idx_gif_favorites_user').on(t.userId, t.id.desc()),
+  ],
+);
+
 /** Raw SQL run before the tables in migration 001 (citext type must exist). */
 export const CITEXT_EXTENSION = sql`CREATE EXTENSION IF NOT EXISTS citext`;
 

@@ -206,6 +206,12 @@ function buildOptimisticMessage(id: string, args: PendingSendArgs, senderId: str
         title: args.gif.title,
         subtitle: null,
         description: null,
+        // The slug we're sending — but note it may still be the *suffixed*
+        // search-result form here (docs/GIFS.md §12); the server replaces this
+        // row with the canonical one moments later. Harmless either way: a
+        // pending bubble is excluded from the focus menu, so nothing reads
+        // this before `message.new` overwrites it.
+        providerRef: args.gif.slug,
         thumbUrl: null,
         canonicalUrl: null,
         contentKind: 'gif',

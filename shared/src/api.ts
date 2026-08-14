@@ -595,6 +595,13 @@ export interface EmbedInfo {
   description: string | null;
   thumbUrl: string | null; // presigned R2 GET, minted at read time (like media); null until ready
   canonicalUrl: string | null;
+  /** The provider's own id for this item (IG shortcode | Vault documentId |
+   *  canonical Klipy slug). Exposed for docs/GIF_FAVORITES.md D-F6: a GIF
+   *  already in a chat needs a handle to favorite with, and the alternative
+   *  was parsing the slug back out of `canonicalUrl` — which for `klipy` is
+   *  literally this value with a `https://klipy.com/gifs/` prefix, so nothing
+   *  new is disclosed here, only something already derivable made explicit. */
+  providerRef: string | null;
   contentKind: string | null;
   actionType: EmbedActionType;
   /** Intrinsic pixel size of `thumbUrl`, when the resolver knew it (projected
@@ -613,11 +620,27 @@ export interface EmbedInfo {
 /** One picker result. A deliberately NORMALIZED shape, never Klipy's raw
  *  response — the provider lives behind `server/src/gifs/klipy.ts` so swapping
  *  it (a live risk: this feature exists because Tenor's API was discontinued
- *  mid-2026) never reaches the client. `slug` is the ONLY field the client
- *  ever sends back; everything needed to render a sent GIF is re-fetched
+ *  mid-2026) never reaches the client. `slug` is the only field the client
+ *  ever *sends back*; everything needed to render a sent GIF is re-fetched
  *  server-side (CLAUDE.md invariant 7). */
 export interface GifSearchItem {
   slug: string;
+  /** The provider's stable per-item id (docs/GIF_FAVORITES.md §2).
+   *
+   *  Read-only on the client and **never sent to the server** — it exists
+   *  solely so the picker can tell whether a result is already favorited.
+   *  It has to exist because `slug` cannot answer that: search-result slugs
+   *  carry a rotating per-response suffix (docs/GIFS.md §12), so the same GIF
+   *  arrives under a different slug every search, while favorites are stored
+   *  under the canonical one. Measured stable across canonicalization
+   *  2026-08-14 — see §2 for the caveat and the unfilled-star floor.
+   *
+   *  **Null is a supported state, not an error.** The GIF still renders,
+   *  sends, and can be favorited (favoriting posts the slug — the id is read
+   *  server-side from the resolver's own response). Only the pre-filled star
+   *  is lost, which is the whole point of the floor: degrade a cosmetic hint,
+   *  never drop a result. */
+  itemId: string | null;
   /** Klipy CDN URL, used ONLY inside the open picker (docs/GIFS.md §9, D10).
    *  Never stored, never rendered in chat — sent GIFs always come from R2. */
   previewUrl: string;
@@ -625,6 +648,54 @@ export interface GifSearchItem {
   height: number;
   /** Alt text. An accessibility field, not decoration. */
   title: string;
+}
+
+// ─── GIF favorites (post-MVP, docs/GIF_FAVORITES.md) ────────────────────────
+
+/** One stored favorite. Structurally a superset of `GifSearchItem` on purpose:
+ *  the Favorites tab renders through the very same tile component as search
+ *  results, and picking one sends through the very same `gif` intent. */
+export interface GifFavorite {
+  /** CANONICAL slug — never a suffixed search-result one. This is the handle
+   *  the send path and `DELETE /gifs/favorites/:slug` both take. */
+  slug: string;
+  /** Null when the provider didn't report one (§2's floor) — the favorite is
+   *  fully functional, it just won't pre-fill a star in the picker. */
+  itemId: string | null;
+  /** Klipy CDN URL, server-derived at favorite time (never client-supplied —
+   *  docs/GIF_FAVORITES.md D-F3). Third-party and therefore perishable: when
+   *  it rots the tile shows a dead placeholder, but the favorite stays
+   *  *sendable*, because sending re-resolves from `slug` server-side (D-F4). */
+  previewUrl: string;
+  width: number;
+  height: number;
+  title: string;
+}
+
+/** GET /gifs/favorites — keyset paginated on `id` like every Den-owned list. */
+export interface GifFavoritesResponse {
+  items: GifFavorite[];
+  nextCursor: string | null;
+}
+
+/** Just enough to answer "is this starred?" on all three surfaces at once
+ *  (docs/GIF_FAVORITES.md §6). Carries both handles because they hold
+ *  different ones: the picker matches on `itemId`, a chat card matches on
+ *  `slug`, and the picker resolves `itemId → slug` from here when it needs to
+ *  unfavorite — which is what lets DELETE keep a single key. */
+export interface GifFavoriteKey {
+  slug: string;
+  itemId: string | null;
+}
+
+export interface GifFavoriteKeysResponse {
+  keys: GifFavoriteKey[];
+}
+
+/** POST /gifs/favorites. A slug and nothing else — suffixed or canonical, the
+ *  server resolves it either way and derives every stored field itself. */
+export interface AddGifFavoriteRequest {
+  slug: string;
 }
 
 /** GET /gifs/search and GET /gifs/trending. Keyed pagination isn't available
@@ -645,6 +716,18 @@ export const GifLimits = {
   maxQueryLength: 100,
   /** Client-side debounce before a search fires (docs/GIFS.md §10). */
   searchDebounceMs: 350,
+  /** Favorites per user (docs/GIF_FAVORITES.md §4). Not a storage limit — the
+   *  rows are tiny — but `GET /gifs/favorites/keys` returns the whole set
+   *  unpaginated, so the set has to stay bounded. Hitting it is an explicit
+   *  error, never a silent drop. */
+  maxFavorites: 500,
+  /** Page size for the Favorites tab. */
+  favoritesPerPage: 30,
+  /** How long a press-and-hold on a picker tile must last before the favorite
+   *  popover opens. Matches `ChatView`'s `LONG_PRESS_MS` deliberately: the two
+   *  gestures are the same gesture on different surfaces, and a user who has
+   *  learned the timing in chat should not have to relearn it here. */
+  longPressMs: 500,
 } as const;
 
 // ─── Vault account linking (post-MVP, docs/EMBEDS.md §5) ────────────────────

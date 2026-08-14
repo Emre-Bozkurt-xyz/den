@@ -50,7 +50,12 @@ function apiUrl(path: string, params: Record<string, string | number | undefined
   return url.toString();
 }
 
-async function fetchJson(url: string): Promise<unknown> {
+/** Sentinel for "the provider says this item doesn't exist", as distinct from
+ *  "the provider is broken". Only `gifBySlug` asks for it — a 404 on a *search*
+ *  really is a provider fault. */
+const NOT_FOUND = Symbol('klipy-not-found');
+
+async function fetchJson(url: string, notFoundAsNull = false): Promise<unknown> {
   // Belt-and-braces: even though we built this URL ourselves, re-assert the
   // host so a future refactor can't turn a caller-supplied string into an
   // arbitrary outbound fetch.
@@ -62,6 +67,10 @@ async function fetchJson(url: string): Promise<unknown> {
     const res = await fetch(url, { signal: controller.signal, redirect: 'error' });
     const text = await res.text();
     if (text.length > MAX_RESPONSE_BYTES) throw new AppError(502, ErrorCode.ServiceUnavailable, 'GIF provider response too large');
+    // A by-slug 404 means the item is gone, not that Klipy is broken — the
+    // caller turns this into a clean 404 rather than a "provider error" that
+    // wrongly blames the integration for a GIF that was simply deleted.
+    if (res.status === 404 && notFoundAsNull) return NOT_FOUND;
     // Never surface Klipy's body: on an invalid key it echoes the key back.
     if (!res.ok) throw new AppError(502, ErrorCode.ServiceUnavailable, `GIF provider error (${res.status})`);
     try {
@@ -101,6 +110,21 @@ export interface KlipyItem {
   /** Canonical, suffix-free slug **as reported by the API**, never the one we
    *  asked with — see `gifBySlug`. */
   slug: string;
+  /** Klipy's stable per-item id, stringified (docs/GIF_FAVORITES.md §2).
+   *
+   *  Not a lookup key — `gifs/{id}` 404s, slug is the only handle — but it IS
+   *  stable identity: measured 2026-08-14, a search result and its own
+   *  canonicalized by-slug response report the same id despite different
+   *  slugs. That is what lets the picker tell whether a result is already
+   *  favorited, which the rotating slug suffix otherwise makes impossible.
+   *
+   *  **Nullable, and every consumer must degrade rather than drop.** This is
+   *  the documented floor from §2: an item whose id we can't read is still a
+   *  perfectly good GIF — it renders, it sends, and it can still be favorited
+   *  (favoriting posts a slug; the id is read from the *resolver's* response).
+   *  All that is lost is the picker's ability to pre-fill its star. Dropping
+   *  the item instead would empty the picker over a cosmetic field. */
+  itemId: string | null;
   title: string;
   preview: KlipyAsset;
   source: KlipyAsset;
@@ -158,6 +182,18 @@ const PREVIEW_MIN_WIDTH = 200;
  *  means downloading bytes to throw away. */
 const SOURCE_MIN_WIDTH = 320;
 
+/** Klipy reports `id` as a JSON number ~16 digits long. That is inside
+ *  double-precision's exact-integer range (2^53 ≈ 9.0e15 — a 16-digit id is
+ *  right at the edge), so it is read back defensively: anything that isn't a
+ *  safe integer is treated as "no id" rather than stringified into a value
+ *  that might have already lost its low digits in the JSON parse. A missing id
+ *  costs an unfilled star (docs/GIF_FAVORITES.md §2), never a wrong match. */
+function readItemId(raw: unknown): string | null {
+  if (typeof raw === 'string' && /^[0-9]{1,32}$/.test(raw)) return raw;
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) return null;
+  return String(raw);
+}
+
 function mapItem(raw: unknown): KlipyItem | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const r = raw as Record<string, unknown>;
@@ -173,16 +209,19 @@ function mapItem(raw: unknown): KlipyItem | null {
 
   return {
     slug: r.slug,
+    itemId: readItemId(r.id),
     title: typeof r.title === 'string' && r.title.trim() ? r.title.trim() : 'GIF',
     preview,
     source,
   };
 }
 
-/** The client only ever needs the preview rendition and the slug. */
+/** The client only ever needs the preview rendition, the slug, and the id it
+ *  matches favorites on. */
 function toSearchItem(item: KlipyItem): GifSearchItem {
   return {
     slug: item.slug,
+    itemId: item.itemId,
     previewUrl: item.preview.url,
     width: item.preview.width,
     height: item.preview.height,
@@ -230,7 +269,10 @@ export async function trendingGifs(page: number, rating: GifRating): Promise<Gif
  */
 export async function gifBySlug(slug: string): Promise<KlipyItem | null> {
   if (!isValidGifSlug(slug)) return null;
-  const payload = await fetchJson(apiUrl(`gifs/${slug}`, {}));
+  const payload = await fetchJson(apiUrl(`gifs/${slug}`, {}), true);
+  // Deleted, renamed, or never existed — all indistinguishable from here, and
+  // all mean the same thing to every caller: there is no such GIF.
+  if (payload === NOT_FOUND) return null;
   return mapItem((payload as { data?: unknown } | null)?.data);
 }
 
