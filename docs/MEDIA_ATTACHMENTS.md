@@ -108,6 +108,24 @@ The invariant that makes D7 airtight: *an item's tags are attached before that i
 
 Note `TagRemovedPayload` carries only `mediaId`/`tagId`, not the tag *name*, so the client can't tell from the frame alone whether the removed tag was a sensitive one — it re-derives from the cached tag set or falls back to invalidation. Adding the name to the payload is the cheaper fix if this ever becomes hot.
 
+### 4.6 Client aspect hint on upload (added 2026-08-14)
+
+**Problem.** `createUpload` mints `media` rows with `width`/`height` NULL — they aren't known until sharp/ffprobe runs, which is after the bytes have been uploaded *and* processed. So every member other than the sender saw `MediaBubble`'s fixed 128×192 "Processing…" card, which then jumped to the image's real shape seconds later, shoving the message list under anyone reading. That is the same class of bug `PreviewImage` exists to fix for loaded media (PROJECT.md §14, 2026-07-22) — it was simply never closed for the *processing* window. Owner report, 2026-08-14, raised alongside the identical problem for GIFs.
+
+**Fix.** `CreateUploadItem` gains optional `width`/`height`. `uploadAlbum` measures each file's intrinsic size (an `<img>`/`<video>` metadata load, never a full canvas decode) immediately before minting, and `createUpload` writes the clamped value onto the row. `MediaBubble`'s processing card reserves that aspect instead of `h-32`, capped at the same `max-h-72` a loaded image gets.
+
+**Why this doesn't weaken invariant 7.** CLAUDE.md's "never trust client-declared mime/size" governs what gets **fetched, stored and served** — it is why `completeUpload` still HEAD-verifies and magic-number sniffs every byte before anything is marked `ready`, and none of that changes. The hint is a provisional *layout* value that:
+
+- passes through `aspectHint()` (`server/src/aspectHint.ts`, unit-tested), which clamps the ratio to 1:5–5:1, normalizes to a fixed nominal width so **no pixel claim is preserved**, and drops anything non-numeric, non-finite or non-positive;
+- is **overwritten by the real measurement** at processing time — including the EXIF-orientation and rotation-matrix swaps — so a correct row is never affected by what the client said;
+- sits, on failure, on a row no read path renders (`failed` media isn't shown; the gallery only queries `ready`).
+
+The worst a hostile client achieves is one wrong-shaped placeholder on its own upload for a few seconds. Never size-check, bill, or make a storage decision from these numbers.
+
+**Best-effort, never blocking.** Measurement is capped by a 3s timeout and resolves `null` on any error, so an undecodable file just carries no hint and gets today's generic box. ⚠️ HEIC in Chrome is exactly that case (§5.7) — worth confirming on iOS, where Safari *does* decode HEIC and so *will* produce a hint.
+
+**Shared with GIFs.** `aspectHint()` is the same helper the Klipy picker uses for its `'processing'` embed placeholder (docs/GIFS.md §6, D11) — one clamp, one test file, both features treating client-declared dimensions identically.
+
 ## 5. Frontend
 
 ### 5.1 Composer tray (`Composer.tsx`, `ChatView.tsx`)
