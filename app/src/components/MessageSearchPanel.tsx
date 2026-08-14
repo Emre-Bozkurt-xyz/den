@@ -22,6 +22,7 @@ const MEDIA_KIND_LABEL: Record<Extract<MessageKind, 'image' | 'video' | 'voice'>
 const EMBED_KIND_LABEL: Record<EmbedProvider, string> = {
   instagram: 'Instagram reel',
   vault: 'Vault doc',
+  klipy: 'GIF',
 };
 
 /** How far into a body a match has to sit before the snippet stops showing

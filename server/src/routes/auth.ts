@@ -17,6 +17,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import {
   AuthLimits,
   DEFAULT_USER_SETTINGS,
+  GIF_RATINGS,
   type AuthResponse,
   type MeResponse,
   type UserSettings,
@@ -29,6 +30,7 @@ import { createSession, destroySession, requireAuth } from '../auth/session.js';
 import { toPublicUser } from '../mappers.js';
 import { AppError } from '../errors.js';
 import { validation } from '../errors.js';
+import { gifsEnabled } from '../env.js';
 import { ErrorCode } from '@den/shared';
 
 const USERNAME_RE = new RegExp(AuthLimits.usernamePattern);
@@ -77,6 +79,25 @@ function checkDisplayName(raw: unknown, fallback: string): string {
 const SETTINGS_KEYS = Object.keys(DEFAULT_USER_SETTINGS) as (keyof UserSettings)[];
 
 /**
+ * Settings whose type is `string` but whose domain is a closed set
+ * (docs/GIFS.md §9). `typeof` alone can't police these — every arbitrary
+ * string passes a `typeof value === 'string'` check — so any enum-valued
+ * setting MUST be listed here or it silently accepts junk. Keep this in step
+ * with `UserSettings`: a new union-typed key needs an entry the same day.
+ */
+const SETTINGS_ENUMS: Partial<Record<keyof UserSettings, readonly string[]>> = {
+  gifRating: GIF_RATINGS,
+};
+
+/** True when `value` is acceptable for `key` — right primitive type, and for
+ *  enum-valued keys, a member of the allowed set. */
+function isValidSettingValue(key: keyof UserSettings, value: unknown): boolean {
+  if (typeof value !== typeof DEFAULT_USER_SETTINGS[key]) return false;
+  const allowed = SETTINGS_ENUMS[key];
+  return !allowed || allowed.includes(value as string);
+}
+
+/**
  * Sanitize a value read back from `users.settings` (docs/MEDIA_ATTACHMENTS.md
  * §4.2/§4.3, D11). Trusted-but-verify: only the server ever writes this
  * column, but a row may predate a key (pre-migration `{}`, or a key added
@@ -89,7 +110,7 @@ function pickStoredSettings(stored: unknown): Partial<UserSettings> {
   const out: Partial<UserSettings> = {};
   for (const key of SETTINGS_KEYS) {
     const value = (stored as Record<string, unknown>)[key];
-    if (typeof value === typeof DEFAULT_USER_SETTINGS[key]) {
+    if (isValidSettingValue(key, value)) {
       (out as Record<string, unknown>)[key] = value;
     }
   }
@@ -112,9 +133,11 @@ function pickPatchSettings(patch: unknown): Partial<UserSettings> {
   for (const key of SETTINGS_KEYS) {
     if (!(key in (patch as Record<string, unknown>))) continue;
     const value = (patch as Record<string, unknown>)[key];
-    const expected = typeof DEFAULT_USER_SETTINGS[key];
-    if (typeof value !== expected) {
-      throw validation(`settings.${key} must be a ${expected}`);
+    if (!isValidSettingValue(key, value)) {
+      const allowed = SETTINGS_ENUMS[key];
+      throw validation(
+        allowed ? `settings.${key} must be one of: ${allowed.join(', ')}` : `settings.${key} must be a ${typeof DEFAULT_USER_SETTINGS[key]}`,
+      );
     }
     (out as Record<string, unknown>)[key] = value;
   }
@@ -241,7 +264,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.get('/me', { preHandler: requireAuth }, async (req) => {
     const me = req.user!;
     const stored = await fetchStoredSettings(me.id);
-    const res: MeResponse = { ...toPublicUser(me), settings: mergeUserSettings(stored, undefined) };
+    const res: MeResponse = { ...toPublicUser(me), settings: mergeUserSettings(stored, undefined), gifsEnabled };
     return res;
   });
 
@@ -252,7 +275,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const stored = await fetchStoredSettings(me.id);
     const settings = mergeUserSettings(stored, req.body?.settings);
     await db.update(users).set({ displayName, settings }).where(eq(users.id, me.id));
-    const res: MeResponse = { ...toPublicUser({ ...me, displayName }), settings };
+    const res: MeResponse = { ...toPublicUser({ ...me, displayName }), settings, gifsEnabled };
     return res;
   });
 }

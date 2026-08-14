@@ -95,7 +95,7 @@ const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = { image: 'Photo
 
 // docs/EMBEDS.md — same "media with no caption still needs a readable
 // preview" rule as MEDIA_LABEL above.
-const EMBED_LABEL: Record<EmbedProvider, string> = { instagram: 'Instagram reel', vault: 'Vault doc' };
+const EMBED_LABEL: Record<EmbedProvider, string> = { instagram: 'Instagram reel', vault: 'Vault doc', klipy: 'GIF' };
 
 function previewFor(message: Message, meId: string): ReactNode {
   const prefix = message.senderId === meId ? 'You: ' : '';

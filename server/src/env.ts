@@ -98,6 +98,12 @@ export const env = Object.freeze({
   // Deliberately NOT required in prod: leaving it unset degrades the Stage to
   // read-only rather than refusing to boot the whole server.
   vaultServiceToken: optional('VAULT_SERVICE_TOKEN') || undefined,
+
+  // Klipy GIF API (docs/GIFS.md §7). Server-only and non-negotiably so: Klipy's
+  // native API carries the key in the URL *path*, where any client-side call
+  // would leak it through request URLs, referrers and devtools. Optional in
+  // every environment — unset just turns the GIF picker off (`gifsEnabled`).
+  klipyApiKey: optional('KLIPY_API_KEY') || undefined,
 });
 
 export type Env = typeof env;
@@ -114,3 +120,12 @@ export type Env = typeof env;
  * integration must never be able to stop the app from booting.
  */
 export const vaultLinkingEnabled = Boolean(env.vaultTokenEncKey && env.vaultClientId);
+
+/**
+ * Is the GIF picker available (docs/GIFS.md §7)? Same posture as
+ * `vaultLinkingEnabled`: an unset key degrades one feature instead of
+ * refusing to boot. `GET /me` reports this so the client can hide the GIF
+ * button entirely — a visible button that errors on tap is worse than no
+ * button, and there is no user action that can fix a missing server key.
+ */
+export const gifsEnabled = Boolean(env.klipyApiKey);

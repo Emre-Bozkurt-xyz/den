@@ -61,6 +61,8 @@ interface RealtimeCtx {
    *  known-disconnected one) inserts the bubble as `failed:<reqId>` directly
    *  instead of silently no-oping (docs/RECEIPTS.md §5.3/§1). */
   sendMessage: (chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview) => void;
+  /** docs/GIFS.md §6 — picking a GIF sends it immediately. */
+  sendGif: (chatId: string, gif: { slug: string; width: number; height: number; title: string }, replyToId?: string, replyPreview?: ReplyPreview) => void;
   /** docs/RECEIPTS.md §5.3 — removes the failed bubble and resends its
    *  original args as a brand-new optimistic send (fresh reqId). No-op if
    *  `failedId` isn't a known failed id (e.g. already retried/discarded). */
@@ -84,6 +86,7 @@ interface RealtimeCtx {
 const Ctx = createContext<RealtimeCtx>({
   connected: false,
   sendMessage: () => {},
+  sendGif: () => {},
   retrySend: () => {},
   discardFailed: () => {},
   notePendingReaction: () => {},
@@ -167,22 +170,53 @@ interface PendingSendArgs {
   body: string;
   replyToId?: string;
   replyPreview?: ReplyPreview;
+  /** docs/GIFS.md §6 — set when this send is a picked GIF rather than text.
+   *  Only `slug` is ever transmitted; `width`/`height`/`title` are local
+   *  display hints, taken from the search result the user just tapped, so the
+   *  optimistic placeholder can reserve the right box immediately. They are
+   *  deliberately never sent to the server (invariant 7 — the server re-fetches
+   *  and derives its own), and the real values arrive with `embed.ready`. */
+  gif?: { slug: string; width: number; height: number; title: string };
 }
 
 function buildOptimisticMessage(id: string, args: PendingSendArgs, senderId: string): Message {
-  return {
+  const base: Omit<Message, 'kind' | 'body' | 'embed'> = {
     id,
     chatId: args.chatId,
     senderId,
-    kind: 'text',
-    body: args.body,
     createdAt: new Date().toISOString(),
     media: [],
-    embed: null,
     replyTo: args.replyPreview ?? null,
     reactions: [],
     editedAt: null,
   };
+
+  if (args.gif) {
+    // Mirrors exactly what the server will mint (embeds/service.ts's
+    // 'processing' row), so the real `message.new` replaces this without the
+    // card changing shape or size under the reader.
+    return {
+      ...base,
+      kind: 'embed',
+      body: null,
+      embed: {
+        id: `optimistic:${args.gif.slug}`,
+        provider: 'klipy',
+        status: 'processing',
+        title: args.gif.title,
+        subtitle: null,
+        description: null,
+        thumbUrl: null,
+        canonicalUrl: null,
+        contentKind: 'gif',
+        actionType: 'inline',
+        width: args.gif.width,
+        height: args.gif.height,
+      },
+    };
+  }
+
+  return { ...base, kind: 'text', body: args.body, embed: null };
 }
 
 /**
@@ -514,11 +548,22 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   function sendMessage(chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview): void {
     const trimmed = body.trim();
     if (!trimmed) return;
+    dispatchSend({ chatId, body: trimmed, replyToId, replyPreview });
+  }
 
+  /** docs/GIFS.md §6 — "picking is sending" (D4): no caption, no staging, no
+   *  confirm step. Routes through the same `dispatchSend` as text so the GIF
+   *  inherits optimistic rendering, reqId dedup, the 10s failure backstop and
+   *  retry, rather than growing a second send path to keep in sync. */
+  function sendGif(chatId: string, gif: NonNullable<PendingSendArgs['gif']>, replyToId?: string, replyPreview?: ReplyPreview): void {
+    dispatchSend({ chatId, body: '', replyToId, replyPreview, gif });
+  }
+
+  function dispatchSend(args: PendingSendArgs): void {
+    const { chatId } = args;
     const socket = socketRef.current;
     const me = qc.getQueryData<MeResponse | null>(['me']);
     const reqId = crypto.randomUUID();
-    const args: PendingSendArgs = { chatId, body: trimmed, replyToId, replyPreview };
 
     // No socket at all, or a known-disconnected one — fail immediately
     // rather than trust socket.io's own outbound buffering, which would
@@ -538,7 +583,23 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     pendingRef.current.set(reqId, { chatId, tempId });
     failedRef.current.set(reqId, args);
     qc.setQueryData<MessagesCache>(['messages', chatId], (old) => withFirstPage(old, (messages) => [optimistic, ...messages]));
-    socket.emit('ws', makeEnvelope(WsType.MessageSend, { chatId, body: trimmed, ...(replyToId ? { replyToId } : {}) }, reqId));
+    socket.emit(
+      'ws',
+      makeEnvelope(
+        WsType.MessageSend,
+        // Slug + a cosmetic size hint (docs/GIFS.md §6). The hint exists so
+        // OTHER members' 'processing' placeholder is already the right shape;
+        // the server clamps it and the resolver overwrites it with measured
+        // values. The preview URL is never sent — the server derives its own.
+        {
+          chatId,
+          body: args.body,
+          ...(args.replyToId ? { replyToId: args.replyToId } : {}),
+          ...(args.gif ? { gif: { slug: args.gif.slug, width: args.gif.width, height: args.gif.height } } : {}),
+        },
+        reqId,
+      ),
+    );
 
     // docs/RECEIPTS.md §5.3's 10s backstop: the socket was connected at send
     // time but the round trip itself may still never complete. If nothing
@@ -582,7 +643,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ connected, sendMessage, retrySend, discardFailed, notePendingReaction, clearPendingReaction }}>
+    <Ctx.Provider value={{ connected, sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction }}>
       {children}
     </Ctx.Provider>
   );

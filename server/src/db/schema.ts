@@ -305,7 +305,7 @@ export const embeds = pgTable(
     messageId: bigint('message_id', { mode: 'bigint' })
       .notNull()
       .references(() => messages.id),
-    provider: text('provider').notNull(), // 'instagram' | 'vault'
+    provider: text('provider').notNull(), // 'instagram' | 'vault' | 'klipy'
     status: text('status').notNull().default('processing'), // 'processing' | 'ready' | 'failed'
     // Normalized card snapshot (provider-agnostic — the shared client
     // renderer, EmbedCard.tsx, reads only these, never provider internals).
@@ -315,15 +315,16 @@ export const embeds = pgTable(
     thumbKey: text('thumb_key'), // R2 key of the snapshot image (nullable)
     canonicalUrl: text('canonical_url'), // external URL (deep-link target)
     providerRef: text('provider_ref'), // IG shortcode | vault documentId
-    contentKind: text('content_kind'), // 'video' | 'image' | 'document'
-    actionType: text('action_type').notNull().default('external'), // 'external' | 'read' | 'portal'
+    contentKind: text('content_kind'), // 'video' | 'image' | 'document' | 'gif'
+    // 'inline' (docs/GIFS.md §5, D7) = the card IS the content, nothing to open.
+    actionType: text('action_type').notNull().default('external'), // 'external' | 'read' | 'portal' | 'inline'
     data: jsonb('data').$type<Record<string, unknown>>(), // provider extras (og:video url, etc.)
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    check('embeds_provider_check', sql`${t.provider} IN ('instagram','vault')`),
+    check('embeds_provider_check', sql`${t.provider} IN ('instagram','vault','klipy')`),
     check('embeds_status_check', sql`${t.status} IN ('processing','ready','failed')`),
-    check('embeds_action_type_check', sql`${t.actionType} IN ('external','read','portal')`),
+    check('embeds_action_type_check', sql`${t.actionType} IN ('external','read','portal','inline')`),
     index('idx_embeds_message').on(t.messageId),
   ],
 );

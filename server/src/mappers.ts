@@ -121,6 +121,18 @@ export interface EmbedRow {
   providerRef: string | null;
   contentKind: string | null;
   actionType: string;
+  /** Provider extras bag (`embeds.data`). Never sent to the client as-is —
+   *  `toEmbedInfo` projects out only the fields `EmbedInfo` declares. */
+  data?: Record<string, unknown> | null;
+}
+
+/** Reads one positive integer out of the untyped `embeds.data` bag. The bag is
+ *  jsonb written by resolvers, so a legacy/failed row can hold anything (or
+ *  nothing) — a bad value must degrade to "unknown dimensions" rather than
+ *  ship NaN to the client, where it would poison the reserved layout box. */
+function dimensionFrom(data: Record<string, unknown> | null | undefined, key: 'width' | 'height'): number | null {
+  const value = data?.[key];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : null;
 }
 
 /** `thumbUrl` is passed in separately (like `toMediaInfo`'s `urls`) — it's a
@@ -137,6 +149,8 @@ export function toEmbedInfo(e: EmbedRow, thumbUrl: string | null): EmbedInfo {
     canonicalUrl: e.canonicalUrl,
     contentKind: e.contentKind,
     actionType: e.actionType as EmbedActionType,
+    width: dimensionFrom(e.data, 'width'),
+    height: dimensionFrom(e.data, 'height'),
   };
 }
 

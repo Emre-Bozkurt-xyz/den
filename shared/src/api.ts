@@ -55,20 +55,41 @@ export interface PublicUser {
  *  features, and one migration beats one per toggle. The server whitelists
  *  and MERGES these keys on write; it never stores an unknown key and never
  *  replaces the whole object. Keep this interface flat and JSON-primitive. */
+/** docs/GIFS.md §9 — the ceiling applied to this user's GIF search/trending
+ *  requests. Klipy's own `rating` values, plus `'off'` for "send no rating
+ *  param at all", i.e. no filtering. */
+export const GIF_RATINGS = ['g', 'pg', 'pg-13', 'r', 'off'] as const;
+export type GifRating = (typeof GIF_RATINGS)[number];
+
 export interface UserSettings {
   /** docs/MEDIA_ATTACHMENTS.md §5.5 — when true the gallery never blurs
    *  sensitive media. Chat still does: the gallery is a place you navigated
    *  to on purpose, chat is a surface you scroll past in public. */
   galleryShowSensitive: boolean;
+  /** docs/GIFS.md §9 / D9 — per-user, because a fixed PG gate is the wrong
+   *  default for a closed adult friend circle while an unfiltered default is
+   *  the wrong first impression. Governs what this user can FIND; it
+   *  deliberately does not filter what they RECEIVE (Den has no moderation by
+   *  design — PROJECT.md §1). GIFs carry no tags and never reach the gallery,
+   *  so this is the feature's only content control. */
+  gifRating: GifRating;
 }
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
   galleryShowSensitive: false,
+  gifRating: 'pg-13',
 };
 
 /** GET /me → current user (+ their settings), or 401 with ApiError. */
 export interface MeResponse extends PublicUser {
   settings: UserSettings;
+  /** docs/GIFS.md §7 — whether the server has a Klipy key configured. A
+   *  server capability rather than a user preference, but it rides here
+   *  because the composer needs it on first paint and `/me` is already
+   *  fetched at boot; a separate config request would just be a second
+   *  round-trip for one boolean. False ⇒ the client hides the GIF button
+   *  entirely (nothing the user could do would fix a missing server key). */
+  gifsEnabled: boolean;
 }
 
 /** POST /auth/register. Invites authorize; the provider (here, password)
@@ -366,6 +387,22 @@ export interface CreateUploadItem {
   kind: MediaKind;
   mime: string;
   sizeBytes: number;
+  /** docs/MEDIA_ATTACHMENTS.md §4.6 — intrinsic pixel size, read off the file
+   *  on the sender's device before upload. A **cosmetic layout hint**, not
+   *  data: it gives the `'processing'` row a real aspect ratio so every other
+   *  member's placeholder is the right shape from the moment the album
+   *  appears, instead of a fixed generic box that pops (and shoves the message
+   *  list) when processing finishes seconds later.
+   *
+   *  Bounded, not trusted: the server clamps the ratio, normalizes away the
+   *  pixel values, and **overwrites both with dimensions measured by
+   *  sharp/ffprobe** — including the EXIF-orientation swap — the moment
+   *  processing succeeds. Omitting them costs only today's generic
+   *  placeholder. Never used for a size, storage, or billing decision;
+   *  `completeUpload` still HEAD-verifies and sniffs the real bytes
+   *  (CLAUDE.md invariant 7). */
+  width?: number;
+  height?: number;
 }
 
 /** POST /media/uploads (docs/MEDIA_ATTACHMENTS.md §4.4) — mints ONE message
@@ -560,7 +597,55 @@ export interface EmbedInfo {
   canonicalUrl: string | null;
   contentKind: string | null;
   actionType: EmbedActionType;
+  /** Intrinsic pixel size of `thumbUrl`, when the resolver knew it (projected
+   *  out of `embeds.data` by the mapper — the client never sees the raw bag).
+   *  Null for providers that don't report it, which is why `EmbedCard` still
+   *  needs a fallback aspect. GIFs (docs/GIFS.md §8) always set these: they
+   *  are arbitrary-aspect, and a card that can't reserve its box before the
+   *  bytes decode regresses the chat's scroll-to-bottom (PROJECT.md §14,
+   *  2026-07-22 — the same bug class `PreviewImage` exists to fix). */
+  width: number | null;
+  height: number | null;
 }
+
+// ─── GIFs (post-MVP, docs/GIFS.md §6) ───────────────────────────────────────
+
+/** One picker result. A deliberately NORMALIZED shape, never Klipy's raw
+ *  response — the provider lives behind `server/src/gifs/klipy.ts` so swapping
+ *  it (a live risk: this feature exists because Tenor's API was discontinued
+ *  mid-2026) never reaches the client. `slug` is the ONLY field the client
+ *  ever sends back; everything needed to render a sent GIF is re-fetched
+ *  server-side (CLAUDE.md invariant 7). */
+export interface GifSearchItem {
+  slug: string;
+  /** Klipy CDN URL, used ONLY inside the open picker (docs/GIFS.md §9, D10).
+   *  Never stored, never rendered in chat — sent GIFs always come from R2. */
+  previewUrl: string;
+  width: number;
+  height: number;
+  /** Alt text. An accessibility field, not decoration. */
+  title: string;
+}
+
+/** GET /gifs/search and GET /gifs/trending. Keyed pagination isn't available
+ *  upstream (Klipy is page-numbered), so this is the one paginated surface in
+ *  Den that isn't keyset — it's a transient third-party result set, not a
+ *  Den-owned table, so PROJECT.md §6's no-OFFSET rule doesn't bite. */
+export interface GifSearchResponse {
+  items: GifSearchItem[];
+  hasNext: boolean;
+}
+
+export const GifLimits = {
+  /** Klipy's own bounds: per_page min 8, max 50. */
+  perPage: 24,
+  /** Below this the picker shows trending instead of searching — keeps the
+   *  test key's 100/hr from evaporating on single characters. */
+  minQueryLength: 2,
+  maxQueryLength: 100,
+  /** Client-side debounce before a search fires (docs/GIFS.md §10). */
+  searchDebounceMs: 350,
+} as const;
 
 // ─── Vault account linking (post-MVP, docs/EMBEDS.md §5) ────────────────────
 

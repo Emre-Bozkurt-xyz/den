@@ -30,12 +30,13 @@ import {
   isReservedWsType,
   detectEmbedUrl,
   stripEmbedUrl,
+  ErrorCode,
   type WsEnvelope,
   type DeliveredAckPayload,
   type MessageSendPayload,
   type Message as MessageDto,
 } from '@den/shared';
-import { env } from './env.js';
+import { env, gifsEnabled } from './env.js';
 import { db } from './db/index.js';
 import { chatMembers, sessions } from './db/schema.js';
 import { SESSION_COOKIE } from './auth/session.js';
@@ -43,7 +44,9 @@ import { assertMember, isMember } from './chat/membership.js';
 import { markDelivered, sendTextMessage } from './chat/service.js';
 import { createEmbedMessage, finalizeEmbed } from './embeds/service.js';
 import { notifyChatMembers } from './push/notify.js';
-import { AppError } from './errors.js';
+import { AppError, unavailable } from './errors.js';
+import { isValidGifSlug } from './gifs/klipy.js';
+import { aspectHint } from './aspectHint.js';
 import { chatRoom, userRoom } from './realtime/rooms.js';
 
 declare module 'fastify' {
@@ -170,9 +173,33 @@ async function handleMessageSend(
     const rawBody = frame.payload?.body ?? '';
     const detected = detectEmbedUrl(rawBody);
 
+    // docs/GIFS.md §6 — the "client sets an intent" half of the same mint
+    // path, designed in docs/EMBEDS.md §4.3 and unused until GIFs. Checked
+    // BEFORE body-sniffing: an intent is explicit, so it wins outright rather
+    // than racing a detector over text that must be empty anyway.
+    const gifIntent = frame.payload?.gif;
+
     let message: MessageDto;
     let embedId: bigint | null = null;
-    if (detected) {
+    if (gifIntent !== undefined) {
+      if (!gifsEnabled) throw unavailable('GIF sending is not configured');
+      if (!isValidGifSlug(gifIntent?.slug)) throw new AppError(400, ErrorCode.Validation, 'invalid gif slug');
+      // A GIF has no caption (D4). Refusing beats silently discarding text the
+      // user typed — and no client of ours can produce this combination.
+      if (rawBody.trim()) throw new AppError(400, ErrorCode.Validation, 'a GIF message cannot have a body');
+      // `url` is null: only the slug is known here, and the resolver decides
+      // whether there is any canonical link at all. The placeholder is shaped
+      // now so other members don't watch a generic box pop into a GIF a second
+      // later — `contentKind`/`actionType` are facts the server knows (this
+      // frame IS a GIF pick), the dimensions are a clamped cosmetic hint.
+      const created = await createEmbedMessage(chatId, userId, 'klipy', null, gifIntent.slug, null, replyToId, {
+        contentKind: 'gif',
+        actionType: 'inline',
+        data: aspectHint(gifIntent.width, gifIntent.height),
+      });
+      message = created.message;
+      embedId = created.embedId;
+    } else if (detected) {
       const caption = stripEmbedUrl(rawBody, detected);
       const created = await createEmbedMessage(chatId, userId, detected.provider, detected.url, detected.providerRef, caption, replyToId);
       message = created.message;

@@ -17,7 +17,7 @@ import { suppressTouchContextMenu } from '../lib/nativeMenu';
  * PreviewImage fixes for media, PROJECT.md §14 2026-07-22).
  */
 
-const PROVIDER_LABEL: Record<EmbedProvider, string> = { instagram: 'Instagram', vault: 'Vault' };
+const PROVIDER_LABEL: Record<EmbedProvider, string> = { instagram: 'Instagram', vault: 'Vault', klipy: 'GIF' };
 
 // lucide-react dropped brand/logo icons (no `Instagram` glyph in this
 // version) — `Clapperboard` stands in as a generic "video reel" glyph
@@ -42,6 +42,17 @@ export function EmbedCard({
 }) {
   const embed = message.embed;
   if (!embed) return null;
+
+  // docs/GIFS.md §8 — a GIF is inline content, not a card that links somewhere,
+  // so it branches out before all the card chrome below: no provider badge, no
+  // external-link chip, no title/subtitle strip, not clickable. This is the
+  // honest cost of `docs/EMBEDS.md` §1's "one renderer, zero new client code
+  // per provider" promise meeting a provider whose content IS the card;
+  // `actionType: 'inline'` keeps the branch keyed on a card property rather
+  // than on who produced it.
+  if (embed.contentKind === 'gif' && embed.actionType === 'inline') {
+    return <InlineGif embed={embed} />;
+  }
 
   if (embed.status === 'processing') {
     return (
@@ -107,6 +118,57 @@ export function EmbedCard({
         <div className="flex flex-col gap-0.5 px-2.5 py-2">
           {embed.subtitle && <p className="truncate text-xs font-semibold text-text-primary">{embed.subtitle}</p>}
           {embed.title && <p className="line-clamp-2 text-xs text-text-secondary">{embed.title}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A sent GIF (docs/GIFS.md §8). Bubble-less, like bare media.
+ *
+ * Two things here are load-bearing rather than cosmetic:
+ *
+ *  1. **The box is reserved from stored dimensions**, never from the card's
+ *     fixed `aspect-[9/16]` above. GIFs are arbitrary-aspect and mostly
+ *     landscape; a card that resizes when its bytes decode regresses the
+ *     chat's scroll-to-bottom, which is the exact bug `PreviewImage` exists to
+ *     fix (PROJECT.md §14, 2026-07-22).
+ *  2. **The bytes come from R2**, presigned like any other media — never from
+ *     Klipy. That is the whole point of D2, and it is why a dead provider
+ *     costs new searches rather than chat history.
+ */
+function InlineGif({ embed }: { embed: NonNullable<Message['embed']> }) {
+  // Fall back to a square only when the resolver never reported a size — that
+  // shouldn't happen for `klipy` (the resolver measures what it stored), but a
+  // failed row still has to occupy a sane box rather than collapse to 0px.
+  const aspect = embed.width && embed.height ? `${embed.width} / ${embed.height}` : '1 / 1';
+
+  if (embed.status === 'failed') {
+    return (
+      <div
+        className="flex w-40 max-w-full items-center justify-center gap-1.5 rounded-md border border-border bg-surface-sunken px-3 py-4 text-xs text-text-muted"
+        style={{ aspectRatio: aspect }}
+      >
+        <TriangleAlert size={14} className="shrink-0" />
+        GIF unavailable
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="media-preview relative w-48 max-w-full overflow-hidden rounded-md bg-surface-sunken"
+      style={{ aspectRatio: aspect }}
+      onContextMenu={suppressTouchContextMenu}
+    >
+      {embed.thumbUrl ? (
+        // Animated WebP in an <img> (D6) — no <video>, so none of iOS's
+        // autoplay gesture rules apply and it simply plays.
+        <img src={embed.thumbUrl} alt={embed.title ?? 'GIF'} className="h-full w-full object-cover" />
+      ) : (
+        <div className="grid h-full place-items-center text-text-muted">
+          <Loader2 size={18} className="animate-spin" />
         </div>
       )}
     </div>

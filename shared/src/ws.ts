@@ -80,6 +80,30 @@ export interface MessageSendPayload {
   body: string;
   /** Post-MVP: id of the message this one replies to. */
   replyToId?: string;
+  /** docs/GIFS.md §6 — send a picked GIF as an embed message. This is the
+   *  "client sets an intent" half of docs/EMBEDS.md §4.3's mint path, which
+   *  was designed from the start and unused until now; the other half (server
+   *  sniffs `body` for an embeddable URL) still runs when this is absent.
+   *
+   *  Only the `slug` crosses the wire: the server re-fetches the GIF's
+   *  metadata from Klipy itself and derives every URL and dimension, so a
+   *  client can never dictate what bytes get stored (CLAUDE.md invariant 7).
+   *  `body` MUST be empty when this is set — a GIF has no caption (D4), and
+   *  silently dropping typed text would be worse than refusing the frame.
+   *
+   *  `width`/`height` are a **cosmetic layout hint**, not data: they size the
+   *  `'processing'` placeholder that every *other* member receives, so the card
+   *  lands at its final aspect instead of popping from a generic box when
+   *  `embed.ready` arrives (owner report, 2026-08-14). They are the only
+   *  client-declared values this feature accepts, and they are deliberately
+   *  bounded rather than trusted — the server clamps the aspect ratio, ignores
+   *  anything malformed, and the resolver **overwrites both with dimensions
+   *  measured off the bytes it actually stored**. A lie here can at worst make
+   *  one placeholder briefly the wrong shape for under a second; it can never
+   *  affect what is fetched, stored, or served, which is what CLAUDE.md
+   *  invariant 7 exists to protect. Optional: omitting them costs only a
+   *  square placeholder. */
+  gif?: { slug: string; width?: number; height?: number };
 }
 
 /** Server → client (room broadcast). */

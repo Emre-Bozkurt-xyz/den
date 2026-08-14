@@ -132,6 +132,9 @@ services:
       VAULT_CLIENT_ID: ${VAULT_CLIENT_ID:-den}
       VAULT_CLIENT_SECRET: ${VAULT_CLIENT_SECRET:-}
       VAULT_REDIRECT_URI: ${VAULT_REDIRECT_URI:-}
+      # docs/GIFS.md — optional, degrades like the Vault vars above: unset
+      # just turns the GIF picker off.
+      KLIPY_API_KEY: ${KLIPY_API_KEY:-}
     # Bound to localhost only (same pattern as postgres above) — lets the
     # Vite dev server's proxy (app/vite.config.ts, default target
     # localhost:3000) reach this container directly for local testing. Not

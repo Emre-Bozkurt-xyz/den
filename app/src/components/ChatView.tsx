@@ -1,7 +1,16 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Copy, Hand, Images, Layers, Reply as ReplyIcon, Search, Trash2, X } from 'lucide-react';
-import { ReactionLimits, type ChatSummary, type MediaInfo, type MeResponse, type Message, type PublicUser, type ReplyPreview } from '@den/shared';
+import {
+  ReactionLimits,
+  type ChatSummary,
+  type GifSearchItem,
+  type MediaInfo,
+  type MeResponse,
+  type Message,
+  type PublicUser,
+  type ReplyPreview,
+} from '@den/shared';
 import { flattenMessages, useMessages } from '../hooks/useMessages';
 import type { SearchFormState } from '../hooks/useMessageSearch';
 import { useReceipts } from '../hooks/useReceipts';
@@ -186,7 +195,7 @@ export function ChatView({
   onAttachmentsChange: (attachments: StagedAttachment[]) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
-  const { sendMessage, retrySend, discardFailed, notePendingReaction, clearPendingReaction } = useRealtime();
+  const { sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction } = useRealtime();
   const receipts = useReceipts(chat.id);
   const qc = useQueryClient();
   const isMobile = useIsMobile();
@@ -1026,6 +1035,20 @@ export function ChatView({
     setReplyingTo(null);
   }
 
+  /** docs/GIFS.md §6 — "picking is sending" (D4): no staging, no caption, no
+   *  confirm step. Deliberately does NOT touch `draft`, so a half-typed
+   *  message survives a trip through the picker; it does consume `replyingTo`,
+   *  because replying with a GIF is a normal thing to want. */
+  function handlePickGif(gif: GifSearchItem) {
+    sendGif(
+      chat.id,
+      { slug: gif.slug, width: gif.width, height: gif.height, title: gif.title },
+      replyingTo?.id,
+      replyingTo ? buildReplyPreview(replyingTo) : undefined,
+    );
+    setReplyingTo(null);
+  }
+
   /** docs/MEDIA_ATTACHMENTS.md §5.1 — attach button / paste both land here
    *  after `Composer` gathers the raw picked `File`s; validation
    *  (kind/size/`MediaLimits.maxAttachments`) lives once, centrally, via
@@ -1543,6 +1566,8 @@ export function ChatView({
         onRecordingComplete={handleRecordingComplete}
         onError={setUploadError}
         isMobile={isMobile}
+        gifsEnabled={me.gifsEnabled}
+        onPickGif={handlePickGif}
         editing={!!editing}
       />
 

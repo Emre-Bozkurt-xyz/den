@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, EyeOff, FileQuestion, Mic, Paperclip, Play, Plus, Send, Square, X } from 'lucide-react';
-import { detectEmbedUrl, sensitivityOf, type EmbedProvider } from '@den/shared';
+import { Check, EyeOff, FileQuestion, Mic, Paperclip, Play, Plus, Send, Sparkles, Square, X } from 'lucide-react';
+import { detectEmbedUrl, sensitivityOf, type DetectableEmbedProvider, type GifSearchItem } from '@den/shared';
+import { GifPanel } from './GifPanel';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import type { StagedAttachment } from '../lib/media';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
@@ -11,7 +12,9 @@ import { SensitiveOverlay } from './SensitiveOverlay';
 // sending" precedent, so this is purely informational (send behaves exactly
 // the same either way; the server does its own detection independently,
 // shared/src/embeds.ts) — never a pre-send preview/confirm step.
-const EMBED_CHIP_LABEL: Record<EmbedProvider, string> = {
+// Keyed by DetectableEmbedProvider, not EmbedProvider: `klipy` can never
+// appear here because a GIF is picked, not pasted (docs/GIFS.md §6).
+const EMBED_CHIP_LABEL: Record<DetectableEmbedProvider, string> = {
   instagram: '🎬 Instagram reel — sends as a card',
   vault: '📄 Vault doc — sends as a card',
 };
@@ -89,6 +92,8 @@ export function Composer({
   onError,
   isMobile,
   editing,
+  gifsEnabled,
+  onPickGif,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -131,7 +136,21 @@ export function Composer({
    *  while attachments are staged, so `attachments` is always `[]` here
    *  whenever `editing` is true. */
   editing: boolean;
+  /** docs/GIFS.md §7 — false when the server has no Klipy key configured, in
+   *  which case the GIF button is not rendered at all. A visible button that
+   *  503s on tap would be worse: nothing the user can do fixes a missing
+   *  server key. */
+  gifsEnabled: boolean;
+  /** docs/GIFS.md §6 — "picking is sending" (D4). `ChatView` emits the GIF
+   *  immediately; there is no staging step and no caption, which is exactly
+   *  why this doesn't reuse the `attachments` tray. */
+  onPickGif: (gif: GifSearchItem) => void;
 }) {
+  // Open state lives here rather than in `ChatView` because the panel
+  // *replaces this component's own row* (docs/GIFS.md §8, D5) — nothing above
+  // the composer needs to know, and keeping it local means the draft, the
+  // tray and edit mode all survive the picker untouched.
+  const [gifOpen, setGifOpen] = useState(false);
   // docs/IOS_KEYBOARD.md — 0 on Android/desktop (the hook's iOS gate is off),
   // so `keyboardInset > 0` below never trips there and this component's
   // styling is unaffected.
@@ -553,6 +572,24 @@ export function Composer({
     >
       <input ref={fileInputRef} type="file" accept="image/*,video/*" multiple hidden onChange={handleFileInputChange} />
 
+      {/* docs/GIFS.md §8 — the picker REPLACES the composer's contents rather
+          than stacking above them, but stays inside this same <form>, so it
+          inherits the `--kb-inset`/safe-area padding the form already carries
+          instead of owning a second copy of that logic. Everything below
+          (tray, chip, input row, recording UI) simply isn't rendered while
+          it's open, and the draft is never touched, so closing restores
+          exactly what was there. */}
+      {gifOpen ? (
+        <GifPanel
+          onPick={(gif) => {
+            onPickGif(gif);
+            setGifOpen(false);
+          }}
+          onClose={() => setGifOpen(false)}
+        />
+      ) : (
+        <>
+
       {/* docs/MEDIA_ATTACHMENTS.md §5.1 — the attachment tray. Rendered
           *inside* this form, above the input row, so it inherits the
           `--kb-inset` iOS keyboard padding this form already carries (see
@@ -591,6 +628,7 @@ export function Composer({
           Hidden entirely in edit mode (docs/MESSAGE_EDIT.md §4.3) — an edit
           only ever touches `body`, never media. */}
       {editing ? null : recState === 'idle' ? (
+        <>
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
@@ -601,6 +639,24 @@ export function Composer({
         >
           <Paperclip size={18} />
         </button>
+        {/* docs/GIFS.md §8 — a dedicated button rather than folding both into
+            a menu behind the paperclip: a menu would add a tap to the far more
+            common photo path. Not rendered at all when the server has no Klipy
+            key. ⚠️ This row now holds three controls plus the input — worth an
+            eye at 360px on the device pass. */}
+        {gifsEnabled && (
+          <button
+            type="button"
+            onClick={() => setGifOpen(true)}
+            disabled={uploading}
+            aria-label="Send a GIF"
+            className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <Sparkles size={18} />
+          </button>
+        )}
+        </>
       ) : showExplicitStopCancel ? (
         <button
           type="button"
@@ -717,6 +773,8 @@ export function Composer({
         </button>
       )}
       </div>
+        </>
+      )}
     </form>
   );
 }

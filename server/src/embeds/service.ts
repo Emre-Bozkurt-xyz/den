@@ -15,7 +15,7 @@
  * steps of the same request/response cycle, not two separate REST calls.
  */
 import { eq, inArray } from 'drizzle-orm';
-import { ChatLimits, type EmbedInfo, type EmbedProvider, type Message as MessageDto } from '@den/shared';
+import { ChatLimits, type EmbedActionType, type EmbedInfo, type EmbedProvider, type Message as MessageDto } from '@den/shared';
 import { db } from '../db/index.js';
 import { embeds, messages } from '../db/schema.js';
 import { toEmbedInfo, toMessage, type EmbedRow, type MessageRow } from '../mappers.js';
@@ -43,6 +43,9 @@ const embedOnlyShape = {
   providerRef: embeds.providerRef,
   contentKind: embeds.contentKind,
   actionType: embeds.actionType,
+  // Selected so `toEmbedInfo` can project width/height out of it (GIFs need a
+  // reserved layout box — docs/GIFS.md §8). The bag itself never leaves here.
+  data: embeds.data,
 } as const;
 
 async function embedRowById(embedId: bigint): Promise<EmbedJoinRow | null> {
@@ -94,10 +97,22 @@ export async function createEmbedMessage(
   chatId: bigint,
   senderId: bigint,
   provider: EmbedProvider,
-  url: string,
+  /** Null for providers whose embeds don't originate from a user-visible URL
+   *  — a picked GIF (docs/GIFS.md §6) has only a slug until its resolver
+   *  reports a canonical link. Deliberately not `''`: the client's failure
+   *  fallback renders `canonicalUrl ?? "…link unavailable"`, and an empty
+   *  string would slip past `??` and paint an empty link. */
+  url: string | null,
   providerRef: string,
   caption: string | null,
   replyToId?: bigint,
+  /** Card fields known at mint time, so the 'processing' placeholder every
+   *  OTHER client receives is already the right shape instead of a generic
+   *  box that reflows when `embed.ready` lands (owner report, 2026-08-14).
+   *  URL-detected providers know nothing yet and omit this; the GIF picker
+   *  knows the kind for certain and the size approximately (docs/GIFS.md §6).
+   *  Every field here is overwritten by the resolver's measured truth. */
+  placeholder?: { contentKind?: string; actionType?: EmbedActionType; data?: Record<string, unknown> },
 ): Promise<CreateEmbedMessageResult> {
   if (caption && caption.length > ChatLimits.messageBodyMax) {
     throw validation(`message too long (max ${ChatLimits.messageBodyMax} characters)`);
@@ -112,7 +127,16 @@ export async function createEmbedMessage(
     const messageRow = msgInserted[0]!;
     const embedInserted = await tx
       .insert(embeds)
-      .values({ messageId: messageRow.id, provider, status: 'processing', canonicalUrl: url, providerRef })
+      .values({
+        messageId: messageRow.id,
+        provider,
+        status: 'processing',
+        canonicalUrl: url,
+        providerRef,
+        ...(placeholder?.contentKind !== undefined ? { contentKind: placeholder.contentKind } : {}),
+        ...(placeholder?.actionType !== undefined ? { actionType: placeholder.actionType } : {}),
+        ...(placeholder?.data !== undefined ? { data: placeholder.data } : {}),
+      })
       .returning({ id: embeds.id });
     return embedInserted[0]!.id;
   });
@@ -159,6 +183,7 @@ export async function finalizeEmbed(embedId: bigint): Promise<MessageDto> {
           description: result.description,
           thumbKey: result.thumbKey,
           canonicalUrl: result.canonicalUrl ?? row.canonicalUrl,
+          providerRef: result.providerRef ?? row.providerRef,
           contentKind: result.contentKind,
           actionType: result.actionType,
           data: result.data ?? null,

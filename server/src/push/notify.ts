@@ -69,6 +69,9 @@ const MEDIA_LABEL_ALBUM: Partial<Record<'image' | 'video' | 'voice', (n: number)
 const EMBED_LABEL: Record<EmbedProvider, string> = {
   instagram: '🎬 Instagram reel',
   vault: '📄 Vault doc',
+  // docs/GIFS.md §13 — a GIF message always has an empty body (D4), so this
+  // label is the ENTIRE notification text, never a fallback.
+  klipy: '🖼️ GIF',
 };
 
 function previewFor(message: Message): string {

@@ -6,12 +6,22 @@
  * redefine", same precedent as `tags.ts` normalization.
  */
 
-export type EmbedProvider = 'instagram' | 'vault';
+export type EmbedProvider = 'instagram' | 'vault' | 'klipy';
 export type EmbedStatus = 'processing' | 'ready' | 'failed';
-export type EmbedActionType = 'external' | 'read' | 'portal';
+/** `'inline'` (docs/GIFS.md §5, D7) means **this card IS the content** — there
+ *  is nothing to open, so the renderer paints no external-link affordance.
+ *  Deliberately provider-agnostic: it describes the card, not who made it. */
+export type EmbedActionType = 'external' | 'read' | 'portal' | 'inline';
+
+/** The providers that can be recognized from a URL in message text. `klipy` is
+ *  deliberately absent: GIFs arrive via the composer's picker intent
+ *  (docs/GIFS.md §6), never by pasting a link, so nothing downstream of
+ *  `detectEmbedUrl` — the paste-detect chip above all — should have to invent
+ *  a label for a case that cannot occur. */
+export type DetectableEmbedProvider = Exclude<EmbedProvider, 'klipy'>;
 
 export interface DetectedEmbed {
-  provider: EmbedProvider;
+  provider: DetectableEmbedProvider;
   /** The exact substring found in the input text (including any trailing
    *  punctuation a sentence glued onto it) — callers strip exactly this from
    *  the original body to get the caption, so it must round-trip losslessly

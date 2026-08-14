@@ -16,6 +16,7 @@ import { friendRoutes } from './routes/friends.js';
 import { chatRoutes } from './routes/chats.js';
 import { pushRoutes } from './routes/push.js';
 import { mediaRoutes } from './routes/media.js';
+import { gifRoutes } from './routes/gifs.js';
 import { galleryRoutes } from './routes/gallery.js';
 import { voicePocRoutes } from './routes/voice-poc.js';
 import { integrationsVaultRoutes } from './routes/integrations-vault.js';
@@ -71,6 +72,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(pushRoutes, { prefix: '/api' });
   await app.register(mediaRoutes, { prefix: '/api' });
   await app.register(galleryRoutes, { prefix: '/api' });
+  await app.register(gifRoutes, { prefix: '/api' });
   await app.register(voicePocRoutes, { prefix: '/api' });
   await app.register(integrationsVaultRoutes, { prefix: '/api' });
   await app.register(stageRoutes, { prefix: '/api' });

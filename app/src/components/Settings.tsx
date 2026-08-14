@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { MeResponse } from '@den/shared';
+import { GIF_RATINGS, type GifRating, type MeResponse } from '@den/shared';
 import { updateMe } from '../lib/auth';
 import { VaultLinkSection } from './Profile';
 import { NotificationsSection, PushPoc } from './PushPoc';
@@ -47,6 +47,13 @@ function MediaPrivacySection({ me }: { me: MeResponse }) {
     onSuccess: (user) => qc.setQueryData(['me'], user),
   });
 
+  // docs/GIFS.md §9 / D9 — separate mutation from the switch above so a
+  // failure in one doesn't blank the other's error state.
+  const saveRating = useMutation({
+    mutationFn: (value: GifRating) => updateMe({ settings: { gifRating: value } }),
+    onSuccess: (user) => qc.setQueryData(['me'], user),
+  });
+
   const checked = me.settings.galleryShowSensitive;
 
   return (
@@ -63,6 +70,42 @@ function MediaPrivacySection({ me }: { me: MeResponse }) {
 
       {save.isError && (
         <p className="mt-2 text-sm text-red-600 dark:text-red-400">Could not save — try again.</p>
+      )}
+
+      {/* docs/GIFS.md §9 — per-user rather than a fixed server ceiling. Only
+          available when the server has a Klipy key at all, so the control
+          can't imply a feature that isn't there. */}
+      {me.gifsEnabled && (
+        <>
+          <div className="mt-5 border-t border-border pt-4">
+            <span className="text-sm text-text-primary">GIF search filter</span>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {GIF_RATINGS.map((rating) => (
+                <button
+                  key={rating}
+                  type="button"
+                  aria-pressed={me.settings.gifRating === rating}
+                  disabled={saveRating.isPending}
+                  onClick={() => saveRating.mutate(rating)}
+                  className={
+                    'rounded-pill px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-40 ' +
+                    (me.settings.gifRating === rating ? 'bg-accent text-white' : 'bg-surface-sunken text-text-secondary hover:bg-border')
+                  }
+                  style={{ touchAction: 'manipulation' }}
+                >
+                  {rating === 'off' ? 'No filter' : rating.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-text-secondary">
+              Applies to what you find in GIF search. It doesn&apos;t filter GIFs other people send you.
+            </p>
+          </div>
+
+          {saveRating.isError && (
+            <p className="mt-2 text-sm text-red-600 dark:text-red-400">Could not save — try again.</p>
+          )}
+        </>
       )}
     </section>
   );
