@@ -1,6 +1,6 @@
 # GIF favorites (Klipy)
 
-**Status:** planned, not started. Owner decision 2026-08-14 pulled this out of the icebox (`docs/GIFS.md` §13 listed "GIF search history/favourites" there); log it in PROJECT.md §14 with the implementation.
+**Status:** **built and verified server-side 2026-08-14** (migration 015 applied, 77 server + 27 app tests green, scripted pass in §11 below). Owner decision 2026-08-14 pulled this out of the icebox (`docs/GIFS.md` §13 listed "GIF search history/favourites" there). **Still outstanding:** the browser pass on the three UI surfaces, and the iOS device gate.
 **Executor note:** this doc is the brief, and it is a *sequel* — read `docs/GIFS.md` first, especially §5 (the embed row shape), §9/D10 (the one third-party touch) and §12 (Klipy's wire format, including the slug suffix that §4 below turns on). Then CLAUDE.md and PROJECT.md §5/§6/§11. `npm run typecheck && npm run lint && npm run test` green before any commit. Styling stays plain — the owner does a UI pass separately.
 
 ---
@@ -32,7 +32,9 @@ gifs/{that slug}             id=2484942301552561   slug=goatplaybanjo-chat-4
 
 Same id across two structurally different responses — one suffixed, one not. So the id is item identity, not response state, and the picker can match on it at zero extra API cost.
 
-> ⚠️ **This is one probe, and the confirming leg failed to run.** A second search 70s later returned the *same* response token (`--kDRvizpFG` both times), so it was almost certainly served from Klipy's cache and proved nothing about rotation. The by-slug comparison above is the only real evidence. Treat "id is stable" as a **checked assumption with a floor**, not a certainty: if an id is ever missing or unmatched, the star renders **unfilled** rather than guessing. An unfilled star on an already-favorited GIF costs one duplicate `POST`, which the unique index absorbs as a no-op. Nothing corrupts.
+**Confirmed across a genuine token rotation, 2026-08-14 (implementation pass).** The first probe's second leg was inconclusive — a search 70s later returned the *same* token (`--kDRvizpFG`), almost certainly from Klipy's cache. The verification run later that day drew `--khnEbMZzl` for the same GIF and reported the **same id, `2484942301552561`**. So the id survives both canonicalization *and* a rotated token. The assumption is now measured.
+
+> The **floor still ships**, because a provider promise is not a contract: if an id is ever missing or unmatched, the star renders **unfilled** rather than guessing, and every layer is nullable end to end (`GifSearchItem.itemId`, `KlipyItem.itemId`, `gif_favorites.provider_item_id`). An unfilled star on an already-favorited GIF costs one duplicate `POST`, which the unique index absorbs as a no-op. Nothing corrupts, and no result is ever dropped over a cosmetic field.
 >
 > `docs/GIFS.md` §12 already rejected regex-stripping the suffix, and that rejection stands here: a legitimate slug may contain `--`.
 
@@ -187,23 +189,34 @@ Sending from Favorites passes the stored `width`/`height` as the aspect hint, ex
 - **D-F5 — The chat-side star reuses the existing hover bar and focus menu rather than an overlay on the image** (owner decision, 2026-08-14). One affordance per surface; a corner overlay would appear simultaneously with `MessageActions` on hover.
 - **D-F6 — `EmbedInfo` gains `providerRef`** so a chat card has a handle to favorite with, rather than parsing the slug back out of `canonicalUrl`.
 - **D-F7 — One `keys` route serves all three surfaces' star state**, and the picker resolves `itemId → slug` from it for unfavoriting, so `DELETE` keeps a single key.
+- **D-F8 — The press-and-hold decisions live in a pure module (`app/src/lib/pressGesture.ts`), not in component refs.** Den's app-side tests are `node:test` with no DOM, so logic inside a component is logic that can only be checked by hand — and the thing being checked here is "does a long-press ever send a GIF into a live chat". Extracting the state machine made the hazard testable (six cases) and, incidentally, made it legible: the suppression rules are a transition table instead of three interacting refs. The component keeps only the timer and the DOM rect.
+- **D-F9 — The chat-side star is built once in `ChatView` and threaded down as a single `GifFavoriteApi` prop**, rather than each `MessageBlockRow` calling the hooks itself. A chat renders many rows; per-row `useQuery`/`useMutation` pairs would mean hundreds of observers for one shared answer. One object also keeps the already-wide row prop chain growing by one rather than two.
+- **D-F10 — `stateFor` returns null unless the embed is `ready`.** While an embed is processing, `providerRef` still holds whatever the sender supplied — for a picker send that's the *suffixed* slug, which can never match a stored favorite. Showing a star there would render it wrongly empty on a GIF the user has in fact saved. Waiting ~1s for `embed.ready` costs nothing and keeps the star honest.
 
 ---
 
 ## 11. Verification (definition of done)
 
-`npm run typecheck && npm run lint && npm run test` green, plus:
+**Verified 2026-08-14** — `npm run typecheck && npm run lint && npm run test` green (77 server tests, 27 app tests, 0 lint errors; the 8 remaining warnings are pre-existing and in other files):
 
-- **The long-press hazard, tested explicitly:** a completed press-and-hold on a picker tile opens the popover and **sends nothing**. This is the one regression that would be bad enough to notice in a real chat, so it gets a real test, not a manual check.
-- Favorite from all three surfaces; confirm one row, canonical `provider_ref` (no `--` suffix), correct `provider_item_id`.
-- Double-`POST` the same slug → still one row, no error.
-- The star renders filled for an already-favorited search result **in a fresh search** (i.e. across a rotated response token — this is the §2 assumption actually being exercised).
-- Unfavorite from the picker (via the `itemId → slug` resolution) and from chat; row gone, star clears on all surfaces.
+- ✅ **The long-press hazard, tested explicitly.** The gesture's decisions were extracted into `app/src/lib/pressGesture.ts` — a pure state machine — precisely so this could be a real test rather than a manual check on a device we half-own. `pressGesture.test.ts` covers: a completed long-press sends nothing; a plain tap still sends; suppression is consumed so the *next* tap works; a stale suppression from a gesture whose click never arrived is cleared; a scroll past the slop disarms the popover but leaves the tap intact.
+- ✅ **Canonicalization (D-F3), against the live API.** A real search result (`goatplaybanjo-chat-4--khnEbMZzl`) stored as `goatplaybanjo-chat-4` — suffix dropped, `itemId` preserved, preview URL and dimensions derived server-side.
+- ✅ **Idempotency.** Three adds of the same GIF — twice by suffixed slug, once by canonical — produced exactly one row.
+- ✅ **`itemId → canonical slug` resolves**, which is the picker's unfavorite path (§6).
+- ✅ **Per-user isolation**, the one security-relevant property here: a second account sees none of it via either route, and its `DELETE` on another user's slug removes nothing. Covered by both the scripted pass and `gifs/favorites.test.ts`.
+- ✅ **Hard delete (D-F2)** leaves no tombstone; re-adding is a fresh insert.
+- ✅ **Keyset pagination** walks the full list newest-first with no repeats and no gaps.
+- ✅ **An unknown slug is rejected, not stored.** ⚠️ This found a real defect: `fetchJson` threw on any non-2xx, so a deleted GIF surfaced as `502 GIF provider error (404)` — blaming the integration for a GIF that simply no longer exists, and making `addFavorite`'s `notFound` branch unreachable. `gifBySlug` now maps a by-slug 404 to `null` (search 404s still count as provider faults). The resolver already treated `null` as a failure, so sent-GIF behaviour is unchanged.
+- ✅ A malformed slug is rejected before it reaches a query.
+
+**Still to verify:**
+
+- The three UI surfaces in a browser: star in the hover bar, Favorite row in the focus menu, the Favorites tab, and the press-and-hold popover's placement against a live keyboard.
+- The star renders filled for an already-favorited search result **in a fresh search** — §2 is now measured at the API level, but not yet observed end-to-end through the picker.
 - Send from the Favorites tab → identical `embeds` row to a search-result send, R2-hosted, absent from the gallery.
-- A second account's favorites are invisible to the first: `GET /gifs/favorites` returns only the caller's rows, and `DELETE` on another user's slug removes nothing.
-- 503 on all four routes with `KLIPY_API_KEY` unset.
-- The 500-favorite cap returns a clear error rather than silently dropping.
-- ⚠️ **iOS device gate** (PROJECT.md §12) — joins the queue behind the existing GIF flags: press-and-hold vs. iOS's native image callout on a picker tile; the popover's placement against the keyboard, which is up while the panel is open; the two-tab header plus the masonry at 360px; the fourth icon in the hover bar is desktop-only and unaffected.
+- 503 on all four routes with `KLIPY_API_KEY` unset (needs a server restart to exercise).
+- The 500-favorite cap's error path (not exercised: it needs 500 rows, and the check is a plain count comparison).
+- ⚠️ **iOS device gate** (PROJECT.md §12) — joins the queue behind the existing GIF flags: press-and-hold vs. iOS's native image callout on a picker tile; the popover's placement against the keyboard, which is up while the panel is open; the two-tab header plus the masonry at 360px. The fourth icon in the hover bar is desktop-only and unaffected.
 
 ---
 

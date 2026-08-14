@@ -177,7 +177,19 @@ Three consequences, all deliberate:
 
 Confirm with the test key whether omitting `rating` genuinely means unfiltered, or whether `r` is the effective maximum; if the latter, `'off'` maps to `r` and the union collapses by one.
 
-**Attribution (ToS obligation, not optional).** The search field placeholder must read **"Search KLIPY"**, plus their "Powered by KLIPY" mark in the panel. Self-hosted text/SVG, so Invariant 10 holds. Confirm the exact required marks against the Partner Panel guidelines when the key is minted.
+**Attribution — CONFIRMED against KLIPY's "Mandatory Brand Attribution for Integrations" deck (read 2026-08-14).** The deck's own framing: *"Meeting these brand attribution requirements is a mandatory criterion for the final approval of your application's production request."* So this gates the production key. But only **one** of its three items is actually marked required:
+
+| Item | Their status | Den |
+|---|---|---|
+| **Search bar placeholder** = `Search KLIPY`, brand fully capitalized | **(REQUIRED)** | ✅ exact, since day one (`GifPanel`) |
+| **"Powered by KLIPY" logo** in the picker/selector, near the search bar or preview area, visible while open | *(OPTIONAL)* | ✅ their official SVG in the panel footer |
+| **Watermark on the sent card** — *"semi-transparent white logo in the bottom-left corner"* | *(OPTIONAL)* — "strongly recommend" | ✅ CSS overlay in `EmbedCard`'s `InlineGif` |
+
+We satisfy all three. Worth recording that **the watermark was never required** — the original worry was that KLIPY might object to sent GIFs carrying no mark, and their own deck answers no.
+
+**Assets are self-hosted in `app/src/assets/klipy/`** (invariant 10): their official SVGs, never recolored — the black and white "Powered by KLIPY" files are swapped by `prefers-color-scheme` rather than tinted or filtered. SVG over the supplied PNGs because every file is true vector at 2–6KB (no embedded rasters — checked), both placements render tiny (~10–12px tall), and PNGs would have needed @2x/@3x sets to stay crisp. The watermark uses the **wordmark-only** file, not the one including the chicken mark: at ~10px on a 192px card the mark turns to mud while the wordmark stays legible.
+
+⚠️ **The watermark is a CSS overlay and must stay one.** The resolver could composite it into the stored WebP at encode time; that would be a mistake. The R2 object is permanent and shared by every member forever, so a baked mark could never be removed, and a KLIPY rebrand would leave every GIF ever sent carrying a dead logo.
 
 **The one third-party touch: search-result thumbnails.** Sent GIFs come from R2, but the *picker grid* renders `previewUrl`s from Klipy's CDN — so browsing the picker does contact them. Options, cheapest first:
 
@@ -238,6 +250,8 @@ file: { hd|md|sm|xs : { gif|webp|jpg|mp4|webm : { url, width, height, size } } }
 Consequence, and the reason `ResolvedEmbed` gained a `providerRef` override: the resolver stores **the canonical slug the API reports**, not the one it was asked with. Regex-stripping the suffix client-side was rejected — a legitimate slug may contain `--`, and guessing is unnecessary when the API states the answer. This keeps a dead session token out of `embeds.provider_ref`, where it would have outlived its meaning by years.
 
 **The numeric `id` is not a lookup key** — `gifs/{id}` 404s. Slug is the only handle.
+
+**But the numeric `id` IS stable identity** (measured 2026-08-14, `docs/GIF_FAVORITES.md` §2). The same item reports id `2484942301552561` in a search response, in its own canonicalized by-slug response, and again in a later search under a *rotated* token (`--kDRvizpFG` → `--khnEbMZzl`). So `id` answers the question the rotating slug cannot: "is this search result the same GIF as one I already have?" That is what makes the favorites star possible. It is still not a lookup key — favorites store the canonical slug as the handle and carry `id` only for matching. Both are nullable end to end, so a provider that stopped reporting `id` would cost an unfilled star, never a dropped result.
 
 **Verified end-to-end** by running the real `searchGifs`/`gifBySlug` against the live API: 24 items per page, `hasNext` correct, previews 220–374px, source 498px, canonical slug stored. `rating=g` vs `rating=r` return different result sets, so the D9 ceiling is honoured; `'off'` omitting the param is accepted.
 
