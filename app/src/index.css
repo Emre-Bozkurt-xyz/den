@@ -32,6 +32,24 @@
 
   --shadow-soft-raw: 0 2px 8px rgb(0 0 0 / 0.08);
   --shadow-strong-raw: 0 8px 24px rgb(0 0 0 / 0.24);
+
+  /* Reaction pills sit *on* the bubble they belong to (6px of overlap — see
+   * REACTION_OVERLAP_PX in ChatView), so they need to separate themselves from
+   * whatever is behind them without a hard 1px border, which read as a sticker
+   * cut-out once it overlapped (owner revision 2026-08-24).
+   *
+   * The hard case is a pill over an *incoming* bubble: both are
+   * `--surface-sunken`, so fill alone cannot separate them and a pure drop
+   * shadow can't either (dark-on-dark vanishes). The first layer is therefore a
+   * hairline at very low alpha — enough to define the edge, far too faint to
+   * read as an outline — and the second is the actual soft shadow. */
+  --shadow-reaction-raw: 0 0 0 1px rgb(0 0 0 / 0.1), 0 2px 6px rgb(0 0 0 / 0.18);
+  /* Reacted-by-me: the same shape, tinted toward the accent instead of a solid
+   * accent border. Derived from --accent via color-mix so the brand hue still
+   * lives in exactly one place (see this file's header). */
+  --shadow-reaction-mine-raw:
+    0 0 0 1px color-mix(in oklab, var(--accent) 55%, transparent),
+    0 2px 8px color-mix(in oklab, var(--accent) 28%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,6 +66,14 @@
 
     --shadow-soft-raw: 0 2px 8px rgb(0 0 0 / 0.4);
     --shadow-strong-raw: 0 8px 24px rgb(0 0 0 / 0.6);
+
+    /* Dark mode inverts which layer does the work: a black shadow over a
+     * near-black bubble is invisible, so the hairline goes light and carries
+     * the separation while the blur adds depth. */
+    --shadow-reaction-raw: 0 0 0 1px rgb(255 255 255 / 0.16), 0 2px 6px rgb(0 0 0 / 0.55);
+    --shadow-reaction-mine-raw:
+      0 0 0 1px color-mix(in oklab, var(--accent) 70%, transparent),
+      0 2px 8px color-mix(in oklab, var(--accent) 35%, transparent);
   }
 }
 
@@ -76,6 +102,8 @@
 
   --shadow-soft: var(--shadow-soft-raw);
   --shadow-strong: var(--shadow-strong-raw);
+  --shadow-reaction: var(--shadow-reaction-raw);
+  --shadow-reaction-mine: var(--shadow-reaction-mine-raw);
 }
 
 html,

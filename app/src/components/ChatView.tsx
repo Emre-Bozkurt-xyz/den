@@ -2555,16 +2555,27 @@ function MessageBlockRow({
                   onToggleReaction(m, r.emoji);
                 }}
                 aria-pressed={r.mine}
+                // Opaque, and the same neutral as an incoming bubble on BOTH
+                // sides of the chat (owner revision 2026-08-24) — a translucent
+                // accent fill read as a smudge once the row started overlapping
+                // the bubble instead of clearing it. "Did I react" survives as a
+                // tint on the shadow rather than a solid accent border, so the
+                // two states differ without either of them growing a hard edge.
                 className={
-                  'flex items-center gap-1 rounded-pill border px-2 py-0.5 text-xs shadow-soft transition-colors ' +
-                  (r.mine
-                    ? 'border-accent bg-accent/15 text-accent'
-                    : 'border-border bg-surface-raised text-text-secondary hover:bg-surface-sunken')
+                  'flex items-center gap-1 rounded-pill bg-surface-sunken px-2 py-0.5 text-xs ' +
+                  'text-text-secondary transition-shadow ' +
+                  (r.mine ? 'shadow-reaction-mine' : 'shadow-reaction')
                 }
                 style={{ touchAction: 'manipulation' }}
               >
                 <span>{r.emoji}</span>
-                <span className="tabular-nums">{r.count}</span>
+                {/* A lone reactor is already implied by the pill existing, so
+                    the count only appears once it says something the pill
+                    doesn't — i.e. from 2 up. Deliberately NOT conditioned on
+                    DM-vs-group: a 2-member chat simply never reaches 3, so the
+                    same rule covers both and PROJECT.md §15's "never
+                    special-case DMs" stays intact. */}
+                {r.count > 1 && <span className="tabular-nums">{r.count}</span>}
               </button>
             ))}
           </div>
