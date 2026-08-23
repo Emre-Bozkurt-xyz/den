@@ -93,6 +93,18 @@ const BOTTOM_LATCH_PX = 80;
 // matters to how the list feels.
 const KEYBOARD_SETTLE_MS = 400;
 
+// Reaction pill row placement (see the row's own comment in MessageBlockRow
+// for why both numbers exist and what the earlier revert got wrong).
+const REACTION_OVERLAP_PX = 6; // how far the row rides up onto the bubble/media's bottom edge — a graze, deliberately not a half-overlap
+const REACTION_EDGE_INSET_PX = 10; // how far the row is pulled in from the sender's edge, so the overlapping sliver lands on the run's corner nub
+// Mirrors the `gap-[2px]` on the block's flex-col. The pill row is a flex
+// child, so that gap is already pushing it down before any margin applies —
+// pull it back out, or `REACTION_OVERLAP_PX` silently means 4px, not 6.
+const BLOCK_ROW_GAP_PX = 2;
+// One value for both the pull-up and the padding that gives the height back,
+// so they can't drift apart and start shifting the runs below.
+const REACTION_PULL_UP_PX = REACTION_OVERLAP_PX + BLOCK_ROW_GAP_PX;
+
 // Swipe-to-reply gesture thresholds (mobile) — grouped here for later
 // real-device tuning, same convention as Composer.tsx's gesture constants.
 const SWIPE_REPLY_ENGAGE_PX = 12; // px of horizontal travel before we commit to a horizontal swipe over a vertical scroll/long-press
@@ -306,25 +318,58 @@ export function ChatView({
   // upload's caption clearing (which has no equivalent need to restore).
   const [editing, setEditing] = useState<Message | null>(null);
   const preEditDraftRef = useRef('');
-  // Live swipe-to-reply drag state — which block (by its lead message id) is
-  // currently being dragged and how far, so `MessageBlockRow` can apply a
-  // live `translateX` to exactly that block. Only one gesture can be active
-  // at a time (a single pointer), so this is a single slot, not a map.
-  const [swipeState, setSwipeState] = useState<{ id: string; dx: number } | null>(null);
-  // Which block (if any) is currently animating its swipe-to-reply offset
-  // back to rest. `MessageBlockRow` only sets `transition: transform` on this
-  // one block — see the file-header note by its style object for why every
-  // *other* block must render with no `transition` property at all rather
-  // than an always-on `transition: transform` that happens to be a no-op
-  // when `swipeDx` is 0.
-  const [snappingBackId, setSnappingBackId] = useState<string | null>(null);
+  // Which block (by its lead message id) currently has a swipe-to-reply
+  // gesture on it, or null. This is the *only* React state the gesture
+  // touches, and it changes exactly twice per swipe: once when the drag
+  // engages (mounting the reveal icon) and once when the snap-back finishes
+  // (unmounting it). Only one gesture can be active at a time (a single
+  // pointer), so it's a single slot, not a map.
+  //
+  // The live offset is deliberately NOT state. It used to be
+  // (`swipeState: {id, dx}`, written on every pointermove), and that cost two
+  // separate defects (owner report, 2026-08-23: "swipe-to-reply seems to have
+  // stopped working"):
+  //
+  //  1. `pointermove` is a *continuous* event, so React schedules its update
+  //     at default priority rather than flushing it. A quick flick could lift
+  //     the finger before that render committed, leaving `onBubblePointerUp`
+  //     holding the previous render's `swipeState` — travel read as 0, no
+  //     reply fired, no snap-back. A slow drag worked; a flick silently did
+  //     nothing.
+  //  2. Nothing in this file is memoized, so each of those ~60 updates/second
+  //     re-rendered every run, block, media bubble, embed card and receipt row
+  //     on screen. As the list grew (albums, receipts, embeds, GIF cards) that
+  //     got heavy enough to jank the first frames of the gesture, which is
+  //     exactly the window in which the browser decides whether the touch is a
+  //     horizontal swipe or a vertical scroll.
+  //
+  // So the drag is painted straight to the DOM instead (`paintSwipe`), reading
+  // the nodes out of `messageRefs`/`swipeIconRefs`. Nothing re-renders while a
+  // finger is down. React must therefore never manage `transform`/`transition`
+  // on a block either — see `MessageBlockRow`'s style object.
+  const [swipingId, setSwipingId] = useState<string | null>(null);
+  // The reveal icons, registered the same way `messageRefs` registers blocks,
+  // so `paintSwipe` can drive the icon's fade/scale imperatively too. Only the
+  // block being swiped ever has one mounted.
+  const swipeIconRefs = useRef(new Map<string, HTMLDivElement>());
   // Per-gesture bookkeeping for the currently pressed block, set at
   // pointerdown and read/mutated on pointermove — a plain ref (like
-  // Composer's `gestureRef`) since it doesn't itself need to trigger a
-  // render; `swipeState` above is what drives the visual frame.
-  const swipeGestureRef = useRef<{ msg: Message; mine: boolean; startX: number; startY: number; engaged: boolean } | null>(
-    null,
-  );
+  // Composer's `gestureRef`) since it doesn't itself need to trigger a render.
+  // `travel` is the signed offset currently painted, and it lives here rather
+  // than in state specifically so the release check can't read a stale value
+  // (defect 1 above).
+  const swipeGestureRef = useRef<{
+    msg: Message;
+    mine: boolean;
+    startX: number;
+    startY: number;
+    engaged: boolean;
+    travel: number;
+    pointerId: number;
+  } | null>(null);
+  // Pending snap-back cleanup, so a new gesture landing mid-animation can
+  // cancel it rather than have it fire later and unmount a live icon.
+  const snapBackTimerRef = useRef<number | null>(null);
   // Post-MVP double-tap-to-react: the message id + pending timer for a tap
   // that's waiting to see if a second one arrives — see `handleTap`.
   const pendingTapRef = useRef<{ id: string; timer: number } | null>(null);
@@ -634,6 +679,14 @@ export function ChatView({
     };
   }, []);
 
+  // Same again for the swipe-to-reply snap-back (`snapBack`): leaving the chat
+  // mid-gesture would otherwise leave a timer holding a `setSwipingId` call.
+  useEffect(() => {
+    return () => {
+      if (snapBackTimerRef.current !== null) window.clearTimeout(snapBackTimerRef.current);
+    };
+  }, []);
+
   // docs/MESSAGE_EDIT.md §4.2 edge case: a `message.deleted` frame (this
   // client's own bulk-select delete, another tab, etc.) removed the message
   // currently being edited out from under the composer — cancel edit mode
@@ -920,8 +973,37 @@ export function ChatView({
     // failed message can't be replied to either (docs/RECEIPTS.md §5.4).
     swipeGestureRef.current =
       !selectionMode && msgs.length === 1 && e.pointerType !== 'mouse' && !isFailedId(m.id)
-        ? { msg: m, mine, startX: e.clientX, startY: e.clientY, engaged: false }
+        ? { msg: m, mine, startX: e.clientX, startY: e.clientY, engaged: false, travel: 0, pointerId: e.pointerId }
         : null;
+  }
+
+  /** Paints one frame of a swipe straight onto the DOM — the block's
+   *  `translateX` plus the reveal icon's fade/scale/armed colour — with no
+   *  React involvement at all. See `swipingId`'s doc comment for why the drag
+   *  is imperative.
+   *
+   *  Every write is guarded: a block can unmount mid-gesture (the message gets
+   *  deleted, an older page re-keys the list), and the icon mounts a frame or
+   *  two after `setSwipingId`, so the first move or two legitimately find
+   *  nothing there yet. */
+  function paintSwipe(id: string, dx: number) {
+    const el = messageRefs.current.get(id);
+    if (el) el.style.transform = dx ? `translateX(${dx}px)` : '';
+
+    const icon = swipeIconRefs.current.get(id);
+    if (!icon) return;
+    const progress = Math.min(1, Math.abs(dx) / SWIPE_REPLY_THRESHOLD_PX);
+    icon.style.opacity = String(progress);
+    icon.style.transform = `scale(${0.7 + 0.3 * progress})`;
+    // "Fills in" (muted → accent) once past the fire threshold. Toggled as
+    // classes rather than inline colours so the palette stays in the design
+    // tokens (PROJECT.md §11 — never hardcoded colours); the icon's own
+    // `transition-colors` animates the swap for free.
+    const armed = progress >= 1;
+    icon.classList.toggle('bg-accent', armed);
+    icon.classList.toggle('text-white', armed);
+    icon.classList.toggle('bg-surface-sunken', !armed);
+    icon.classList.toggle('text-text-muted', !armed);
   }
 
   function onBubblePointerMove(e: React.PointerEvent) {
@@ -938,6 +1020,36 @@ export function ChatView({
         if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > SWIPE_REPLY_ENGAGE_PX && towardCenter) {
           swipe.engaged = true;
           clearLongPressTimer();
+          // Capture the pointer now that the gesture is committed. The
+          // standing rule (docs/archive/MESSAGE_DELETE.md §4) is "do not call
+          // setPointerCapture — it would swallow the list's own scrolling",
+          // and that rule is about capturing at *pointerdown*, before we know
+          // whether this is a scroll. Here the direction test above has
+          // already decided it isn't, so scrolling has nothing left to lose.
+          //
+          // Without capture the gesture strands itself on short bubbles: past
+          // the threshold the block rubber-bands (`swipeTravel`) and so lags
+          // the finger, and once the finger is outside the block's own box,
+          // pointermove/pointerup stop being delivered to it at all — no
+          // reply, and the bubble left sitting at its dragged offset until
+          // something else re-renders. Capture keeps the whole gesture
+          // addressed to this element regardless of where the finger goes.
+          try {
+            e.currentTarget.setPointerCapture(swipe.pointerId);
+          } catch {
+            // Pointer already released/invalid — the gesture is over anyway,
+            // and the pointerup/cancel path cleans up either way.
+          }
+          // A snap-back on this same block may still be running — a second
+          // swipe landing before it finished keeps the icon mounted, so both
+          // nodes can still be carrying the easing it armed. A live drag must
+          // track the finger 1:1, never ease, so strip it off both.
+          cancelPendingSnapBack();
+          const el = messageRefs.current.get(swipe.msg.id);
+          if (el) el.style.transition = '';
+          const icon = swipeIconRefs.current.get(swipe.msg.id);
+          if (icon) icon.style.transition = '';
+          setSwipingId(swipe.msg.id);
         } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > LONG_PRESS_SLOP_PX) {
           // Reads as a vertical scroll instead — hand the gesture back to
           // the list's own scrolling and the (still-running) long-press
@@ -947,7 +1059,8 @@ export function ChatView({
       }
       if (swipe.engaged) {
         const travel = swipeTravel(Math.abs(dx));
-        setSwipeState({ id: swipe.msg.id, dx: swipe.mine ? -travel : travel });
+        swipe.travel = swipe.mine ? -travel : travel;
+        paintSwipe(swipe.msg.id, swipe.travel);
         return; // engaged swipe owns this gesture — skip the long-press slop check below
       }
     }
@@ -957,45 +1070,92 @@ export function ChatView({
     if (Math.hypot(e.clientX - start.x, e.clientY - start.y) > LONG_PRESS_SLOP_PX) clearLongPressTimer();
   }
 
-  /** Arms the one-block `transition: transform` for its snap-back-to-rest
-   *  animation, then clears it once the transition's had time to finish —
-   *  see `snappingBackId`'s doc comment for why this is scoped to a single
-   *  block instead of living on every block permanently. */
-  function armSnapBack(id: string) {
-    setSnappingBackId(id);
-    window.setTimeout(() => setSnappingBackId((cur) => (cur === id ? null : cur)), SWIPE_SNAP_BACK_MS + 50);
+  function cancelPendingSnapBack() {
+    if (snapBackTimerRef.current === null) return;
+    window.clearTimeout(snapBackTimerRef.current);
+    snapBackTimerRef.current = null;
   }
 
-  function onBubblePointerUp() {
-    clearLongPressTimer();
-    longPressStartRef.current = null;
+  /** Eases the block (and its reveal icon) back to rest, then tears the
+   *  gesture's DOM state down.
+   *
+   *  `transition: transform` is armed here and cleared again when the
+   *  animation ends — never left standing on a block. An unconditional
+   *  `transition: transform` on every bubble was assumed to be a harmless
+   *  no-op until real Android PWA testing showed it was enough to promote
+   *  every bubble onto its own compositor layer, which then ignored the focus
+   *  menu's z-index entirely (2026-07-22 — see BACKBONE §15). Driving this
+   *  imperatively keeps that blast radius at exactly one element for exactly
+   *  the length of one animation. */
+  function snapBack(id: string) {
+    const el = messageRefs.current.get(id);
+    if (el) {
+      el.style.transition = `transform ${SWIPE_SNAP_BACK_MS}ms ease-out`;
+      el.style.transform = 'translateX(0px)';
+    }
+    const icon = swipeIconRefs.current.get(id);
+    if (icon) {
+      icon.style.transition = `opacity ${SWIPE_SNAP_BACK_MS}ms ease-out, transform ${SWIPE_SNAP_BACK_MS}ms ease-out`;
+      icon.style.opacity = '0';
+      icon.style.transform = 'scale(0.7)';
+    }
+    cancelPendingSnapBack();
+    snapBackTimerRef.current = window.setTimeout(() => {
+      snapBackTimerRef.current = null;
+      const done = messageRefs.current.get(id);
+      if (done) {
+        done.style.transition = '';
+        done.style.transform = '';
+      }
+      // Unmounting the icon is the one render the *end* of a gesture costs.
+      setSwipingId((cur) => (cur === id ? null : cur));
+    }, SWIPE_SNAP_BACK_MS + 50);
+  }
 
+  /** Shared tail for pointerup and pointercancel: release the capture taken
+   *  at engage, and hand back the gesture that was in flight (already
+   *  cleared) so each caller can apply its own policy about firing the
+   *  reply. */
+  function endSwipeGesture(e: React.PointerEvent) {
     const swipe = swipeGestureRef.current;
     swipeGestureRef.current = null;
     if (swipe?.engaged) {
-      // A long-press can't have fired mid-swipe (engaging cancels its
-      // timer), but the click that follows this pointerup still needs
-      // swallowing — otherwise the tap-through would open the viewer/toggle
-      // selection right after the drag.
-      suppressClickRef.current = true;
-      const travel = swipeState && swipeState.id === swipe.msg.id ? Math.abs(swipeState.dx) : 0;
-      if (travel >= SWIPE_REPLY_THRESHOLD_PX) startReply(swipe.msg);
-      if (travel > 0) armSnapBack(swipe.msg.id);
+      try {
+        if (e.currentTarget.hasPointerCapture(swipe.pointerId)) e.currentTarget.releasePointerCapture(swipe.pointerId);
+      } catch {
+        // Already released by the browser (the normal case on pointerup) —
+        // nothing to undo.
+      }
     }
-    setSwipeState(null);
+    return swipe;
   }
 
-  function onBubblePointerCancel() {
-    // Browser-interrupted gesture (e.g. an edge-swipe took over) — abort
-    // with no side effects, same posture as MediaViewer's pointer-cancel handlers.
+  function onBubblePointerUp(e: React.PointerEvent) {
     clearLongPressTimer();
     longPressStartRef.current = null;
-    const swipe = swipeGestureRef.current;
-    swipeGestureRef.current = null;
-    if (swipe?.engaged && swipeState && swipeState.id === swipe.msg.id && swipeState.dx !== 0) {
-      armSnapBack(swipe.msg.id);
-    }
-    setSwipeState(null);
+
+    const swipe = endSwipeGesture(e);
+    if (!swipe?.engaged) return;
+    // A long-press can't have fired mid-swipe (engaging cancels its
+    // timer), but the click that follows this pointerup still needs
+    // swallowing — otherwise the tap-through would open the viewer/toggle
+    // selection right after the drag.
+    suppressClickRef.current = true;
+    // Read off the ref, never off React state: the last pointermove's paint
+    // is already on the DOM, but its render may not have committed, which is
+    // the flick-does-nothing defect described on `swipingId`.
+    if (Math.abs(swipe.travel) >= SWIPE_REPLY_THRESHOLD_PX) startReply(swipe.msg);
+    snapBack(swipe.msg.id);
+  }
+
+  function onBubblePointerCancel(e: React.PointerEvent) {
+    // Browser-interrupted gesture (e.g. an edge-swipe took over) — abort
+    // with no side effects, same posture as MediaViewer's pointer-cancel
+    // handlers. The block still has to be put back where it was, though.
+    clearLongPressTimer();
+    longPressStartRef.current = null;
+    const swipe = endSwipeGesture(e);
+    if (swipe?.engaged) snapBack(swipe.msg.id);
   }
 
   /** @param hasMediaTap — true when this block's tap is already owned by
@@ -1488,7 +1648,18 @@ export function ChatView({
         // with the reader flung a page further down (owner report,
         // 2026-08-23). Safari has no scroll anchoring at all, so the manual
         // restore has to stay — this just makes Chrome stop double-correcting.
-        style={{ overflowAnchor: 'none' }}
+        //
+        // `overscroll-behavior-y: contain` stops a pull past the top of the
+        // history from *chaining* out to the viewport, where it becomes
+        // Chrome's pull-to-refresh and reloads the PWA (owner report). The
+        // `overscroll-behavior: none` on html/body in index.css does not cover
+        // this: that governs the viewport's own scroller, not what an inner
+        // scroll region hands outward when it hits its limit. The exposure is
+        // worst in exactly the moment reported — `loadOlder()` fires at
+        // `scrollTop < 300` and until that page lands this element is pinned at
+        // its limit, so every further pull chains. `contain` rather than `none`
+        // so the scroller keeps its own rubber-band feel; only the chain is cut.
+        style={{ overflowAnchor: 'none', overscrollBehaviorY: 'contain' }}
       >
         {isLoading && <p className="text-center text-sm text-text-muted">Loading…</p>}
         {!isLoading && messages.length === 0 && (
@@ -1529,8 +1700,11 @@ export function ChatView({
                 onReply={startReply}
                 onToggleReaction={toggleReaction}
                 onJumpToMessage={jumpToMessage}
-                swipeState={swipeState}
-                snappingBackId={snappingBackId}
+                swipingId={swipingId}
+                registerSwipeIcon={(id, el) => {
+                  if (el) swipeIconRefs.current.set(id, el);
+                  else swipeIconRefs.current.delete(id);
+                }}
                 onPointerDownBlock={onBubblePointerDown}
                 onPointerMoveBlock={onBubblePointerMove}
                 onPointerUpBlock={onBubblePointerUp}
@@ -1843,8 +2017,8 @@ function RunGroup({
   onReply,
   onToggleReaction,
   onJumpToMessage,
-  swipeState,
-  snappingBackId,
+  swipingId,
+  registerSwipeIcon,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -1884,14 +2058,15 @@ function RunGroup({
   onJumpToMessage: (id: string) => void;
   /** Post-MVP: which block (if any) is mid swipe-to-reply and how far, so
    *  only that one block's `MessageBlockRow` applies a live translateX. */
-  swipeState: { id: string; dx: number } | null;
-  /** Which block (if any) is currently animating its swipe offset back to
-   *  rest — see `ChatView.snappingBackId`'s doc comment. */
-  snappingBackId: string | null;
+  /** The one block (by lead message id) with a swipe-to-reply gesture on it,
+   *  or null — see `ChatView.swipingId`'s doc comment for why the live offset
+   *  is not state. */
+  swipingId: string | null;
+  registerSwipeIcon: (id: string, el: HTMLDivElement | null) => void;
   onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
-  onPointerUpBlock: () => void;
-  onPointerCancelBlock: () => void;
+  onPointerUpBlock: (e: React.PointerEvent) => void;
+  onPointerCancelBlock: (e: React.PointerEvent) => void;
   onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
   /** docs/RECEIPTS.md §3/§5.4 — resolved per-block below (own messages
    *  only). */
@@ -1944,8 +2119,8 @@ function RunGroup({
             onReply={onReply}
             onToggleReaction={onToggleReaction}
             onJumpToMessage={onJumpToMessage}
-            swipeDx={swipeState?.id === blockMessages(block)[0]!.id ? swipeState.dx : 0}
-            snappingBack={snappingBackId === blockMessages(block)[0]!.id}
+            swiping={swipingId === blockMessages(block)[0]!.id}
+            registerSwipeIcon={registerSwipeIcon}
             onPointerDownBlock={onPointerDownBlock}
             onPointerMoveBlock={onPointerMoveBlock}
             onPointerUpBlock={onPointerUpBlock}
@@ -2012,8 +2187,8 @@ function MessageBlockRow({
   onReply,
   onToggleReaction,
   onJumpToMessage,
-  swipeDx,
-  snappingBack,
+  swiping,
+  registerSwipeIcon,
   onPointerDownBlock,
   onPointerMoveBlock,
   onPointerUpBlock,
@@ -2049,18 +2224,18 @@ function MessageBlockRow({
   onReply: (m: Message) => void;
   onToggleReaction: (m: Message, emoji: string) => void;
   onJumpToMessage: (id: string) => void;
-  /** Live swipe-to-reply travel for *this* block only (0 unless it's the one
-   *  currently being dragged — see `RunGroup`'s `swipeState` lookup). Signed:
-   *  negative for `mine` (dragged left), positive for others (dragged right). */
-  swipeDx: number;
-  /** True only for the one block currently animating its swipe offset back
-   *  to rest — see `ChatView.snappingBackId`'s doc comment for why this
-   *  needs to be scoped this tightly rather than an always-on `transition`. */
-  snappingBack: boolean;
+  /** True while this block is the one under a swipe-to-reply gesture, which
+   *  is what mounts the reveal icon below. The live *offset* is painted
+   *  straight onto the DOM by `ChatView.paintSwipe` and never arrives as a
+   *  prop — see `ChatView.swipingId` for why. */
+  swiping: boolean;
+  /** Hands the reveal icon's node up to `ChatView`, the same way `registerRef`
+   *  hands up the block's, so `paintSwipe` can drive its fade/scale. */
+  registerSwipeIcon: (id: string, el: HTMLDivElement | null) => void;
   onPointerDownBlock: (e: React.PointerEvent, msgs: Message[], mine: boolean) => void;
   onPointerMoveBlock: (e: React.PointerEvent) => void;
-  onPointerUpBlock: () => void;
-  onPointerCancelBlock: () => void;
+  onPointerUpBlock: (e: React.PointerEvent) => void;
+  onPointerCancelBlock: (e: React.PointerEvent) => void;
   onClickBlock: (e: React.MouseEvent, msgs: Message[], hasMediaTap: boolean) => void;
   /** docs/RECEIPTS.md §3/§5.4 — resolved by `RunGroup` across every message
    *  this block covers; empty/null on anyone else's messages. */
@@ -2140,9 +2315,6 @@ function MessageBlockRow({
     />
   );
 
-  const swipeProgress = Math.min(1, Math.abs(swipeDx) / SWIPE_REPLY_THRESHOLD_PX);
-  const swipeArmed = swipeProgress >= 1;
-
   // docs/MESSAGE_EDIT.md §4.5 — small muted "edited" label beside the bubble
   // on the side facing screen center (owner feedback, 2026-07-22, twice
   // revised: below-the-bubble added vertical height; then row-level inline
@@ -2175,8 +2347,11 @@ function MessageBlockRow({
           "fills in" (muted → accent) once past the fire threshold. Sits in
           the gutter behind the block's resting position (the side opposite
           the drag direction, matching iMessage), so it never affects layout. */}
-      {swipeProgress > 0 && (
+      {swiping && (
         <div
+          ref={(el) => {
+            registerSwipeIcon(m.id, el);
+          }}
           className={
             // `inset-y-0` + `my-auto` centers a fixed-height absolutely
             // positioned box regardless of whether this wrapper's height is
@@ -2185,11 +2360,17 @@ function MessageBlockRow({
             // flex container), landing the icon well above the bubble's true
             // center instead of centered on it (including bare media, which
             // has no bubble padding to hide the miss).
-            'pointer-events-none absolute inset-y-0 z-0 my-auto grid h-8 w-8 place-items-center rounded-pill transition-colors ' +
-            (mine ? 'right-0' : 'left-0') +
-            (swipeArmed ? ' bg-accent text-white' : ' bg-surface-sunken text-text-muted')
+            //
+            // Mounts at rest (opacity 0, the muted palette) and is then driven
+            // entirely by `ChatView.paintSwipe`, which writes opacity/scale and
+            // toggles the armed colour classes. Nothing here re-renders during
+            // the drag, so no value on this element may come from a prop that
+            // changes with travel.
+            'pointer-events-none absolute inset-y-0 z-0 my-auto grid h-8 w-8 place-items-center rounded-pill ' +
+            'bg-surface-sunken text-text-muted transition-colors ' +
+            (mine ? 'right-0' : 'left-0')
           }
-          style={{ opacity: swipeProgress, transform: `scale(${0.7 + 0.3 * swipeProgress})` }}
+          style={{ opacity: 0, transform: 'scale(0.7)' }}
         >
           <ReplyIcon size={16} />
         </div>
@@ -2218,17 +2399,22 @@ function MessageBlockRow({
           WebkitTouchCallout: 'none',
           WebkitUserSelect: 'none',
           userSelect: 'none',
-          transform: swipeDx ? `translateX(${swipeDx}px)` : undefined,
-          // `transition` is declared *only* on the one block currently
-          // snapping back (`snappingBack`) — never as an always-on style,
-          // even though it'd be a no-op transform-wise whenever `swipeDx` is
-          // 0. An unconditional `transition: transform` on every bubble was
-          // exactly that "harmless no-op" until real Android PWA testing
-          // showed it was enough to promote every bubble onto its own
-          // compositor layer, which then ignored the focus menu's z-index
-          // entirely (2026-07-22 — see BACKBONE §15). Live drag still tracks
-          // the pointer 1:1 with no transition.
-          transition: snappingBack ? `transform ${SWIPE_SNAP_BACK_MS}ms ease-out` : undefined,
+          // NOTE: `transform` and `transition` are deliberately absent here,
+          // and must stay absent. Swipe-to-reply writes both straight onto
+          // this node (`ChatView.paintSwipe` / `snapBack`) so a drag costs no
+          // re-renders — and React only clears style properties it set itself,
+          // so listing either one here would make any unrelated re-render
+          // mid-gesture (an arriving message, a receipt landing) wipe the
+          // offset out from under the finger.
+          //
+          // Keeping `transition` off the React path also preserves the
+          // property that made it correct before: it exists on exactly one
+          // block, for exactly the length of one snap-back. An unconditional
+          // `transition: transform` on every bubble was assumed to be a
+          // harmless no-op until real Android PWA testing showed it was enough
+          // to promote every bubble onto its own compositor layer, which then
+          // ignored the focus menu's z-index entirely (2026-07-22 — see
+          // BACKBONE §15).
         }}
       >
         {/* Bare media, an album, and captioned media all share this
@@ -2331,16 +2517,35 @@ function MessageBlockRow({
           </div>
         )}
 
-        {/* Reaction pills (post-MVP) — a row just below the bubble's bottom
+        {/* Reaction pills (post-MVP) — a row that grazes the bubble's bottom
             edge, aligned to the sender's side. Placed *inside* this flex-col
             so it stacks as an extra row after the media/bubble rather than
-            fighting the run-corner layout above. A negative margin here used
-            to pull the row up onto the bubble/media's bottom edge — on bare
-            media especially, that covered real image pixels instead of just
-            grazing a rounded corner, so the pills now sit in the normal flow
-            with a small positive gap instead. */}
+            fighting the run-corner layout above.
+
+            This overlapped the bubble once before and was reverted: a blanket
+            negative margin put the pills at the block's outer edge, which on
+            bare media (no bubble padding to absorb it) is live image content,
+            not a corner. The overlap is back because it's what the owner
+            wants, but constrained two ways so it lands on the corner nub
+            instead of the picture:
+              - `REACTION_OVERLAP_PX` (6) is a graze, not a half-overlap — a
+                ~22px pill still clears the bubble by ~16px.
+              - `REACTION_EDGE_INSET_PX` (10) pulls the row in from the
+                sender's edge, so the overlapping sliver sits over the
+                tightened run corner rather than the middle of the frame.
+            The matching `paddingBottom` gives the height back: without it the
+            negative margin shortens the block and the next run creeps up,
+            changing vertical rhythm everywhere reactions happen to exist. */}
         {reactions.length > 0 && (
-          <div className={'z-10 mt-0.5 flex flex-wrap gap-1 ' + (mine ? 'justify-end' : 'justify-start')}>
+          <div
+            className={'z-10 flex flex-wrap gap-1 ' + (mine ? 'justify-end' : 'justify-start')}
+            style={{
+              marginTop: -REACTION_PULL_UP_PX,
+              paddingBottom: REACTION_PULL_UP_PX,
+              marginRight: mine ? REACTION_EDGE_INSET_PX : undefined,
+              marginLeft: mine ? undefined : REACTION_EDGE_INSET_PX,
+            }}
+          >
             {reactions.map((r) => (
               <button
                 key={r.emoji}

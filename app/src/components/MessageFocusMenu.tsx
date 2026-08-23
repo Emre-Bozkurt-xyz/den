@@ -17,12 +17,24 @@ import { useSensitivity } from '../lib/sensitivity';
  *
  * **Hand-rolled, no animation library.** The "lift" is a `cloneNode(true)`
  * of the *real* bubble DOM node (captured via `ChatView`'s `messageRefs`),
- * mounted into a `position: fixed` host at the exact `DOMRect` it was
- * captured at, then eased to a slightly-scaled resting transform — a classic
+ * mounted into a `position: fixed` host at the source bubble's live
+ * `DOMRect`, then eased to a slightly-scaled resting transform — a classic
  * shared-element trick without needing to re-implement bubble/media/voice
  * rendering a second time here. The clone is decorative only
  * (`pointer-events: none`, interactive descendants disabled) — it is never a
  * second live control surface.
+ *
+ * **The rect is re-measured, not frozen.** The `rect` prop is only the opening
+ * measurement; `useSourceRect` below re-reads the source node whenever the
+ * viewport or the node itself moves. It has to: opening this menu blurs the
+ * composer, which dismisses the soft keyboard, which on Android grows the
+ * *layout* viewport and re-lays out the whole message list underneath. With a
+ * frozen rect the clone stayed put while the real bubble slid down behind the
+ * dim, and the user saw the same message twice in two places (owner report,
+ * 2026-08-23). The source node is also hidden for the menu's lifetime
+ * (`useHiddenSource`) so the two can never be on screen together at all —
+ * before, the clone covering its own original exactly was the only reason
+ * nobody noticed the duplicate.
  */
 
 const LIFT_SCALE = 1.03;
@@ -38,6 +50,10 @@ const PANEL_SIDE_BIAS = 0.32; // 0 = dead center, 1 = centered on the bubble; a 
 // MediaViewer's VIDEO_CONTROLS_EXCLUSION_HEIGHT. Bumped from 200 when the
 // quick-emoji row and Reply row were added (post-MVP reactions/replies).
 const PANEL_ESTIMATED_HEIGHT = 300;
+// How long after opening to keep polling the source bubble's position. Covers
+// the soft keyboard's slide-out and the reflow that follows it; matches the
+// constant of the same name in ChatView, which sizes the same phenomenon.
+const KEYBOARD_SETTLE_MS = 400;
 
 // Deliberately no `backdrop-filter` here even though it's supported: on a
 // real Android PWA it was observed compositing incorrectly against the
@@ -48,9 +64,100 @@ const PANEL_ESTIMATED_HEIGHT = 300;
 // something feature-detection catches. Flat dim only, no blur — see the
 // Decision Log (BACKBONE §15) for the writeup (2026-07-22).
 
+/**
+ * The source bubble's *live* on-screen rect. Seeded with the measurement taken
+ * when the menu opened, then re-read whenever anything that could move the
+ * bubble happens:
+ *
+ *  - `visualViewport` resize/scroll — iOS never resizes the layout viewport for
+ *    the keyboard, so this is the only signal there (same reasoning as
+ *    `useKeyboardInset`, docs/IOS_KEYBOARD.md; note that hook is hard-gated to
+ *    iOS and so can't be reused here — Android needs the window/observer path
+ *    below instead).
+ *  - `window` resize — Android/Chrome *does* resize the layout viewport for the
+ *    keyboard, which is the case that produced the original report.
+ *  - a `ResizeObserver` on the node itself and on `document.body` — covers the
+ *    list reflowing for reasons that aren't the keyboard at all (an image
+ *    finishing load above the bubble, a reaction pill wrapping, rotation).
+ *
+ * Reads are coalesced into one per animation frame, and the returned object is
+ * only replaced when a value actually changed, so a stream of no-op viewport
+ * events doesn't re-render the menu.
+ */
+function useSourceRect(sourceEl: HTMLElement, initial: DOMRect) {
+  const [rect, setRect] = useState<DOMRect>(initial);
+
+  useEffect(() => {
+    let rafId: number | null = null;
+
+    function measure() {
+      rafId = null;
+      const next = sourceEl.getBoundingClientRect();
+      setRect((cur) =>
+        cur.top === next.top && cur.left === next.left && cur.width === next.width && cur.height === next.height
+          ? cur
+          : next,
+      );
+    }
+
+    function schedule() {
+      if (rafId !== null) return; // already queued for this frame
+      rafId = requestAnimationFrame(measure);
+    }
+
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', schedule);
+    vv?.addEventListener('scroll', schedule);
+    window.addEventListener('resize', schedule);
+    const ro = new ResizeObserver(schedule);
+    ro.observe(sourceEl);
+    ro.observe(document.body);
+
+    // The keyboard's retraction is an animation, not an event: Android fires a
+    // handful of resizes as it slides away and the list settles a frame or two
+    // after the last one. A short poll over that window costs nothing (it stops
+    // well before the menu is likely to be dismissed) and removes the whole
+    // class of "settled one frame after we stopped listening" misses.
+    const settle = window.setInterval(schedule, 50);
+    const stopSettle = window.setTimeout(() => window.clearInterval(settle), KEYBOARD_SETTLE_MS);
+
+    return () => {
+      vv?.removeEventListener('resize', schedule);
+      vv?.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      ro.disconnect();
+      window.clearInterval(settle);
+      window.clearTimeout(stopSettle);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [sourceEl]);
+
+  return rect;
+}
+
+/**
+ * Hides the real bubble for as long as the menu is up, so it and the lifted
+ * clone can never both be on screen (see the file header). `visibility` rather
+ * than `display`, deliberately — it keeps the node's box, so the list's scroll
+ * height doesn't change underneath the reader, and `useSourceRect` can keep
+ * measuring it.
+ *
+ * Restored on unmount even if the node has since been detached (a
+ * `message.deleted` frame arriving while the menu is open), which is harmless.
+ */
+function useHiddenSource(sourceEl: HTMLElement) {
+  useEffect(() => {
+    const previous = sourceEl.style.visibility;
+    sourceEl.style.visibility = 'hidden';
+    return () => {
+      sourceEl.style.visibility = previous;
+    };
+  }, [sourceEl]);
+}
+
 export function MessageFocusMenu({
   message,
-  rect,
+  rect: initialRect,
   sourceEl,
   me,
   onClose,
@@ -67,7 +174,8 @@ export function MessageFocusMenu({
   message: Message;
   /** Captured via `messageRefs.get(id).getBoundingClientRect()` at the
    *  moment the menu opens (`ChatView`'s `openActionMenu`) — the on-screen
-   *  position the lift animates *from*. */
+   *  position the lift animates *from*. Only the opening measurement: from
+   *  there on the live rect comes from `useSourceRect`, see the file header. */
   rect: DOMRect;
   /** The real bubble DOM node the lifted clone is copied from. */
   sourceEl: HTMLElement;
@@ -96,6 +204,8 @@ export function MessageFocusMenu({
   onFavorite?: (m: Message) => void;
   favorited?: boolean;
 }) {
+  const rect = useSourceRect(sourceEl, initialRect);
+  useHiddenSource(sourceEl);
   const reducedMotion = useReducedMotion();
   // System back gesture / browser back dismisses the menu (matches Escape and
   // the backdrop tap), instead of unwinding the underlying view.
@@ -151,6 +261,16 @@ export function MessageFocusMenu({
     });
     clone.style.pointerEvents = 'none';
     clone.style.margin = '0';
+    // `useHiddenSource` runs first (hooks fire in declaration order), so the
+    // node this was copied from already carries `visibility: hidden` inline —
+    // and `cloneNode(true)` copies inline styles. Undo it on the copy, or the
+    // lift is invisible and the menu appears to float over nothing.
+    clone.style.visibility = 'visible';
+    // Likewise for a swipe-to-reply offset left painted on the block: the
+    // clone is positioned by its own captured rect, so an inherited
+    // `translateX` would double-count and offset the lift sideways.
+    clone.style.transform = 'none';
+    clone.style.transition = 'none';
     host.appendChild(clone);
     return () => {
       host.removeChild(clone);
@@ -165,6 +285,10 @@ export function MessageFocusMenu({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Recomputed on every render, which `useSourceRect` now guarantees happens
+  // whenever the viewport changes — so the below/above decision is made against
+  // the viewport the panel will actually land in, not the one that existed when
+  // a keyboard was still up.
   const viewportH = window.innerHeight;
   const spaceBelow = viewportH - rect.bottom;
   const spaceAbove = rect.top;
@@ -184,6 +308,10 @@ export function MessageFocusMenu({
     height: rect.height,
     transformOrigin: 'center',
     transform: revealed ? `translateZ(0) scale(${LIFT_SCALE})` : 'translateZ(0) scale(1)',
+    // `top`/`left` are deliberately left out of the transition: when the list
+    // reflows under a retracting keyboard the clone should arrive where the
+    // bubble now is, not chase it across the screen a beat behind. Only the
+    // lift's own scale animates.
     transition: reducedMotion ? 'none' : `transform ${TRANSITION_MS}ms cubic-bezier(0.22,1,0.36,1)`,
     zIndex: 61,
     pointerEvents: 'none',

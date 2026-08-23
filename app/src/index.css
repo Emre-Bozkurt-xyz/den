@@ -84,14 +84,26 @@ body,
   height: 100%;
 }
 
+/* Kill the pull-to-refresh / rubber-band on the app shell.
+ *
+ * Declared on `html` as well as `body`, deliberately. Chrome only propagates
+ * `overscroll-behavior` from `<body>` up to the viewport when the root
+ * element's own overflow is `visible` — a condition nothing in this file
+ * guarantees will stay true. Setting it on the root directly is the form that
+ * doesn't depend on that. Note this governs the *viewport* scroller only:
+ * an inner `overflow-y: auto` region still chains its overscroll outward
+ * unless it opts out itself (see the message scroller in ChatView). */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   /* Self-hosted system font stack — no third-party/CDN fonts (hard invariant 10). */
   font-family:
     system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
-  /* Kill the iOS pull-to-refresh / rubber-band on the app shell. */
-  overscroll-behavior: none;
 }
 
 /* Disable double-tap zoom on interactive controls (BACKBONE §9). */
