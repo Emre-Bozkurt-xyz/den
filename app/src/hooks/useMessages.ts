@@ -12,6 +12,20 @@ export function useMessages(chatId: string | null) {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage: MessagesResponse) => lastPage.nextCursor,
     enabled: chatId !== null,
+    // Waking the phone must not refetch this query. TanStack's focus refetch
+    // of an *infinite* query re-runs every loaded page sequentially, so a
+    // reader who had scrolled back through history paid N round-trips on a
+    // just-woken radio before one new message could render — the chat looked
+    // frozen until they backed out and came in again (owner report,
+    // 2026-08-23). Resume is owned explicitly instead: `RealtimeProvider`
+    // fetches the newest page once and merges it (`lib/messageSync.ts`), which
+    // is bounded no matter how much history is loaded. Mount and WS frames are
+    // untouched — `refetchOnMount` still reconciles a chat you re-open.
+    // ...and the same for the network's own reconnect edge, which TanStack
+    // handles identically. `RealtimeProvider` listens to `online` too, so this
+    // is covered — by one request instead of N.
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

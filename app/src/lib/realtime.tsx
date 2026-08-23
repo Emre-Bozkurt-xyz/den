@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Socket } from 'socket.io-client';
-import { type InfiniteData, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   WsType,
   makeEnvelope,
@@ -15,7 +15,6 @@ import {
   type MessageNewPayload,
   type MessageReadPayload,
   type MessageRestoredPayload,
-  type MessagesResponse,
   type MeResponse,
   type ReactionAddedPayload,
   type ReactionRemovedPayload,
@@ -24,7 +23,9 @@ import {
   type ReplyPreview,
   type TagAddedPayload,
 } from '@den/shared';
-import { connectSocket } from './socket';
+import { fetchMessages } from './chats';
+import { mergeNewestPage, type MessagesCache } from './messageSync';
+import { connectSocket, reviveSocket } from './socket';
 import { useChats } from '../hooks/useChats';
 
 /** How long an optimistic send waits for the server's `message.new` echo
@@ -97,7 +98,9 @@ export function useRealtime(): RealtimeCtx {
   return useContext(Ctx);
 }
 
-export type MessagesCache = InfiniteData<MessagesResponse, string | null>;
+// Defined in `lib/messageSync.ts` (which must not import this file), re-exported
+// here because this is where the rest of the app already reaches for it.
+export type { MessagesCache };
 
 function withFirstPage(cache: MessagesCache | undefined, update: (messages: Message[]) => Message[]): MessagesCache | undefined {
   if (!cache || cache.pages.length === 0) return cache;
@@ -257,6 +260,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   // `RealtimeCtx.notePendingReaction`'s doc comment for the double-count trap
   // this exists to avoid.
   const pendingReactionsRef = useRef(new Set<string>());
+  // Chat ids with a catch-up fetch in flight — a resume can fire visibility
+  // and `connect` within the same second, and the second one would otherwise
+  // duplicate the request.
+  const resyncingRef = useRef(new Set<string>());
 
   // docs/RECEIPTS.md §5.2: once every chat's `lastMessage` id is known (first
   // load, and again whenever `['chats']` refetches — notably right after a
@@ -291,17 +298,95 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  /** Chats currently being *looked at* — one on mobile, up to two in the
+   *  desktop split view. Read off the query cache rather than threaded down
+   *  from `AuthedApp`, so nothing above here has to know that resync exists. */
+  function activeChatIds(): string[] {
+    return qc
+      .getQueryCache()
+      .findAll({ queryKey: ['messages'], type: 'active' })
+      .map((q) => q.queryKey[1])
+      .filter((id): id is string => typeof id === 'string');
+  }
+
+  /**
+   * Catch one open chat up to the server, cheaply: fetch the newest page and
+   * merge it (`lib/messageSync.ts` — see its doc for the delete/gap rules).
+   *
+   * This deliberately replaces what used to be
+   * `invalidateQueries({ queryKey: ['messages'] })` on reconnect. That looks
+   * like one line of "server is truth" but on an infinite query it refetches
+   * **every loaded page, one after another** — so the more history the reader
+   * had scrolled through, the longer the chat sat frozen after waking up,
+   * while backing out and coming in again (a fresh mount, one page) was
+   * instant. Catching up is inherently a one-page problem: the messages we
+   * missed are the newest ones.
+   */
+  function resyncChat(chatId: string): void {
+    if (resyncingRef.current.has(chatId)) return;
+    resyncingRef.current.add(chatId);
+    void fetchMessages(chatId, null)
+      .then((page) => {
+        qc.setQueryData<MessagesCache>(['messages', chatId], (old) => mergeNewestPage(old, page));
+      })
+      // A failed catch-up is not worth surfacing: the query is already marked
+      // stale, so a remount refetches, and the next resume tries again.
+      .catch(() => {})
+      .finally(() => resyncingRef.current.delete(chatId));
+  }
+
+  /** Everything a wake-up owes the user, in the order they'll notice it. */
+  function resync(): void {
+    for (const chatId of activeChatIds()) resyncChat(chatId);
+    void qc.invalidateQueries({ queryKey: ['chats'] });
+    // Server is truth (hard invariant 3): refetch receipts rather than
+    // trusting whatever WS frames were missed while we were away.
+    void qc.invalidateQueries({ queryKey: ['receipts'] });
+    // Chats that aren't on screen only get marked stale — they refetch when
+    // next opened, which is exactly when their contents start mattering.
+    void qc.invalidateQueries({ queryKey: ['messages'], refetchType: 'none' });
+  }
+
+  /**
+   * Waking up is its own event, distinct from reconnecting, and the app has to
+   * treat it as one (owner report, 2026-08-23: a message that arrived while
+   * the phone was locked showed up as a push and as an unread badge in the
+   * chat list, but the chat that was already open didn't move).
+   *
+   * Nothing else covers it. The socket may be a zombie for most of a minute
+   * before it even notices (see `reviveSocket`), so no `connect` fires;
+   * `refetchOnWindowFocus` is off for messages precisely because its version
+   * of "refetch" is the N-page storm above (`hooks/useMessages.ts`). So on
+   * every visible/online edge: kick the socket *and* catch up over REST,
+   * concurrently. They're redundant on purpose — whichever wins, the reader
+   * sees the message, and the merge is idempotent.
+   */
+  useEffect(() => {
+    function onResume() {
+      if (document.visibilityState !== 'visible') return;
+      const socket = socketRef.current;
+      if (socket) reviveSocket(socket);
+      resync();
+    }
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('online', onResume);
+    return () => {
+      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('online', onResume);
+    };
+    // `resync` is recreated every render but closes over nothing that changes
+    // (`qc` and the refs are all stable), and the socket is read through a
+    // ref — re-registering these listeners on every render would be churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     const socket = connectSocket();
     socketRef.current = socket;
 
     socket.on('connect', () => {
       setConnected(true);
-      void qc.invalidateQueries({ queryKey: ['chats'] });
-      void qc.invalidateQueries({ queryKey: ['messages'] });
-      // Server is truth (hard invariant 3): a reconnect refetches receipts
-      // rather than trusting whatever WS frames were missed while offline.
-      void qc.invalidateQueries({ queryKey: ['receipts'] });
+      resync();
     });
     socket.on('disconnect', () => setConnected(false));
 
@@ -541,6 +626,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       sendTimeoutsRef.current.clear();
       pendingReactionsRef.current.clear();
     };
+    // `resync` — same story as the resume effect above: recreated every render,
+    // stable in everything it closes over. Listing it would tear down and
+    // rebuild the socket on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qc]);
 
   function notePendingReaction(key: string): void {
