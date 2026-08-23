@@ -96,7 +96,15 @@ const KEYBOARD_SETTLE_MS = 400;
 // Reaction pill row placement (see the row's own comment in MessageBlockRow
 // for why both numbers exist and what the earlier revert got wrong).
 const REACTION_OVERLAP_PX = 6; // how far the row rides up onto the bubble/media's bottom edge — a graze, deliberately not a half-overlap
-const REACTION_EDGE_INSET_PX = 10; // how far the row is pulled in from the sender's edge, so the overlapping sliver lands on the run's corner nub
+// How far the row is pulled in from the sender's edge. Eyeballed down from
+// 10 to 2 (owner revision 2026-08-24 — 10 read as the pill floating in the
+// middle of the message rather than hanging off its corner). 2 rather than 0
+// so it reads as deliberate instead of an accidental flush alignment. The
+// original reason for an inset at all — keeping the overlap off live image
+// pixels on bare media — survives the cut, because a media card's corner
+// radius (rounded-md, 12px) is larger than the 6px of overlap: at a 2px inset
+// the sliver still lands inside the rounded-away corner, not on the picture.
+const REACTION_EDGE_INSET_PX = 2;
 // Mirrors the `gap-[2px]` on the block's flex-col. The pill row is a flex
 // child, so that gap is already pushing it down before any margin applies —
 // pull it back out, or `REACTION_OVERLAP_PX` silently means 4px, not 6.
