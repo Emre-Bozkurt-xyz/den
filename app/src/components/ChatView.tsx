@@ -2273,7 +2273,7 @@ function MessageBlockRow({
         {showBubble && (
           <div
             className={
-              'relative max-w-full rounded-lg text-sm ' +
+              'relative min-w-0 max-w-full rounded-lg text-sm ' +
               (isVoice ? 'px-2 py-1.5 ' : 'px-3.5 py-2 ') +
               // Run-position corner rounding (UI-8b) — see the file-level
               // doc comment above for the head/middle/tail derivation.
@@ -2423,9 +2423,15 @@ function QuotedBlock({
       }
       style={{ touchAction: 'manipulation' }}
     >
+      {/* `line-clamp-2 break-words`, never `truncate`: `truncate` implies
+          `white-space: nowrap`, which makes this block's min-content width the
+          whole preview string. Ancestors sized to fit their content then
+          reported that as their minimum and the bubble ran off the side of the
+          screen (owner report, 2026-08-23). Wrapping keeps min-content down to
+          one word, and the clamp caps a long quote at two lines. */}
       <div className="min-w-0 flex-1">
         <p className="truncate font-semibold">{senderName}</p>
-        <p className={'truncate ' + (replyTo.deleted ? 'italic opacity-80' : '')}>
+        <p className={'line-clamp-2 break-words ' + (replyTo.deleted ? 'italic opacity-80' : '')}>
           {replyTo.deleted ? 'Original deleted' : replyTo.preview}
         </p>
       </div>
