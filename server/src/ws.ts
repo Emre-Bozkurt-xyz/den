@@ -34,6 +34,7 @@ import {
   type WsEnvelope,
   type DeliveredAckPayload,
   type MessageSendPayload,
+  type PresenceUpdatePayload,
   type Message as MessageDto,
 } from '@den/shared';
 import { env, gifsEnabled } from './env.js';
@@ -125,6 +126,9 @@ export function attachWs(app: FastifyInstance): IOServer {
           break;
         case WsType.DeliveredAck:
           void handleDeliveredAck(io, userId, frame as WsEnvelope<string, DeliveredAckPayload>);
+          break;
+        case WsType.PresenceUpdate:
+          void handlePresenceUpdate(socket, userId, frame as WsEnvelope<string, PresenceUpdatePayload>);
           break;
         default:
           // Unknown types are ignored — real handlers land per-stage.
@@ -279,4 +283,60 @@ async function handleDeliveredAck(
       // guard) — skip this item, same fire-and-forget posture as above.
     }
   }
+}
+
+/**
+ * `presence.update` — the socket tells us which chat it is actually looking
+ * at (docs/NOTIFICATIONS.md §2.1). Stored on `socket.data`, read only by
+ * `push/notify.ts`, never echoed anywhere: no other user can observe it and
+ * nothing is sent back.
+ *
+ * Membership-gated (hard invariant 1) even though a false claim leaks
+ * nothing — `notifyChatMembers` only consults presence for users who are
+ * already members, so the worst a spoofed chatId could do is silence a push
+ * for a chat that would never have targeted the spoofer anyway. One indexed
+ * lookup per chat switch is cheap insurance against that reasoning going
+ * stale, and presence updates are rare by construction (chat open/close and
+ * visibility edges, not keystrokes).
+ *
+ * A rejected or malformed claim clears presence rather than leaving the
+ * previous one standing — stale presence suppresses notifications, which is
+ * the failure this whole pass exists to remove.
+ */
+async function handlePresenceUpdate(
+  socket: Socket,
+  userId: bigint,
+  frame: WsEnvelope<string, PresenceUpdatePayload>,
+): Promise<void> {
+  const payload = frame.payload;
+  const visible = payload?.visible === true;
+  const rawChatId = typeof payload?.chatId === 'string' ? payload.chatId : null;
+
+  // The membership check below is the only `await` here, and it is enough to
+  // let two frames land out of order — switch chats fast enough and the slower
+  // lookup for the chat you LEFT could resolve last and overwrite the one you
+  // are on. That writes a report which is not merely stale but wrong, and a
+  // wrong report suppresses a notification. So every frame takes a sequence
+  // number on arrival and drops its own result if a newer one has since landed.
+  const seq = ((socket.data.presenceSeq as number | undefined) ?? 0) + 1;
+  socket.data.presenceSeq = seq;
+  const isNewest = (): boolean => socket.data.presenceSeq === seq;
+
+  let chatId: bigint | null = null;
+  if (rawChatId !== null) {
+    try {
+      chatId = BigInt(rawChatId);
+    } catch {
+      chatId = null; // garbage id — same treatment as "no chat", never a stale claim
+    }
+  }
+
+  if (chatId === null) {
+    socket.data.presence = { chatId: null, visible };
+    return;
+  }
+
+  const member = await isMember(userId, chatId);
+  if (!isNewest()) return;
+  socket.data.presence = { chatId: member ? rawChatId : null, visible };
 }

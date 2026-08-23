@@ -39,6 +39,9 @@ export const WsType = {
   /** Sent to a single socket when its request couldn't be fulfilled; `reqId`
    *  correlates back to the frame that failed. Never broadcast to a room. */
   Error: 'error',
+  /** Client → server: which chat this socket is actually looking at
+   *  (docs/NOTIFICATIONS.md §2.1). Push targeting reads it; nothing else does. */
+  PresenceUpdate: 'presence.update',
   // messaging (Stage 2)
   MessageSend: 'message.send',
   MessageNew: 'message.new',
@@ -69,6 +72,28 @@ export const WsType = {
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
+
+// ─── presence (post-MVP, docs/NOTIFICATIONS.md §2.1) ────────────────────────
+
+/**
+ * Client → server: what this socket is looking at right now. Fire-and-forget,
+ * per-socket, never persisted — a reconnect re-reports it.
+ *
+ * ⚠️ This exists for exactly one consumer: deciding whether a new message
+ * needs a push. It is NOT a room subscription and NOT an online-status
+ * broadcast — nothing is ever sent back, and no other user can observe it.
+ *
+ * `chatId` is the chat currently on screen (null = none — the chat list, the
+ * gallery, settings). `visible` mirrors `document.visibilityState`. A push is
+ * suppressed only when both agree: this socket is visible AND on that chat.
+ * A socket that never reports presence counts as *not* active, so it gets the
+ * push — the whole point is to fail toward notifying (docs/NOTIFICATIONS.md
+ * §2.1).
+ */
+export interface PresenceUpdatePayload {
+  chatId: string | null;
+  visible: boolean;
+}
 
 // ─── payload shapes (Stage 2) — keep in sync with the emitters/handlers ─────
 

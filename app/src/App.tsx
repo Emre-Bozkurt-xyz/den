@@ -19,6 +19,7 @@ import { NewGroupScreen } from './components/NewGroupScreen';
 import { GalleryScreen } from './components/GalleryScreen';
 import { ChatGallery } from './components/ChatGallery';
 import { createChat, fetchChats } from './lib/chats';
+import { onOpenChatFromNotification } from './lib/push';
 import { logout } from './lib/auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
@@ -192,10 +193,11 @@ function AuthedApp({ me }: { me: MeResponse }) {
     openChat(chat);
   }
 
-  /** Gallery only has chatId/messageId (GalleryItem doesn't carry a full
-   *  ChatSummary) — look the chat up from the already-fetched list, falling
-   *  back to a refetch for the rare case it isn't cached yet. */
-  async function jumpToMessage(chatId: string, messageId: string): Promise<void> {
+  /** `openChat` needs a full `ChatSummary`, but several entry points only
+   *  carry a chat id — a gallery item, a tapped notification. Look it up in
+   *  the already-fetched list, falling back to a refetch for the rare case it
+   *  isn't cached yet (a brand-new chat, or a cold start racing `/chats`). */
+  async function chatById(chatId: string): Promise<ChatSummary | undefined> {
     let chats = qc.getQueryData<{ chats: ChatSummary[] }>(['chats'])?.chats;
     let chat = chats?.find((c) => c.id === chatId);
     if (!chat) {
@@ -203,8 +205,47 @@ function AuthedApp({ me }: { me: MeResponse }) {
       qc.setQueryData(['chats'], { chats });
       chat = chats.find((c) => c.id === chatId);
     }
+    return chat;
+  }
+
+  /** Gallery only has chatId/messageId (GalleryItem doesn't carry a full
+   *  ChatSummary). */
+  async function jumpToMessage(chatId: string, messageId: string): Promise<void> {
+    const chat = await chatById(chatId);
     if (chat) openChat(chat, messageId);
   }
+
+  /**
+   * A tapped notification lands here (docs/NOTIFICATIONS.md §3), by one of two
+   * routes that deliberately look different:
+   *
+   * - **Cold start:** the SW opened `/?chat=<id>`. Read once and wipe the URL
+   *   back to `/` immediately, so a refresh doesn't re-open the chat days
+   *   later — the same consume-once shape as the share-target handler above.
+   *   It's a launch parameter, not a route; `View` stays the source of truth.
+   * - **Already running:** the SW posts `open-chat` instead of navigating,
+   *   because `client.navigate()` is a real navigation even to the URL already
+   *   loaded — it would reload the PWA and take the draft, staged attachments
+   *   and scroll position with it.
+   *
+   * A chat that can't be resolved (left, deleted) is silently ignored: the app
+   * is already open on the chat list, which is the right place to be.
+   */
+  useEffect(() => {
+    async function openChatById(chatId: string): Promise<void> {
+      const chat = await chatById(chatId);
+      if (chat) openChat(chat);
+    }
+    const launchChatId = new URLSearchParams(window.location.search).get('chat');
+    if (launchChatId) {
+      window.history.replaceState(null, '', '/');
+      void openChatById(launchChatId);
+    }
+    return onOpenChatFromNotification((chatId) => void openChatById(chatId));
+    // Mount-only: `chatById`/`openChat` are recreated every render but close
+    // over the query client and state setters, all of which are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function openGalleryFor(chat: ChatSummary) {
     setView({

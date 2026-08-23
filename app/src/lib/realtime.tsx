@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Socket } from 'socket.io-client';
 import { useQueryClient } from '@tanstack/react-query';
 import {
@@ -26,6 +26,7 @@ import {
 import { fetchMessages } from './chats';
 import { mergeNewestPage, type MessagesCache } from './messageSync';
 import { connectSocket, reviveSocket } from './socket';
+import { setChatBadge } from './push';
 import { useChats } from '../hooks/useChats';
 
 /** How long an optimistic send waits for the server's `message.new` echo
@@ -82,6 +83,17 @@ interface RealtimeCtx {
    *  (rolling back the optimistic change is the caller's job; this only
    *  stops the key from leaking). */
   clearPendingReaction: (key: string) => void;
+  /**
+   * Report which chat is on screen, or `null` for none (docs/NOTIFICATIONS.md
+   * §2.1). `ChatView` calls it on mount and clears it on unmount; this
+   * provider owns re-reporting it on visibility edges and reconnects.
+   *
+   * Its one consumer is push targeting on the server. Room membership can't
+   * answer "is this user looking at this chat" — every socket joins every one
+   * of its user's rooms — so without this report a backgrounded PWA holding a
+   * live socket silently suppressed its own notifications.
+   */
+  setActiveChat: (chatId: string | null) => void;
 }
 
 const Ctx = createContext<RealtimeCtx>({
@@ -92,6 +104,7 @@ const Ctx = createContext<RealtimeCtx>({
   discardFailed: () => {},
   notePendingReaction: () => {},
   clearPendingReaction: () => {},
+  setActiveChat: () => {},
 });
 
 export function useRealtime(): RealtimeCtx {
@@ -279,6 +292,16 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     sendDeliveredAck(items);
   }, [chatsData]);
 
+  // App badge (docs/NOTIFICATIONS.md §5 / D4) — chats with something waiting,
+  // not messages. The SW writes the same number from its notification count
+  // while the app is closed; this is the running app's half, and it lives here
+  // because `['chats']` is already subscribed here (a second subscriber in
+  // `AuthedApp` would re-render the whole tree on every chat update).
+  useEffect(() => {
+    if (!chatsData) return;
+    setChatBadge(chatsData.chats.filter((c) => c.unreadCount > 0).length);
+  }, [chatsData]);
+
   /** Fire-and-forget delivery ack (docs/RECEIPTS.md §4.2/§5.2) — a hint, not
    *  a request: no reply is expected, and a disconnected socket just drops
    *  it (the next reconnect's batch-ack above covers the gap). */
@@ -287,6 +310,58 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     if (!socket?.connected || items.length === 0) return;
     socket.emit('ws', makeEnvelope(WsType.DeliveredAck, { items }));
   }
+
+  // The chat currently on screen, as last reported by `ChatView`. A ref, not
+  // state: nothing renders off it, and every write is followed by an emit —
+  // re-rendering the whole provider on a chat switch would be pure churn.
+  const activeChatRef = useRef<string | null>(null);
+
+  /**
+   * Tell the server what this socket is looking at (docs/NOTIFICATIONS.md
+   * §2.1). Fire-and-forget like the delivery ack: a dropped report degrades to
+   * "not watching", which means an extra notification rather than a missing
+   * one — the safe direction, and the whole reason this exists.
+   *
+   * Must be re-sent on every reconnect: presence lives on the *socket*, so a
+   * new socket starts with none.
+   */
+  function sendPresence(): void {
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+    socket.emit(
+      'ws',
+      makeEnvelope(WsType.PresenceUpdate, {
+        chatId: activeChatRef.current,
+        visible: document.visibilityState === 'visible',
+      }),
+    );
+  }
+
+  // Stable identity, deliberately: `ChatView` lists this in an effect's deps
+  // (it is the same effect that clears the chat's notifications), and a fresh
+  // function every provider render would re-run that effect constantly —
+  // reporting null-then-chat and re-posting to the SW on every keystroke
+  // anywhere in the app. `sendPresence` is captured from the first render and
+  // reads only refs and `document`, so the stale closure is inert.
+  const setActiveChat = useCallback((chatId: string | null): void => {
+    if (activeChatRef.current === chatId) return;
+    activeChatRef.current = chatId;
+    sendPresence();
+  }, []);
+
+  /**
+   * Presence tracks *both* visibility edges, unlike the resume handler below
+   * which only cares about waking up. Going hidden is the interesting one: it
+   * is the moment this device stops being a reason to withhold a notification,
+   * and reporting it late is exactly the "message arrived while the screen was
+   * off and nothing told me" failure this pass is fixing.
+   */
+  useEffect(() => {
+    document.addEventListener('visibilitychange', sendPresence);
+    return () => document.removeEventListener('visibilitychange', sendPresence);
+    // `sendPresence` is recreated every render but reads everything through
+    // refs, so re-registering the listener each time would be churn.
+  }, []);
 
   /** Clears a send's 10s failure-timeout once it resolves some other way
    *  (echo arrived, server errored) — see `sendMessage`'s own timeout below. */
@@ -386,6 +461,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
     socket.on('connect', () => {
       setConnected(true);
+      // Presence is per-socket server-side, so a fresh socket knows nothing
+      // about what the user is looking at until we say so (§2.1). Before
+      // `resync`, so a message landing in the same breath as the reconnect is
+      // judged against the truth rather than the default.
+      sendPresence();
       resync();
     });
     socket.on('disconnect', () => setConnected(false));
@@ -738,7 +818,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <Ctx.Provider value={{ connected, sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction }}>
+    <Ctx.Provider
+      value={{ connected, sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat }}
+    >
       {children}
     </Ctx.Provider>
   );

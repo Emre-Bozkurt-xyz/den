@@ -196,7 +196,7 @@ export function ChatView({
   onAttachmentsChange: (attachments: StagedAttachment[]) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
-  const { sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction } = useRealtime();
+  const { sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat } = useRealtime();
   const receipts = useReceipts(chat.id);
   const qc = useQueryClient();
   const isMobile = useIsMobile();
@@ -412,14 +412,24 @@ export function ChatView({
   // Clear this chat's already-shown notifications when it becomes the active
   // chat — on mount/chat switch, and again if the tab/PWA regains visibility
   // while it's still open (returning to an already-open chat).
+  //
+  // Same effect reports this chat as the one on screen (docs/NOTIFICATIONS.md
+  // §2.1) — the two are the same fact stated to two different consumers, and
+  // splitting them would let them drift. Cleanup clears the report rather than
+  // leaving it standing: a `ChatView` that unmounted is a chat nobody is
+  // looking at, and stale presence is a *suppressed* notification.
   useEffect(() => {
     clearChatNotifications(chat.id);
+    setActiveChat(chat.id);
     const onVisible = () => {
       if (document.visibilityState === 'visible') clearChatNotifications(chat.id);
     };
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [chat.id]);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      setActiveChat(null);
+    };
+  }, [chat.id, setActiveChat]);
 
   // Restore the visual scroll position after an older page prepends — runs
   // before paint so the list never visibly jumps. Only fires when

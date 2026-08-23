@@ -72,8 +72,16 @@ export async function pushRoutes(app: FastifyInstance): Promise<void> {
       url: '/',
     });
 
+    // Same delivery hints as a real message (docs/NOTIFICATIONS.md §2.4) —
+    // a debug tool that takes a friendlier path than production is a debug
+    // tool that can't reproduce the bug.
     const results = await Promise.allSettled(
-      subs.map((s) => webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload)),
+      subs.map((s) =>
+        webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, {
+          TTL: 60 * 60,
+          urgency: 'high',
+        }),
+      ),
     );
 
     let delivered = 0;

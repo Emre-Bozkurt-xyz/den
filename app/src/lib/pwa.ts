@@ -3,6 +3,7 @@
  * We register the SW ourselves (injectRegister: null in vite.config) so the
  * push subscribe flow can rely on `navigator.serviceWorker.ready`.
  */
+import { syncPushSubscription } from './push';
 
 export function isStandalone(): boolean {
   // iOS Safari exposes navigator.standalone; everyone else uses display-mode.
@@ -65,6 +66,12 @@ export async function registerServiceWorker(): Promise<void> {
       reloading = true;
       window.location.reload();
     });
+
+    // Re-register whatever push subscription this browser already holds
+    // (docs/NOTIFICATIONS.md §2.3). Never prompts, never subscribes — see
+    // `syncPushSubscription`'s doc for why it structurally can't. Fire and
+    // forget: it has no UI and the next start retries.
+    void syncPushSubscription();
   } catch (err) {
     console.error('SW registration failed', err);
   }
