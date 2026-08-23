@@ -543,6 +543,11 @@ export function Composer({
   // mic button itself (see the trailing-slot JSX below).
   const showExplicitStopCancel = recState === 'locked' || (!isMobile && recState !== 'idle');
 
+  /** "The composer is holding something" — a typed draft or a staged
+   *  attachment. Drives both the trailing slot (Send instead of the mic) and
+   *  whether the GIF button keeps its place in the leading slot. */
+  const hasContent = draft.trim().length > 0 || attachments.length > 0;
+
   // docs/EMBEDS.md §4.4 — recomputed on every draft keystroke/paste; cheap
   // (a couple of regex passes over one message-length string), and this is
   // exactly the "type or paste" detection surface the plan calls for.
@@ -642,9 +647,12 @@ export function Composer({
         {/* docs/GIFS.md §8 — a dedicated button rather than folding both into
             a menu behind the paperclip: a menu would add a tap to the far more
             common photo path. Not rendered at all when the server has no Klipy
-            key. ⚠️ This row now holds three controls plus the input — worth an
-            eye at 360px on the device pass. */}
-        {gifsEnabled && (
+            key, and withdrawn again as soon as the composer holds anything
+            (`hasContent`) — a GIF replaces the composer's contents rather than
+            joining them (§8), so it is dead weight the moment there's a draft
+            or a staged attachment, and the row is tight enough at 360px that
+            the text field wants the space back. */}
+        {gifsEnabled && !hasContent && (
           <button
             type="button"
             onClick={() => setGifOpen(true)}
@@ -738,7 +746,7 @@ export function Composer({
         >
           <Square size={16} fill="currentColor" />
         </button>
-      ) : recState === 'idle' && (draft.trim() || attachments.length > 0) ? (
+      ) : recState === 'idle' && hasContent ? (
         <button
           type="submit"
           disabled={sending}
@@ -747,11 +755,15 @@ export function Composer({
           // Samsung PWA). The click/submit still fires normally; only the
           // default focus shift is cancelled.
           onPointerDown={(e) => e.preventDefault()}
-          className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
+          // Icon-only, same 44px square as the mic it replaces: the label was
+          // costing the text field ~40px of a row that's already crowded on a
+          // 360px screen, and a paper plane on an accent pill needs no gloss.
+          // The name lives on in `aria-label` for screen readers.
+          aria-label="Send message"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
           style={{ touchAction: 'manipulation' }}
         >
-          <Send size={15} />
-          Send
+          <Send size={18} />
         </button>
       ) : (
         <button

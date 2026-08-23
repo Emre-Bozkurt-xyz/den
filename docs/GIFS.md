@@ -143,7 +143,7 @@ Any failure → `status='failed'` via the existing `finalizeEmbed` catch → the
 - Precedent to copy: `RecordingBar` already swaps the composer's contents for a mode, and `AttachmentSheet` already blurs the active element on open so the keyboard and a tall sheet don't fight over the same space.
 - Picking sends immediately (§6) and closes the panel.
 
-**Entry point** — a new GIF button in the composer's leading slot, beside the paperclip (`Composer.tsx` ~L593). Hidden in edit mode and while recording, exactly like the paperclip. A dedicated button beats turning the paperclip into a menu, which would add a tap to the far more common photo path. ⚠️ That row already holds attach + mic/send; check it at 360px.
+**Entry point** — a new GIF button in the composer's leading slot, beside the paperclip (`Composer.tsx` ~L593). Hidden in edit mode and while recording, exactly like the paperclip, **and withdrawn whenever the composer already holds a draft or a staged attachment** (owner report, 2026-08-23 — the row was too tight at 360px). That last one is consistent rather than merely convenient: picking a GIF *replaces* the composer's contents (D5) and sends on the spot (D4), so the button has nothing to offer once there is something in the composer to lose. A dedicated button beats turning the paperclip into a menu, which would add a tap to the far more common photo path.
 
 **`EmbedCard.tsx`** — branch on `contentKind === 'gif'`:
 
