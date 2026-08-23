@@ -1451,11 +1451,35 @@ export function ChatView({
         </p>
       )}
 
-      <div ref={scrollerRef} onScroll={onScrollerScroll} className="flex-1 overflow-y-auto px-4 py-3">
-        {isFetchingNextPage && (
-          <p className="mb-3 text-center text-xs text-text-muted">Loading older messages…</p>
-        )}
-
+      {/* `relative` wrapper so the "loading older" strip can hang over the
+          scroller instead of sitting inside its flow — see below. `min-h-0`
+          is what lets the scroller actually scroll inside this flex column. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+      {/* Out of flow on purpose (owner report, 2026-08-23): as an in-flow
+          first child this strip appeared the moment a fetch started, pushing
+          the whole list down a line, and vanished again as the page landed —
+          two visible shifts around a prepend that is otherwise seamless.
+          `sticky`/in-flow have the same problem; only taking it out of flow
+          leaves the scroll position untouched. */}
+      {isFetchingNextPage && (
+        <div className="pointer-events-none absolute inset-x-0 top-1.5 z-20 flex justify-center">
+          <p className="rounded-pill bg-surface-raised px-2.5 py-1 text-xs text-text-muted shadow-sm">
+            Loading older messages…
+          </p>
+        </div>
+      )}
+      <div
+        ref={scrollerRef}
+        onScroll={onScrollerScroll}
+        className="flex-1 overflow-y-auto px-4 py-3"
+        // Browser scroll anchoring fights `prependRef`'s restore: Chrome
+        // already shifts `scrollTop` by the height of the prepended page, then
+        // the layout effect adds the same delta again, so an older page landed
+        // with the reader flung a page further down (owner report,
+        // 2026-08-23). Safari has no scroll anchoring at all, so the manual
+        // restore has to stay — this just makes Chrome stop double-correcting.
+        style={{ overflowAnchor: 'none' }}
+      >
         {isLoading && <p className="text-center text-sm text-text-muted">Loading…</p>}
         {!isLoading && messages.length === 0 && (
           <p className="flex items-center justify-center gap-1.5 text-center text-sm text-text-muted">
@@ -1509,6 +1533,7 @@ export function ChatView({
             ),
           )}
         </div>
+      </div>
       </div>
 
       {undoIds && (
