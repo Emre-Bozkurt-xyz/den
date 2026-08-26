@@ -6,9 +6,12 @@ same day: `@simplewebauthn/*` approved, and the recovery model is **Option A**
 (passwords stay as the permanent fallback, no per-user retirement). The domain
 was confirmed final, which is what unblocked the rpID commitment in §2.
 
-⚠️ **Awaiting the real-device iOS gate (§10).** Every check in §11 ran against
-a software authenticator; nothing here has touched an actual iPhone, and the
-installed-PWA ceremony is the highest-risk unknown in the feature.
+**Real-device status:** ✅ verified on the **Samsung / Chrome installed PWA**
+2026-08-26 — enrolment and sign-in both behave as expected on a real
+authenticator, not just the software one in §11. ⚠️ **Still awaiting iOS.**
+Android proves the ceremony wiring is sound; it proves the least about the
+platform most of the circle is on, and the installed-PWA ceremony on iOS
+remains the highest-risk unknown in the feature (§10).
 
 Prerequisite already met: the per-account login throttle shipped 2026-08-26
 (`docs/AUTH_HARDENING.md`). Passkeys and that throttle are designed to fit
@@ -303,14 +306,26 @@ Gates: `npm run typecheck` and `npm run lint` clean (no new warnings);
    it is a good reminder that a probe which doesn't mimic the actual client can
    manufacture its own bugs.
 
-### Still outstanding — the iOS gate (§10)
+### Real-device results
 
-None of the below is verified, and the first item gates the rest:
+✅ **Samsung / Chrome, installed PWA — 2026-08-26.** Enrolment from Settings and
+sign-in from `AuthScreen` both work as expected against a real platform
+authenticator. This confirms the parts that are platform-independent: the
+ceremony wiring, the challenge cookie round-trip, the gesture chain from
+`onClick`, and the Settings list layout on a phone-width viewport.
+
+⚠️ **iOS: still unverified, and it is the half that matters.** Android was
+always going to work first and prove the least — the dev device is Android and
+most of the circle is on iPhone. Outstanding, with the first item gating the
+rest:
 
 - Registration and login ceremonies **inside the installed PWA** on iOS 16+.
-- The user-gesture chain surviving from tap to ceremony on iOS (the code calls
-  both ceremonies directly from `onClick`, which is what this depends on).
+  If enrolment is broken there, the feature is broken for most users.
+- The user-gesture chain surviving tap → ceremony on iOS specifically. Android
+  passing this is weak evidence: WebKit's gesture rules are stricter, and this
+  is exactly where they diverge.
 - Cross-device (QR) sign-in: iPhone passkey → laptop.
-- That the Settings list renders sanely on a narrow viewport.
 
-Android is the dev device and will work first while proving the least.
+Nothing about the Android pass reduces the risk in those three. It removes the
+possibility that the *code* is wrong, which makes an iOS failure diagnosable as
+a platform issue rather than an ambiguity.
