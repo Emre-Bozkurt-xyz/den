@@ -1,9 +1,14 @@
 # Passkeys (WebAuthn) — plan
 
-Status: **plan, not built. Both open decisions are now settled** (owner,
-2026-08-26): `@simplewebauthn/*` is approved and installed, and the recovery
-model is **Option A** — passwords stay as the permanent fallback, no per-user
-retirement. Roadmap item #1 (PROJECT.md §13).
+Status: **BUILT** 2026-08-26 (roadmap item #1). Server-verified end to end
+against the compose stack — see §11. Both decisions settled by the owner the
+same day: `@simplewebauthn/*` approved, and the recovery model is **Option A**
+(passwords stay as the permanent fallback, no per-user retirement). The domain
+was confirmed final, which is what unblocked the rpID commitment in §2.
+
+⚠️ **Awaiting the real-device iOS gate (§10).** Every check in §11 ran against
+a software authenticator; nothing here has touched an actual iPhone, and the
+installed-PWA ceremony is the highest-risk unknown in the feature.
 
 Prerequisite already met: the per-account login throttle shipped 2026-08-26
 (`docs/AUTH_HARDENING.md`). Passkeys and that throttle are designed to fit
@@ -253,18 +258,59 @@ real-device gate, and these are the specific things expected to diverge:
 - Android (the dev device) will work first and prove the least. Do not read a
   green Android run as the feature being done.
 
-## 11. Verification plan
+## 11. Verification
 
-Definition of done (PROJECT.md §16) plus:
+Run 2026-08-26 against the compose stack. `scripts/probe-passkey.ts` drives the
+real HTTP ceremonies with a **software authenticator** built in the script — a
+P-256 keypair, correctly assembled `authenticatorData`, a `none`-format
+attestation object, and real ES256 signatures. That is the point: a probe that
+mocked the crypto would pass while the verification path was broken, which is
+the only part worth testing.
 
-- `scripts/probe-passkey.ts` against the compose stack: register a credential
-  for a seeded account, assert login by assertion, assert a **tampered**
-  assertion is rejected, assert a credential belonging to user A can never
-  authenticate user B, assert a `sign_count` regression is refused.
-- **Throttle interaction, explicitly** (§7): lock an account by password, then
-  confirm passkey login still succeeds and that it clears the failure rows.
-  This is the check that proves the lockout DoS is retired; it is the one this
-  feature must not ship without.
-- ≥1-login-method: removing the last credential while no password exists must
-  fail; removing one of two must succeed.
-- The iOS gate items in §10, on a real iPhone, in the **installed** PWA.
+**All 20 checks pass.**
+
+| Area | Checks |
+|---|---|
+| Register | options issued · attestation verified (201) · credential listed with its label |
+| Login | options issued · assertion accepted · session belongs to the right user |
+| Tamper | a signature with one flipped byte is refused `passkey_failed` |
+| Replay | first use of a challenge accepted; **reuse of the same challenge refused** |
+| Cross-account | another user's rename → 404 · their delete → 404 · it never appears in their list |
+| **Throttle (§7)** | password login locked (precondition) · **passkey login still succeeds while locked** · **passkey login cleared the failure counter** |
+| Removal | own credential removable while a password remains · list empties |
+| Sign count | a counting authenticator registers · advancing counter accepted · **regressed counter refused** · **repeated counter refused** |
+
+The three bold rows in Throttle are the ones this feature could not ship
+without: they are the proof that the lockout-DoS tradeoff
+(`docs/AUTH_HARDENING.md` §2.2) is actually retired rather than merely
+described as retired. Sections 1–7 also prove the *other* half of the
+sign-count rule implicitly — that authenticator reports a permanent `0`
+throughout, exactly as Apple and Google do, and is accepted every time.
+
+Gates: `npm run typecheck` and `npm run lint` clean (no new warnings);
+`npm run test` — 98 tests, 98 pass.
+
+**Two findings from the run, both worth keeping:**
+
+1. `expectedOrigins()` is a real allow-list, and the first probe run failed
+   registration outright because the test server was on a port not in it. That
+   is the control working. It is also why the origins list has a unit test that
+   trips if an unexpected host ever appears in it.
+2. The probe's own DELETE requests were 400ing before reaching the handler,
+   because it sent `content-type: application/json` with no body and Fastify
+   rejects that. It looked exactly like a broken route. `lib/api.ts` sets that
+   header only when a body exists, so the real client was never affected — but
+   it is a good reminder that a probe which doesn't mimic the actual client can
+   manufacture its own bugs.
+
+### Still outstanding — the iOS gate (§10)
+
+None of the below is verified, and the first item gates the rest:
+
+- Registration and login ceremonies **inside the installed PWA** on iOS 16+.
+- The user-gesture chain surviving from tap to ceremony on iOS (the code calls
+  both ceremonies directly from `onClick`, which is what this depends on).
+- Cross-device (QR) sign-in: iPhone passkey → laptop.
+- That the Settings list renders sanely on a narrow viewport.
+
+Android is the dev device and will work first while proving the least.

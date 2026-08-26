@@ -34,6 +34,17 @@ export const ErrorCode = {
    *  Distinct from `rate_limited`, which is a per-client flood backstop: this
    *  one is keyed to the *account* and is not cleared by changing network. */
   AuthLocked: 'auth_locked',
+  /** The account exists but is not permitted to sign in (docs/ADMIN_CONSOLE.md
+   *  §7 reserves this for disabled accounts; nothing sets it yet). */
+  AccountDisabled: 'account_disabled',
+  /** A passkey ceremony could not be completed — expired/absent challenge,
+   *  failed verification, or an unknown credential (docs/PASSKEYS.md §6).
+   *  Deliberately ONE code for all of them: distinguishing "no such credential"
+   *  from "bad signature" would tell an attacker which half to work on. */
+  PasskeyFailed: 'passkey_failed',
+  /** Refusing to remove a user's last remaining way to sign in
+   *  (docs/PASSKEYS.md §9 — the ≥1-login-method rule). */
+  LastLoginMethod: 'last_login_method',
   /** A feature is switched off by server configuration, not by permissions —
    *  e.g. Vault linking with no `VAULT_TOKEN_ENC_KEY` set. Distinct from
    *  `forbidden` (the caller could never fix that by retrying) and from
@@ -152,6 +163,66 @@ export const LoginThrottle = {
   baseLockMs: 60 * 1000,
   /** Ceiling on the doubling — a lock is annoying, never indefinite. */
   maxLockMs: 15 * 60 * 1000,
+} as const;
+
+// ─── passkeys / WebAuthn (docs/PASSKEYS.md) ─────────────────────────────────
+
+/**
+ * Ceremony payloads are passed through verbatim from `@simplewebauthn/server`
+ * to `@simplewebauthn/browser`, so they are deliberately typed as opaque here
+ * rather than restated. Restating them would mean maintaining a hand-written
+ * mirror of the WebAuthn spec that can only ever drift from the library that
+ * actually parses it — and a drift there fails as "your passkey doesn't work",
+ * which is the worst class of bug to debug on someone else's phone.
+ *
+ * The shapes Den *owns* — what a credential looks like to the UI, and what the
+ * client sends back — are typed properly below.
+ */
+export type PasskeyCeremonyOptions = Record<string, unknown>;
+
+/** One registered credential, as Settings renders it. Never includes the
+ *  public key: the client has no use for it and it should not leave the DB. */
+export interface PasskeyCredential {
+  id: string;
+  /** User-supplied name ("iPhone"), or a derived fallback. */
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  /** Authenticator-reported transports, for display only ("this one is a
+   *  phone" vs "this one is a security key"). May be empty. */
+  transports: string[];
+}
+
+export interface PasskeyListResponse {
+  credentials: PasskeyCredential[];
+  /** Whether a password still exists on this account. Drives the ≥1-login-method
+   *  warning in the UI *before* the user taps a remove they can't complete. */
+  hasPassword: boolean;
+}
+
+/** Body of `/auth/passkey/register/verify` — the attestation response plus the
+ *  label the user typed. */
+export interface PasskeyRegisterVerifyRequest {
+  response: Record<string, unknown>;
+  label?: string;
+}
+
+/** Body of `/auth/passkey/login/verify` — the assertion response. No username:
+ *  discoverable credentials carry the user handle themselves, which is the
+ *  whole point of `residentKey: 'required'`. */
+export interface PasskeyLoginVerifyRequest {
+  response: Record<string, unknown>;
+}
+
+export interface PasskeyRenameRequest {
+  label: string;
+}
+
+export const PasskeyLimits = {
+  labelMax: 64,
+  /** Per account. Generous — a user with a phone, a laptop and a hardware key
+   *  is three, and syncing can legitimately add more. */
+  maxCredentials: 20,
 } as const;
 
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────

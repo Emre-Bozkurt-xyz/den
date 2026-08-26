@@ -13,6 +13,7 @@ import { AppError } from './errors.js';
 import { clientIp } from './auth/clientIp.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
+import { passkeyRoutes } from './routes/passkeys.js';
 import { friendRoutes } from './routes/friends.js';
 import { chatRoutes } from './routes/chats.js';
 import { pushRoutes } from './routes/push.js';
@@ -80,6 +81,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // ─── routes ───────────────────────────────────────────────────────────────
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: '/api' });
+  await app.register(passkeyRoutes, { prefix: '/api' });
   await app.register(friendRoutes, { prefix: '/api' });
   await app.register(chatRoutes, { prefix: '/api' });
   await app.register(pushRoutes, { prefix: '/api' });
