@@ -4,8 +4,11 @@ Status: **BUILT** 2026-08-26 (migration 016) — both halves. Verified against
 the compose stack with a 55-check probe; see §10. Passkeys shipped first, as
 §1 requires.
 
-⚠️ **Never opened in a browser.** The probe exercises the API. The React
-screen, the re-auth prompt and the layout on a phone are all unverified.
+✅ **Browser-verified by the owner 2026-08-26** — the console renders, the
+actions work, and the re-auth prompt correctly retries the pending action
+without the user pressing anything twice (the fiddliest path in the client).
+⚠️ Still unverified on iOS specifically; the §8 layout note (stacked cards,
+never sideways-scrolling tables) has only been seen on Android.
 
 Shape settled by the owner: **owner-only**, **inside the PWA** (a section of
 Settings, not a separate app or subdomain).
@@ -316,11 +319,10 @@ Two design points the checks pin down deliberately:
   Locking yourself out of the console mid-incident is a real way to make a bad
   situation worse and is trivially avoidable.
 
-**Not yet verified:** the console has never been opened in a browser — the
-probe exercises the API, not the React screen, the re-auth prompt, or the
-`useGuardedAction` retry-after-confirm path. And nothing here has been seen on
-a phone; the §8 layout note (stacked cards, never sideways-scrolling tables) is
-unconfirmed on a real device.
+**Browser pass, owner, 2026-08-26:** the console renders, every action works,
+and `useGuardedAction`'s retry-after-confirm behaves — a revoke prompts once
+and then completes on its own. ⚠️ Not yet seen on iOS; the §8 layout note is
+confirmed on Android only.
 
 ### Original plan for the state-changing half
 
