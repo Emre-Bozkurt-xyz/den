@@ -11,11 +11,19 @@
  *   - A user must always retain ≥1 login method. Password is method #1 today.
  *   - Reserved routes /auth/oauth/* and /auth/passkey/* are NOT built here and
  *     their paths must not be reused (CLAUDE.md scope rules).
+ *
+ * Brute-force posture (docs/AUTH_HARDENING.md): the per-route rate limit below
+ * is a flood backstop only — it keys on a client address that does not
+ * currently survive Den's proxy chain. The bound that actually stops credential
+ * guessing is the per-account throttle in auth/throttle.ts, keyed on the
+ * submitted username. Both stay when passkeys/OAuth land: those add factors,
+ * they don't remove the password path.
  */
 import type { FastifyInstance } from 'fastify';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import {
   AuthLimits,
+  LoginThrottle,
   DEFAULT_USER_SETTINGS,
   GIF_RATINGS,
   type AuthResponse,
@@ -26,11 +34,14 @@ import type { LoginRequest, RegisterRequest, UpdateMeRequest } from '@den/shared
 import { db } from '../db/index.js';
 import { inviteCodes, users } from '../db/schema.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
+import { checkLock, clearFailures, recordFailure, sweepExpired } from '../auth/throttle.js';
+import { clientIp } from '../auth/clientIp.js';
+import { notifyUser } from '../push/notify.js';
 import { createSession, destroySession, requireAuth } from '../auth/session.js';
 import { toPublicUser } from '../mappers.js';
 import { AppError } from '../errors.js';
 import { validation } from '../errors.js';
-import { gifsEnabled } from '../env.js';
+import { env, gifsEnabled } from '../env.js';
 import { ErrorCode } from '@den/shared';
 
 const USERNAME_RE = new RegExp(AuthLimits.usernamePattern);
@@ -167,8 +178,16 @@ async function fetchStoredSettings(userId: bigint): Promise<unknown> {
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
-  // Rate-limit the credential endpoints (BACKBONE §10). Generous but bounded.
-  const authLimit = { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } };
+  // Flood backstop on the credential endpoints (docs/AUTH_HARDENING.md §2.3).
+  //
+  // ⚠️ Raised from 10/min. At 10 this was a *global* bucket in prod — the real
+  // client IP doesn't reach Fastify, so every member shared one allowance and
+  // ten wrong passwords a minute from a stranger locked the whole circle out
+  // of logging in. That was a cheaper attack than the guessing this was meant
+  // to stop. Credential guessing is now bounded per-account by auth/throttle.ts,
+  // which frees this to be what it should have been: a ceiling that only
+  // pathological traffic reaches.
+  const authLimit = { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } };
 
   // ── register ──────────────────────────────────────────────────────────────
   app.post<{ Body: RegisterRequest }>('/auth/register', authLimit, async (req, reply) => {
@@ -227,6 +246,24 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const body = req.body ?? ({} as LoginRequest);
     const username = typeof body.username === 'string' ? body.username.trim().toLowerCase() : '';
     const password = typeof body.password === 'string' ? body.password : '';
+    const ip = clientIp(req, env.trustedProxy);
+    const userAgent = req.headers['user-agent'] ?? null;
+
+    // ── throttle gate (docs/AUTH_HARDENING.md §2.2) ────────────────────────
+    // Checked BEFORE the password is verified, so a locked account costs an
+    // attacker an indexed count() rather than an argon2 hash. ⚠️ This runs for
+    // usernames that don't exist too — a lock that only applied to real
+    // accounts would leak existence, undoing the DUMMY_HASH work below.
+    const lock = await checkLock(username);
+    if (lock.locked) {
+      req.log.warn({ username, ip, failures: lock.failures, until: lock.until }, 'login refused: account locked');
+      void reply.header('Retry-After', String(lock.retryAfterSeconds));
+      throw new AppError(
+        423,
+        ErrorCode.AuthLocked,
+        `Too many failed sign-in attempts. Try again in ${Math.ceil(lock.retryAfterSeconds / 60)} minute(s).`,
+      );
+    }
 
     const rows = await db
       .select({
@@ -246,10 +283,36 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     // so timing doesn't leak existence.
     const ok = await verifyPassword(row?.passwordHash ?? DUMMY_HASH, password);
     if (!row || !row.passwordHash || !ok) {
+      const after = await recordFailure(username, ip, userAgent);
+      req.log.warn({ username, ip, userAgent, failures: after.failures }, 'failed login');
+      // Opportunistic housekeeping — Den has no background job runner, and
+      // this table only grows while someone is failing to log in.
+      void sweepExpired();
+      // Tell the owner their account just locked — ONCE per lock, on the
+      // attempt that crossed the threshold. ⚠️ Not `after.locked`: that stays
+      // true for every subsequent failure, so a sustained attack would push a
+      // notification per guess. The point is to alert, not to hand an attacker
+      // a way to make someone's phone buzz all night.
+      //
+      // Fire-and-forget by contract: `row` may be undefined (no such user —
+      // nobody to tell) and notifyUser never throws, so nothing here can
+      // change the 401 below.
+      if (after.failures === LoginThrottle.threshold && row) {
+        void notifyUser(row.id, {
+          title: 'Den · sign-in blocked',
+          body: `${after.failures} failed sign-in attempts on your account in the last ${Math.round(
+            LoginThrottle.windowMs / 60000,
+          )} minutes. Sign-in is paused. If this wasn't you, change your password.`,
+          topic: 'auth-alert',
+        });
+      }
       throw new AppError(401, ErrorCode.InvalidCredentials, 'incorrect username or password');
     }
 
-    await createSession(reply, row.id, req.headers['user-agent']);
+    // Proving who you are resets your own counter — so a burst of wrong
+    // guesses against you can never accumulate into a lock you can't clear.
+    await clearFailures(username);
+    await createSession(reply, row.id, userAgent ?? undefined);
     const res: AuthResponse = toPublicUser(row);
     return res;
   });

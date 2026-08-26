@@ -26,6 +26,9 @@ self.addEventListener('activate', (event) => {
 });
 
 interface PushPayload {
+  /** Set by non-chat notifications (e.g. the auth-lock alert,
+   *  docs/AUTH_HARDENING.md §2.4). When present it IS the title, verbatim. */
+  title?: string;
   chatId?: string;
   /** Group name (recipient-relative). Absent/null for a DM — see `titleFor`. */
   chatName?: string | null;
@@ -51,6 +54,8 @@ const chatTag = (chatId: string): string => `chat-${chatId}`;
  */
 function titleFor(data: PushPayload): { title: string; body: string } {
   const preview = data.preview ?? '';
+  // A notification that isn't about a chat carries its own title.
+  if (data.title) return { title: data.title, body: preview };
   if (data.chatName) return { title: data.chatName, body: data.senderName ? `${data.senderName}: ${preview}` : preview };
   return { title: data.senderName ?? 'Den', body: preview };
 }

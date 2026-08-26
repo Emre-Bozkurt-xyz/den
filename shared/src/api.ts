@@ -29,6 +29,11 @@ export const ErrorCode = {
   InvalidInvite: 'invalid_invite',
   UsernameTaken: 'username_taken',
   InvalidCredentials: 'invalid_credentials',
+  /** Too many failed logins for this account — the credential check is
+   *  refused outright until the lock expires (docs/AUTH_HARDENING.md §2.2).
+   *  Distinct from `rate_limited`, which is a per-client flood backstop: this
+   *  one is keyed to the *account* and is not cleared by changing network. */
+  AuthLocked: 'auth_locked',
   /** A feature is switched off by server configuration, not by permissions —
    *  e.g. Vault linking with no `VAULT_TOKEN_ENC_KEY` set. Distinct from
    *  `forbidden` (the caller could never fix that by retrying) and from
@@ -128,6 +133,25 @@ export const AuthLimits = {
   displayNameMax: 64,
   passwordMin: 8,
   passwordMax: 200,
+} as const;
+
+/**
+ * Per-account login throttle (docs/AUTH_HARDENING.md §2.2). Shared so the
+ * client can render an honest "try again in N minutes" instead of guessing.
+ *
+ * Keyed on the submitted username rather than the client address: Den sits
+ * behind Cloudflare → VPS → frp → Caddy, and the real client IP does not
+ * currently survive that chain, so an IP-keyed limit protects nothing.
+ */
+export const LoginThrottle = {
+  /** Failures inside this window count toward the lock. */
+  windowMs: 15 * 60 * 1000,
+  /** Failures within the window before the account locks. */
+  threshold: 10,
+  /** First lock duration; doubles per additional failure. */
+  baseLockMs: 60 * 1000,
+  /** Ceiling on the doubling — a lock is annoying, never indefinite. */
+  maxLockMs: 15 * 60 * 1000,
 } as const;
 
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────

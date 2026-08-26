@@ -21,7 +21,10 @@
     "db:generate": "npm -w server run db:generate",
     "db:migrate": "npm -w server run db:migrate",
     "vapid:gen": "node server/scripts/gen-vapid.mjs",
-    "invite": "node --env-file=.env server/dist/scripts/invite.js"
+    "invite": "node --env-file=.env server/dist/scripts/invite.js",
+    "auth:unlock": "node --env-file=.env server/dist/scripts/auth-unlock.js",
+    "auth:probe-proxy": "npx tsx server/src/scripts/probe-proxy-trust.ts",
+    "auth:probe-throttle": "npx tsx server/src/scripts/probe-auth-throttle.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
