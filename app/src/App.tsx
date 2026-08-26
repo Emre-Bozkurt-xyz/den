@@ -9,6 +9,7 @@ import { BackStackProvider, useBackHandler } from './lib/backStack';
 import { AuthScreen } from './components/AuthScreen';
 import { Profile } from './components/Profile';
 import { Settings } from './components/Settings';
+import { AdminConsole } from './components/AdminConsole';
 import { InstallInstructions } from './components/InstallInstructions';
 import { RealtimeProvider } from './lib/realtime';
 import { SensitivityProvider } from './lib/sensitivity';
@@ -63,6 +64,7 @@ type View =
   | { name: 'newGroup' }
   | { name: 'profile' }
   | { name: 'settings' }
+  | { name: 'admin' }
   | { name: 'gallery' }
   | { name: 'chatGallery'; album: GalleryAlbum };
 
@@ -100,6 +102,8 @@ function parentOf(view: View): View | null {
       return { name: 'chats' };
     case 'settings':
       return { name: 'profile' };
+    case 'admin':
+      return { name: 'settings' };
     case 'chatGallery':
       return { name: 'gallery' };
     case 'chats':
@@ -302,8 +306,16 @@ function AuthedApp({ me }: { me: MeResponse }) {
           onJumpToMessage={(chatId, messageId) => void jumpToMessage(chatId, messageId)}
         />
       );
+    } else if (view.name === 'admin') {
+      content = <AdminConsole onBack={() => setView({ name: 'settings' })} />;
     } else if (view.name === 'settings') {
-      content = <Settings me={me} onBack={() => setView({ name: 'profile' })} />;
+      content = (
+        <Settings
+          me={me}
+          onBack={() => setView({ name: 'profile' })}
+          onOpenAdmin={() => setView({ name: 'admin' })}
+        />
+      );
     } else {
       content = (
         <div className="flex h-full flex-col bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -398,8 +410,14 @@ function AuthedApp({ me }: { me: MeResponse }) {
           <div className="h-full overflow-y-auto">
             <ProfileTab me={me} onOpenSettings={() => setView({ name: 'settings' })} />
           </div>
+        ) : view.name === 'admin' ? (
+          <AdminConsole onBack={() => setView({ name: 'settings' })} />
         ) : view.name === 'settings' ? (
-          <Settings me={me} onBack={() => setView({ name: 'profile' })} />
+          <Settings
+            me={me}
+            onBack={() => setView({ name: 'profile' })}
+            onOpenAdmin={() => setView({ name: 'admin' })}
+          />
         ) : view.name === 'gallery' ? (
           <div className="h-full overflow-y-auto">
             <GalleryScreen me={me} onOpenAlbum={(album) => setView({ name: 'chatGallery', album })} />

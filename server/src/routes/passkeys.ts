@@ -53,6 +53,9 @@ import {
   setChallenge,
   takeChallenge,
 } from '../auth/webauthn.js';
+import { SecurityEventKind, isUnfamiliarUserAgent, record } from '../admin/events.js';
+import { clientIp } from '../auth/clientIp.js';
+import { env } from '../env.js';
 import { toPublicUser } from '../mappers.js';
 import { notFound, validation } from '../errors.js';
 
@@ -184,6 +187,14 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       }
 
       req.log.info({ userId: me.id.toString(), credentialId: credential.id }, 'passkey registered');
+      void record({
+        kind: SecurityEventKind.CredentialAdded,
+        userId: me.id,
+        username: me.username,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+        data: { label },
+      });
       return reply.status(201).send({ ok: true });
     },
   );
@@ -277,7 +288,19 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       // what lets a passkey lift a lock an attacker caused.
       await clearFailures(cred.username);
 
+      const userAgent = req.headers['user-agent'] ?? null;
+      const unfamiliar = await isUnfamiliarUserAgent(cred.userId, userAgent);
       await createSession(reply, cred.userId, req.headers['user-agent']);
+      if (unfamiliar) {
+        void record({
+          kind: SecurityEventKind.SessionNewDevice,
+          userId: cred.userId,
+          username: cred.username,
+          ip: clientIp(req, env.trustedProxy),
+          userAgent,
+          data: { method: 'passkey' },
+        });
+      }
       req.log.info({ userId: cred.userId.toString(), credentialId: cred.id }, 'passkey login');
 
       const res: AuthResponse = toPublicUser({
@@ -357,6 +380,13 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
         .delete(webauthnCredentials)
         .where(and(eq(webauthnCredentials.id, req.params.id), eq(webauthnCredentials.userId, me.id)));
       req.log.info({ userId: me.id.toString(), credentialId: req.params.id }, 'passkey removed');
+      void record({
+        kind: SecurityEventKind.CredentialRemoved,
+        userId: me.id,
+        username: me.username,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+      });
       return { ok: true };
     },
   );

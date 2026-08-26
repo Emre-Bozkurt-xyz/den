@@ -36,6 +36,8 @@ import { inviteCodes, users } from '../db/schema.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
 import { checkLock, clearFailures, recordFailure, sweepExpired } from '../auth/throttle.js';
 import { clientIp } from '../auth/clientIp.js';
+import { isOwner } from '../auth/owner.js';
+import { SecurityEventKind, isUnfamiliarUserAgent, record } from '../admin/events.js';
 import { notifyUser } from '../push/notify.js';
 import { createSession, destroySession, requireAuth } from '../auth/session.js';
 import { toPublicUser } from '../mappers.js';
@@ -237,6 +239,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
 
     await createSession(reply, user.id, req.headers['user-agent']);
+    void record({
+      kind: SecurityEventKind.InviteClaimed,
+      userId: user.id,
+      username: user.username,
+      ip: clientIp(req, env.trustedProxy),
+      userAgent: req.headers['user-agent'] ?? null,
+      data: { inviteCode },
+    });
     const res: AuthResponse = toPublicUser(user);
     return reply.status(201).send(res);
   });
@@ -297,6 +307,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       // Fire-and-forget by contract: `row` may be undefined (no such user —
       // nobody to tell) and notifyUser never throws, so nothing here can
       // change the 401 below.
+      if (after.failures === LoginThrottle.threshold) {
+        // Durable history, separate from the live counter (docs/ADMIN_CONSOLE.md
+        // §5). Written even when no such user exists — an attack on a username
+        // that isn't real is still something the owner should be able to see.
+        void record({
+          kind: SecurityEventKind.LoginLocked,
+          userId: row?.id ?? null,
+          username,
+          ip,
+          userAgent,
+          data: { failures: after.failures },
+        });
+      }
       if (after.failures === LoginThrottle.threshold && row) {
         void notifyUser(row.id, {
           title: 'Den · sign-in blocked',
@@ -312,7 +335,20 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     // Proving who you are resets your own counter — so a burst of wrong
     // guesses against you can never accumulate into a lock you can't clear.
     await clearFailures(username);
+    // Checked BEFORE the session is created, or the session we're about to
+    // write would itself be the "familiar" precedent and this could never fire.
+    const unfamiliar = await isUnfamiliarUserAgent(row.id, userAgent);
     await createSession(reply, row.id, userAgent ?? undefined);
+    if (unfamiliar) {
+      void record({
+        kind: SecurityEventKind.SessionNewDevice,
+        userId: row.id,
+        username: row.username,
+        ip,
+        userAgent,
+        data: { method: 'password' },
+      });
+    }
     const res: AuthResponse = toPublicUser(row);
     return res;
   });
@@ -326,8 +362,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // ── me ──────────────────────────────────────────────────────────────────
   app.get('/me', { preHandler: requireAuth }, async (req) => {
     const me = req.user!;
-    const stored = await fetchStoredSettings(me.id);
-    const res: MeResponse = { ...toPublicUser(me), settings: mergeUserSettings(stored, undefined), gifsEnabled };
+    const [stored, owner] = await Promise.all([fetchStoredSettings(me.id), isOwner(me.id)]);
+    const res: MeResponse = {
+      ...toPublicUser(me),
+      settings: mergeUserSettings(stored, undefined),
+      gifsEnabled,
+      // Display hint only — every admin route re-checks (auth/owner.ts).
+      isOwner: owner,
+    };
     return res;
   });
 
@@ -335,10 +377,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.patch<{ Body: UpdateMeRequest }>('/me', { preHandler: requireAuth }, async (req) => {
     const me = req.user!;
     const displayName = checkDisplayName(req.body?.displayName, me.displayName);
-    const stored = await fetchStoredSettings(me.id);
+    const [stored, owner] = await Promise.all([fetchStoredSettings(me.id), isOwner(me.id)]);
     const settings = mergeUserSettings(stored, req.body?.settings);
     await db.update(users).set({ displayName, settings }).where(eq(users.id, me.id));
-    const res: MeResponse = { ...toPublicUser({ ...me, displayName }), settings, gifsEnabled };
+    const res: MeResponse = {
+      ...toPublicUser({ ...me, displayName }),
+      settings,
+      gifsEnabled,
+      isOwner: owner,
+    };
     return res;
   });
 }

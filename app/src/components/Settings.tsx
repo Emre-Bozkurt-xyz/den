@@ -9,6 +9,7 @@ import { VoicePoc } from './VoicePoc';
 import { WsProbe } from './WsProbe';
 import { KeyboardProbe } from './KeyboardProbe';
 import { ScreenHeader } from './ScreenHeader';
+import { ChevronRight } from 'lucide-react';
 
 /**
  * Settings screen (docs/MEDIA_ATTACHMENTS.md §5.6) — pushed from the Profile
@@ -16,7 +17,15 @@ import { ScreenHeader } from './ScreenHeader';
  * `parentOf` unwinds Settings → Profile → Chats). Holds the app's first real
  * user preference plus the sections that used to live directly on Profile.
  */
-export function Settings({ me, onBack }: { me: MeResponse; onBack: () => void }) {
+export function Settings({
+  me,
+  onBack,
+  onOpenAdmin,
+}: {
+  me: MeResponse;
+  onBack: () => void;
+  onOpenAdmin: () => void;
+}) {
   return (
     <div className="flex h-full flex-col">
       <ScreenHeader title="Settings" onBack={onBack} />
@@ -27,6 +36,26 @@ export function Settings({ me, onBack }: { me: MeResponse; onBack: () => void })
           paddingRight: 'max(env(safe-area-inset-right), 1rem)',
         }}
       >
+        {/* Owner-only. `me.isOwner` is a display hint — every /api/admin route
+            re-checks server-side (docs/ADMIN_CONSOLE.md §4), so a client that
+            forced this open would get 403s rather than data. */}
+        {me.isOwner && (
+          <button
+            type="button"
+            onClick={onOpenAdmin}
+            className="flex items-center justify-between rounded-lg border border-border bg-surface-raised p-4 text-left transition-colors hover:bg-surface-hover"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <span>
+              <span className="block text-sm font-semibold text-text-primary">Admin</span>
+              <span className="mt-1 block text-xs text-text-secondary">
+                Security activity, people, invites and locks.
+              </span>
+            </span>
+            <ChevronRight size={16} className="shrink-0 text-text-secondary" />
+          </button>
+        )}
+
         <PasskeysSection />
         <MediaPrivacySection me={me} />
         <NotificationsSection />

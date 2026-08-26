@@ -106,6 +106,12 @@ export interface MeResponse extends PublicUser {
    *  round-trip for one boolean. False ⇒ the client hides the GIF button
    *  entirely (nothing the user could do would fix a missing server key). */
   gifsEnabled: boolean;
+  /** Whether this account may reach `/api/admin/*` (docs/ADMIN_CONSOLE.md §4).
+   *  ⚠️ A DISPLAY HINT ONLY — it decides whether the entry point renders, and
+   *  nothing else. Every admin route re-checks server-side, so a client that
+   *  lies to itself about this gets 403s rather than data. Granted only by
+   *  `npm run owner grant` from the host shell; there is no API to set it. */
+  isOwner: boolean;
 }
 
 /** POST /auth/register. Invites authorize; the provider (here, password)
@@ -224,6 +230,112 @@ export const PasskeyLimits = {
    *  is three, and syncing can legitimately add more. */
   maxCredentials: 20,
 } as const;
+
+// ─── admin console (docs/ADMIN_CONSOLE.md) ──────────────────────────────────
+
+/**
+ * ⚠️ Nothing in this section may ever carry message content, media, captions,
+ * tags, embeds, or chat membership. The owner is an operator, not a reader
+ * (docs/ADMIN_CONSOLE.md §2) — that rule is what keeps hard invariant 1 intact
+ * rather than carved into, and these shapes are where it would first erode.
+ */
+
+export interface SecurityEvent {
+  id: string;
+  kind: string;
+  /** The account this is about. Null when the username never existed. */
+  userId: string | null;
+  username: string | null;
+  /** Set for deliberate owner actions; null for system-generated events. */
+  actorUsername: string | null;
+  ip: string | null;
+  userAgent: string | null;
+  data: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface SecurityEventsResponse {
+  events: SecurityEvent[];
+  /** Keyset cursor: pass as `before` for the next page. Null when exhausted. */
+  nextBefore: string | null;
+}
+
+/** One account, as the console lists it. Operator facts only. */
+export interface AdminUser {
+  id: string;
+  username: string;
+  displayName: string;
+  createdAt: string;
+  /** Most recent session creation — "last seen", approximately. */
+  lastSeenAt: string | null;
+  isOwner: boolean;
+  disabledAt: string | null;
+  /** Credential inventory (docs/ADMIN_CONSOLE.md §3d). */
+  hasPassword: boolean;
+  passkeyCount: number;
+  vaultLinked: boolean;
+  activeSessions: number;
+  pushSubscriptions: number;
+}
+
+export interface AdminUsersResponse {
+  users: AdminUser[];
+}
+
+export interface AdminSession {
+  id: string;
+  userAgent: string | null;
+  createdAt: string;
+  expiresAt: string;
+  /** True for the session making this request — never offer to revoke it blind. */
+  current: boolean;
+}
+
+export interface AdminSessionsResponse {
+  sessions: AdminSession[];
+}
+
+/** A live lock, from `login_failures` (the counter, not the history). */
+export interface AdminLock {
+  username: string;
+  failures: number;
+  locked: boolean;
+  retryAfterSeconds: number;
+  lastFailureAt: string | null;
+}
+
+export interface AdminLocksResponse {
+  locks: AdminLock[];
+}
+
+export interface AdminInvite {
+  code: string;
+  createdAt: string;
+  createdByUsername: string | null;
+  usedByUsername: string | null;
+  usedAt: string | null;
+  revokedAt: string | null;
+  /** Derived: unused and not revoked, i.e. still claimable. */
+  claimable: boolean;
+}
+
+export interface AdminInvitesResponse {
+  invites: AdminInvite[];
+}
+
+/** Push delivery health per user (docs/ADMIN_CONSOLE.md §3f). */
+export interface AdminPushHealth {
+  userId: string;
+  username: string;
+  subscriptions: number;
+}
+
+export interface AdminPushHealthResponse {
+  users: AdminPushHealth[];
+  /** Server-side: whether VAPID is configured at all. A zero everywhere with
+   *  this false means "push is switched off", not "everyone unsubscribed". */
+  pushConfigured: boolean;
+}
 
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────
 

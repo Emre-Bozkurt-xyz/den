@@ -1,7 +1,12 @@
 # Admin / security console — plan
 
-Status: **plan, not built. Blocked on passkeys by owner decision** (2026-08-26)
-— see §1 for why that ordering is a security property and not just scheduling.
+Status: **read-only half BUILT** 2026-08-26 (migration 016), verified against
+the compose stack — see §10. Passkeys shipped first, as §1 requires.
+
+**Still unbuilt: the state-changing half** (build steps 4-5) — unlock, revoke
+session, revoke invite, mint invite, disable/enable, and the re-auth gate.
+Those columns exist (`users.disabled_at`, `invite_codes.revoked_at`) and the
+event kinds are defined, but nothing writes them yet.
 
 Shape settled by the owner: **owner-only**, **inside the PWA** (a section of
 Settings, not a separate app or subdomain).
@@ -248,6 +253,48 @@ state. That split is deliberate — it means the risky half is a small, separate
 reviewable change rather than a rider on a large one.
 
 ## 10. Verification
+
+`scripts/probe-admin.ts`, run 2026-08-26 against the compose stack — **all 30
+checks pass**.
+
+| Area | Checks |
+|---|---|
+| Locked down | all 5 routes → 403 for a non-owner · unauthenticated → 401 · `me.isOwner` false before the grant |
+| Grant | `me.isOwner` true after a direct DB write (what the CLI does) · the *other* user still refused |
+| Owner reads | all 5 routes → 200 |
+| **§2 boundary** | a real chat + message is seeded containing a unique marker, then every response is checked for **(a)** a 200 status, **(b)** no chat-shaped field, **(c)** no echo of the message text |
+| Session tokens | listed ids are truncated hashes · **a listed id used as a cookie → 401** · the current session is flagged |
+| Feed | `invite.claimed` recorded · `login.locked` recorded after a real lock · the lock appears in the locks panel |
+
+The boundary block is the one that matters. It is written as an invariant
+check rather than a unit test precisely because the risk here is *drift*: a
+future panel that joins to `messages` for something innocuous would fail this
+probe rather than a code review.
+
+**Two findings from the run, both kept:**
+
+1. **`/admin/users` 500'd on `operator does not exist: bigint = text`.**
+   Drizzle emits **unqualified** column names inside a `sql` template, so
+   `${webauthnCredentials.userId} = ${users.id}` became
+   `where "user_id" = "id"` — and inside a correlated subquery, `"id"` binds to
+   the *subquery's* table (`webauthn_credentials.id`, a text credential ID),
+   not `users.id`. The correlated counts are now literal, table-qualified SQL
+   with aliases, kept visible in the module per CLAUDE.md. ⚠️ Any future
+   correlated subquery in this file must do the same.
+2. **The boundary scan was passing on a 500.** An error envelope contains no
+   chat data, so an outage read as a privacy PASS. The scan now requires a 200
+   first. A leak check that a broken endpoint satisfies is worse than no check,
+   because it reports safety.
+
+Gates: `npm run typecheck` and `npm run lint` clean (no new warnings);
+`npm run test` — 98 tests, 98 pass.
+
+**Not yet verified:** the console has never been opened in a browser — the
+probe exercises the API, not the React screen. And nothing here has been seen
+on iOS; the layout note in §8 (stacked cards, never sideways-scrolling tables)
+is unconfirmed on a real phone.
+
+### Original plan for the state-changing half
 
 Definition of done (PROJECT.md §16) plus:
 

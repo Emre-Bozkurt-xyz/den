@@ -24,6 +24,7 @@ import { voicePocRoutes } from './routes/voice-poc.js';
 import { integrationsVaultRoutes } from './routes/integrations-vault.js';
 import { stageRoutes } from './routes/stage.js';
 import { debugRoutes } from './routes/debug.js';
+import { adminRoutes } from './routes/admin.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -92,6 +93,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(integrationsVaultRoutes, { prefix: '/api' });
   await app.register(stageRoutes, { prefix: '/api' });
   await app.register(debugRoutes, { prefix: '/api' });
+  await app.register(adminRoutes, { prefix: '/api' });
 
   return app;
 }

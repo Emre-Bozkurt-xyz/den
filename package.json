@@ -23,6 +23,7 @@
     "vapid:gen": "node server/scripts/gen-vapid.mjs",
     "invite": "node --env-file=.env server/dist/scripts/invite.js",
     "auth:unlock": "node --env-file=.env server/dist/scripts/auth-unlock.js",
+    "owner": "node --env-file=.env server/dist/scripts/owner.js",
     "auth:probe-proxy": "npx tsx server/src/scripts/probe-proxy-trust.ts",
     "auth:probe-throttle": "npx tsx server/src/scripts/probe-auth-throttle.ts"
   },

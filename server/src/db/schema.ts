@@ -47,6 +47,10 @@
  *   SUBMITTED username (which may not exist). Doubles as the per-account
  *   brute-force bound and the audit trail; there was previously neither.
  *
+ * Migration 016 (post-MVP, docs/ADMIN_CONSOLE.md): the owner console's
+ *   substrate. security_events (append-only history) · users.is_owner ·
+ *   users.disabled_at · invite_codes.revoked_at.
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -98,6 +102,15 @@ export const users = pgTable('users', {
   // rows, or keys added after a user's last PATCH) — always read through
   // mergeUserSettings (server/src/routes/auth.ts), never trust it raw.
   settings: jsonb('settings').$type<Partial<UserSettings>>().notNull().default({}),
+  // Migration 016 (docs/ADMIN_CONSOLE.md §4). ⚠️ Grantable ONLY from the host
+  // shell (`npm run owner grant`) — there is deliberately no API route and no
+  // in-app toggle, not even for an existing owner, so a fully compromised
+  // session still cannot escalate privilege.
+  isOwner: boolean('is_owner').notNull().default(false),
+  // Migration 016 (docs/ADMIN_CONSOLE.md §7). Set → sessions are destroyed and
+  // every login path refuses. NOT a delete: messages, media and memberships
+  // are untouched, because they are part of other people's conversations.
+  disabledAt: timestamp('disabled_at', { withTimezone: true }),
 });
 
 export const authIdentities = pgTable(
@@ -134,6 +147,9 @@ export const inviteCodes = pgTable('invite_codes', {
   usedBy: bigint('used_by', { mode: 'bigint' }).references(() => users.id),
   usedAt: timestamp('used_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // Migration 016: soft revoke of an UNUSED code (invariant 8). A revoked code
+  // can never be claimed; a code already used is history and is left alone.
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
 });
 
 export const sessions = pgTable(
@@ -178,6 +194,47 @@ export const loginFailures = pgTable(
     index('login_failures_username_time').on(t.username, t.createdAt),
     // Sweeping expired rows.
     index('login_failures_time').on(t.createdAt),
+  ],
+);
+
+/**
+ * Append-only security history (docs/ADMIN_CONSOLE.md §5, migration 016).
+ *
+ * ⚠️ This is NOT a duplicate of `login_failures`, and the difference is
+ * load-bearing. `login_failures` is a **live counter**: rows are deleted the
+ * moment a user logs in successfully, because its only job is answering "is
+ * this account locked right now?". This table is **durable history**: nothing
+ * ever deletes from it, because its job is answering "what happened last
+ * Tuesday?". Merging them would break one of the two — either the counter
+ * stops clearing on success, or the history evaporates every time an attack
+ * ends.
+ *
+ * `user_id` is nullable and `username` is stored verbatim, so an event about a
+ * username that never existed is still recorded. `actor_user_id` is set only
+ * for deliberate owner actions — a console that cannot say who did what
+ * manufactures deniability.
+ */
+export const securityEvents = pgTable(
+  'security_events',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    kind: text('kind').notNull(),
+    /** The account the event is ABOUT. Null when no such user exists. */
+    userId: bigint('user_id', { mode: 'bigint' }).references(() => users.id),
+    /** As submitted/known at the time — survives a user that never existed. */
+    username: citext('username'),
+    /** Who DID it, for owner actions. Null for system-generated events. */
+    actorUserId: bigint('actor_user_id', { mode: 'bigint' }).references(() => users.id),
+    ip: text('ip'),
+    userAgent: text('user_agent'),
+    /** Kind-specific extras. Keep flat and JSON-primitive, like users.settings. */
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('security_events_time').on(t.createdAt),
+    index('security_events_user_time').on(t.userId, t.createdAt),
+    index('security_events_kind_time').on(t.kind, t.createdAt),
   ],
 );
 
