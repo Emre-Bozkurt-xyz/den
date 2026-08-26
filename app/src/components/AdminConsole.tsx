@@ -15,16 +15,25 @@
  * Styling is plain; the owner does a UI pass separately.
  */
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, KeyRound, Loader2, Shield, Ticket, Users } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, KeyRound, Loader2, Plus, Shield, Ticket, Trash2, UserX, Users } from 'lucide-react';
 import type { SecurityEvent } from '@den/shared';
 import { ScreenHeader } from './ScreenHeader';
+import { ReauthPrompt } from './ReauthPrompt';
+import { ApiFetchError } from '../lib/api';
 import {
   adminEvents,
   adminInvites,
   adminLocks,
   adminPushHealth,
   adminUsers,
+  clearLock,
+  disableUser,
+  enableUser,
+  isReauthRequired,
+  mintInvites,
+  revokeInvite,
+  revokeSessions,
 } from '../lib/admin';
 
 type Tab = 'feed' | 'users' | 'invites' | 'locks';
@@ -78,6 +87,52 @@ export function AdminConsole({ onBack }: { onBack: () => void }) {
       </div>
     </div>
   );
+}
+
+
+/**
+ * Runs a destructive admin action, and when the server says proof of identity
+ * has gone stale, shows the re-auth prompt and RETRIES the same action once
+ * it's satisfied.
+ *
+ * ⚠️ The pending action is held so the retry is automatic. Making the user
+ * re-find the button they already pressed is how a security prompt becomes the
+ * thing people route around.
+ */
+function useGuardedAction(onDone: () => void) {
+  const [pending, setPending] = useState<{ run: () => Promise<unknown>; label: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: (job: { run: () => Promise<unknown>; label: string }) => job.run(),
+    onSuccess: () => {
+      setPending(null);
+      setError(null);
+      onDone();
+    },
+    onError: (err, job) => {
+      if (isReauthRequired(err)) {
+        setPending(job);
+        setError(null);
+        return;
+      }
+      setError(err instanceof ApiFetchError ? err.message : 'That did not work — try again.');
+    },
+  });
+
+  return {
+    run: (label: string, fn: () => Promise<unknown>) => mutation.mutate({ run: fn, label }),
+    busy: mutation.isPending,
+    error,
+    /** Rendered by the caller when non-null. */
+    prompt: pending && (
+      <ReauthPrompt
+        action={pending.label}
+        onConfirmed={() => mutation.mutate(pending)}
+        onCancel={() => setPending(null)}
+      />
+    ),
+  };
 }
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
@@ -164,12 +219,18 @@ function FeedPanel() {
 // ─── people ─────────────────────────────────────────────────────────────────
 
 function UsersPanel() {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ['admin', 'users'], queryFn: adminUsers });
   const push = useQuery({ queryKey: ['admin', 'push'], queryFn: adminPushHealth });
+  const act = useGuardedAction(() => {
+    void qc.invalidateQueries({ queryKey: ['admin'] });
+  });
 
   return (
     <>
       <Panel title="People">
+        {act.prompt}
+        {act.error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{act.error}</p>}
         {q.isPending && <Pending />}
         {q.isSuccess && (
           <ul className="flex flex-col gap-2">
@@ -198,6 +259,40 @@ function UsersPanel() {
                 </p>
                 {u.disabledAt && (
                   <p className="mt-0.5 text-xs text-red-600 dark:text-red-400">Disabled</p>
+                )}
+
+                {/* The owner's own row gets no destructive controls: disabling
+                    yourself is refused server-side, and revoking your own
+                    sessions mid-incident is a way to make things worse. */}
+                {!u.isOwner && (
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    {u.activeSessions > 0 && (
+                      <button
+                        type="button"
+                        disabled={act.busy}
+                        onClick={() =>
+                          act.run(`signing @${u.username} out everywhere`, () => revokeSessions(u.id))
+                        }
+                        className="text-xs font-semibold text-indigo-600 disabled:opacity-40 dark:text-indigo-400"
+                        style={{ touchAction: 'manipulation' }}
+                      >
+                        Sign out all devices
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={act.busy}
+                      onClick={() =>
+                        u.disabledAt
+                          ? act.run(`re-enabling @${u.username}`, () => enableUser(u.id))
+                          : act.run(`disabling @${u.username}`, () => disableUser(u.id))
+                      }
+                      className="flex items-center gap-1 text-xs font-semibold text-red-600 disabled:opacity-40 dark:text-red-400"
+                      style={{ touchAction: 'manipulation' }}
+                    >
+                      <UserX size={12} /> {u.disabledAt ? 'Re-enable' : 'Disable'}
+                    </button>
+                  </div>
                 )}
               </li>
             ))}
@@ -244,10 +339,49 @@ function UsersPanel() {
 // ─── invites ────────────────────────────────────────────────────────────────
 
 function InvitesPanel() {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ['admin', 'invites'], queryFn: adminInvites });
+  const [minted, setMinted] = useState<string[]>([]);
+  const act = useGuardedAction(() => {
+    void qc.invalidateQueries({ queryKey: ['admin', 'invites'] });
+  });
+
+  const mint = useMutation({
+    mutationFn: () => mintInvites(1),
+    onSuccess: (r) => {
+      setMinted((prev) => [...r.codes, ...prev]);
+      void qc.invalidateQueries({ queryKey: ['admin', 'invites'] });
+    },
+  });
 
   return (
     <Panel title="Invites">
+      {act.prompt}
+      {act.error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{act.error}</p>}
+
+      <button
+        type="button"
+        disabled={mint.isPending}
+        onClick={() => mint.mutate()}
+        className="mb-3 flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold transition-colors hover:bg-surface-hover disabled:opacity-40"
+        style={{ touchAction: 'manipulation' }}
+      >
+        {mint.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+        Mint an invite
+      </button>
+
+      {minted.length > 0 && (
+        <div className="mb-3 rounded-md border border-accent bg-surface-sunken p-3">
+          <p className="text-xs text-text-secondary">
+            Just minted — copy it now, it&apos;s only listed here while this screen is open:
+          </p>
+          {minted.map((c) => (
+            <p key={c} className="mt-1 break-all font-mono text-sm text-text-primary">
+              {c}
+            </p>
+          ))}
+        </div>
+      )}
       {q.isPending && <Pending />}
       {q.isSuccess && q.data.invites.length === 0 && <Empty>No invite codes.</Empty>}
       {q.isSuccess && q.data.invites.length > 0 && (
@@ -264,13 +398,24 @@ function InvitesPanel() {
                 {' · created '}
                 {new Date(i.createdAt).toLocaleDateString()}
               </p>
+              {i.claimable && (
+                <button
+                  type="button"
+                  disabled={act.busy}
+                  onClick={() => act.run(`revoking that invite`, () => revokeInvite(i.code))}
+                  className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-red-600 disabled:opacity-40 dark:text-red-400"
+                  style={{ touchAction: 'manipulation' }}
+                >
+                  <Trash2 size={12} /> Revoke
+                </button>
+              )}
             </li>
           ))}
         </ul>
       )}
       <p className="mt-3 text-xs text-text-secondary">
-        Minting and revoking are in the next pass — for now use{' '}
-        <span className="font-mono">npm run invite create</span>.
+        Only unused codes can be revoked. A claimed code is history — revoking it would imply
+        something about the account it created, which is what disabling is for.
       </p>
     </Panel>
   );
@@ -279,10 +424,16 @@ function InvitesPanel() {
 // ─── locks ──────────────────────────────────────────────────────────────────
 
 function LocksPanel() {
+  const qc = useQueryClient();
   const q = useQuery({ queryKey: ['admin', 'locks'], queryFn: adminLocks, refetchInterval: 15_000 });
+  const act = useGuardedAction(() => {
+    void qc.invalidateQueries({ queryKey: ['admin'] });
+  });
 
   return (
     <Panel title="Failed sign-ins">
+      {act.prompt}
+      {act.error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{act.error}</p>}
       {q.isPending && <Pending />}
       {q.isSuccess && q.data.locks.length === 0 && (
         <Empty>No failed sign-ins in the last 15 minutes.</Empty>
@@ -303,6 +454,15 @@ function LocksPanel() {
                 {l.failures} {l.failures === 1 ? 'failure' : 'failures'}
                 {l.lastFailureAt ? ` · last ${new Date(l.lastFailureAt).toLocaleTimeString()}` : ''}
               </p>
+              <button
+                type="button"
+                disabled={act.busy}
+                onClick={() => act.run(`clearing ${l.username}`, () => clearLock(l.username))}
+                className="mt-1.5 text-xs font-semibold text-indigo-600 disabled:opacity-40 dark:text-indigo-400"
+                style={{ touchAction: 'manipulation' }}
+              >
+                Clear
+              </button>
             </li>
           ))}
         </ul>

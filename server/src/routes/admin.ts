@@ -15,14 +15,19 @@
  * what anyone said. If a future admin feature seems to need chat content, that
  * is a signal to redesign the feature, not to widen this rule.
  *
- * Everything here is read-only. The state-changing half (unlock, revoke,
- * disable) is a deliberately separate change behind the §6 re-auth gate, so
- * the risky code lands as its own reviewable diff rather than a rider on this.
+ * The state-changing routes at the bottom follow two rules without exception:
+ * every one writes a `security_events` row naming its actor (a console that
+ * cannot say who did what manufactures deniability), and the irreversible ones
+ * sit behind `requireFreshAuth` (§6) — a valid 30-day session is a weak
+ * credential for "disable this account".
  */
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, count, desc, eq, gt, gte, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
+import { generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server';
+import type { AuthenticationResponseJSON } from '@simplewebauthn/server';
 import {
+  ErrorCode,
   LoginThrottle,
   type AdminInvite,
   type AdminInvitesResponse,
@@ -30,17 +35,39 @@ import {
   type AdminPushHealthResponse,
   type AdminSessionsResponse,
   type AdminUsersResponse,
+  type MintInvitesRequest,
+  type MintInvitesResponse,
+  type ReauthPasskeyVerifyRequest,
+  type ReauthPasswordRequest,
+  type ReauthStatus,
   type SecurityEvent,
   type SecurityEventsResponse,
 } from '@den/shared';
 import { db } from '../db/index.js';
-import { inviteCodes, loginFailures, pushSubscriptions, sessions, users } from '../db/schema.js';
+import {
+  inviteCodes,
+  loginFailures,
+  pushSubscriptions,
+  sessions,
+  users,
+  webauthnCredentials,
+} from '../db/schema.js';
 import { requireOwner } from '../auth/owner.js';
 import { SESSION_COOKIE } from '../auth/session.js';
-import { checkLock } from '../auth/throttle.js';
-import { listEvents } from '../admin/events.js';
+import { checkLock, clearFailures } from '../auth/throttle.js';
+import {
+  REAUTH_TTL_MS,
+  grantReauth,
+  reauthRemainingSeconds,
+  requireFreshAuth,
+  verifyOwnPassword,
+} from '../auth/reauth.js';
+import { expectedOrigins, passkeyFailed, rpID, setChallenge, takeChallenge } from '../auth/webauthn.js';
+import { SecurityEventKind, listEvents, record } from '../admin/events.js';
+import { clientIp } from '../auth/clientIp.js';
+import { generateInviteCodes } from '../admin/invites.js';
 import { env } from '../env.js';
-import { validation } from '../errors.js';
+import { AppError, forbidden, notFound, validation } from '../errors.js';
 
 const FEED_LIMIT = 50;
 
@@ -265,6 +292,306 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     };
     return res;
   });
+
+  // ══ state-changing half ═════════════════════════════════════════════════
+  //
+  // Two rules, no exceptions: every route below writes a security_events row
+  // naming its actor, and the irreversible ones require fresh proof of
+  // identity (§6). `requireFreshAuth` is passed per-route rather than hooked,
+  // because the low-harm actions deliberately do NOT require it — a re-auth
+  // prompt on every unlock would train the owner to click through it, which is
+  // how a confirmation step stops being a control.
+
+  /** How much re-auth freshness is left, and how this account can refresh it. */
+  app.get('/admin/reauth', async (req, reply) => {
+    const me = req.user!;
+    const [creds, methods] = await Promise.all([
+      db
+        .select({ id: webauthnCredentials.id })
+        .from(webauthnCredentials)
+        .where(eq(webauthnCredentials.userId, me.id)),
+      db
+        .select({ passwordHash: users.passwordHash })
+        .from(users)
+        .where(eq(users.id, me.id))
+        .limit(1),
+    ]);
+    const res: ReauthStatus = {
+      freshSeconds: reauthRemainingSeconds(req, reply, me.id),
+      canUsePasskey: creds.length > 0,
+      canUsePassword: Boolean(methods[0]?.passwordHash),
+    };
+    return res;
+  });
+
+  /** Re-auth by password. Rate-limited: it is a password oracle otherwise. */
+  app.post<{ Body: ReauthPasswordRequest }>(
+    '/admin/reauth/password',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const me = req.user!;
+      const ok = await verifyOwnPassword(me.id, req.body?.password ?? '');
+      if (!ok) {
+        req.log.warn({ userId: me.id.toString() }, 'admin re-auth failed');
+        throw new AppError(401, ErrorCode.InvalidCredentials, 'That password is not right');
+      }
+      grantReauth(reply, me.id, 'password');
+      return { ok: true, freshSeconds: Math.ceil(REAUTH_TTL_MS / 1000) };
+    },
+  );
+
+  /** Re-auth by passkey — options half. */
+  app.post('/admin/reauth/passkey/options', async (req, reply) => {
+    const me = req.user!;
+    const creds = await db
+      .select({ id: webauthnCredentials.id, transports: webauthnCredentials.transports })
+      .from(webauthnCredentials)
+      .where(eq(webauthnCredentials.userId, me.id));
+    if (creds.length === 0) throw validation('no passkeys on this account');
+
+    const options = await generateAuthenticationOptions({
+      rpID: rpID(),
+      userVerification: 'preferred',
+      // ⚠️ Unlike sign-in, this ceremony names the allowed credentials. Sign-in
+      // must stay discoverable (no username, no oracle); here we already know
+      // who is asking, and constraining it stops a different account's passkey
+      // from satisfying an owner's re-auth prompt.
+      allowCredentials: creds.map((c) => ({ id: c.id, transports: (c.transports ?? []) as never })),
+    });
+    setChallenge(reply, options.challenge, me.id);
+    return options;
+  });
+
+  /** Re-auth by passkey — verify half. */
+  app.post<{ Body: ReauthPasskeyVerifyRequest }>(
+    '/admin/reauth/passkey/verify',
+    async (req, reply) => {
+      const me = req.user!;
+      const { challenge, userId } = takeChallenge(req, reply);
+      if (userId !== me.id.toString()) throw passkeyFailed();
+
+      const response = req.body?.response as unknown as AuthenticationResponseJSON | undefined;
+      if (!response?.id) throw passkeyFailed();
+
+      const rows = await db
+        .select({
+          id: webauthnCredentials.id,
+          publicKey: webauthnCredentials.publicKey,
+          signCount: webauthnCredentials.signCount,
+          transports: webauthnCredentials.transports,
+          userId: webauthnCredentials.userId,
+        })
+        .from(webauthnCredentials)
+        .where(eq(webauthnCredentials.id, response.id))
+        .limit(1);
+
+      const cred = rows[0];
+      // The credential must exist AND belong to the caller. Without the second
+      // half, anyone's passkey would satisfy the owner's re-auth prompt.
+      if (!cred || cred.userId !== me.id) throw passkeyFailed();
+
+      let verification;
+      try {
+        verification = await verifyAuthenticationResponse({
+          response,
+          expectedChallenge: challenge,
+          expectedOrigin: expectedOrigins(),
+          expectedRPID: rpID(),
+          credential: {
+            id: cred.id,
+            publicKey: new Uint8Array(cred.publicKey),
+            counter: Number(cred.signCount),
+            transports: (cred.transports ?? []) as never,
+          },
+        });
+      } catch {
+        throw passkeyFailed();
+      }
+      if (!verification.verified) throw passkeyFailed();
+
+      const stored = Number(cred.signCount);
+      const presented = verification.authenticationInfo.newCounter;
+      if ((stored > 0 || presented > 0) && presented <= stored) throw passkeyFailed();
+
+      await db
+        .update(webauthnCredentials)
+        .set({ signCount: BigInt(presented), lastUsedAt: new Date() })
+        .where(eq(webauthnCredentials.id, cred.id));
+
+      grantReauth(reply, me.id, 'passkey');
+      return { ok: true, freshSeconds: Math.ceil(REAUTH_TTL_MS / 1000) };
+    },
+  );
+
+  // ── clear a login lock (no re-auth: reversible and low-harm) ─────────────
+  app.post<{ Params: { username: string } }>('/admin/locks/:username/clear', async (req) => {
+    const me = req.user!;
+    const username = req.params.username.trim().toLowerCase();
+    const cleared = await clearFailures(username);
+    await record({
+      kind: SecurityEventKind.LockCleared,
+      username,
+      actorUserId: me.id,
+      ip: clientIp(req, env.trustedProxy),
+      userAgent: req.headers['user-agent'] ?? null,
+      data: { cleared },
+    });
+    return { ok: true, cleared };
+  });
+
+  // ── mint invites (no re-auth: creates nothing that can be taken away) ────
+  app.post<{ Body: MintInvitesRequest }>('/admin/invites', async (req) => {
+    const me = req.user!;
+    const count = Math.max(1, Math.min(10, Number(req.body?.count) || 1));
+    const codes = generateInviteCodes(count);
+    await db.insert(inviteCodes).values(codes.map((code) => ({ code, createdBy: me.id })));
+    for (const code of codes) {
+      await record({
+        kind: SecurityEventKind.InviteMinted,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+        data: { code },
+      });
+    }
+    const res: MintInvitesResponse = { codes };
+    return res;
+  });
+
+  // ── revoke an unused invite (re-auth: it is how someone gets in) ─────────
+  app.delete<{ Params: { code: string } }>(
+    '/admin/invites/:code',
+    { preHandler: requireFreshAuth },
+    async (req) => {
+      const me = req.user!;
+      const code = req.params.code.trim();
+      // ⚠️ Only UNUSED, UNREVOKED codes. A claimed code is history — revoking
+      // it would imply something about the account it created, which this does
+      // not and must not do (that is what disable is for).
+      const updated = await db
+        .update(inviteCodes)
+        .set({ revokedAt: new Date() })
+        .where(and(eq(inviteCodes.code, code), isNull(inviteCodes.usedBy), isNull(inviteCodes.revokedAt)))
+        .returning({ code: inviteCodes.code });
+      if (updated.length === 0) throw notFound('no unused invite with that code');
+
+      await record({
+        kind: SecurityEventKind.InviteRevoked,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+        data: { code },
+      });
+      return { ok: true };
+    },
+  );
+
+  // ── revoke sessions (re-auth: signs someone out of every device) ─────────
+  app.delete<{ Params: { id: string } }>(
+    '/admin/users/:id/sessions',
+    { preHandler: requireFreshAuth },
+    async (req) => {
+      const me = req.user!;
+      const userId = parseBigint(req.params.id, 'id');
+      if (userId === undefined) throw validation('id required');
+
+      const currentToken = req.cookies[SESSION_COOKIE];
+      const rows = await db
+        .select({ id: sessions.id, userId: sessions.userId })
+        .from(sessions)
+        .where(eq(sessions.userId, userId));
+
+      // ⚠️ Never revoke the caller's own current session as part of a bulk
+      // action. Locking yourself out of the console mid-incident is a real
+      // way to make a bad situation worse, and it is trivially avoidable.
+      const doomed = rows.filter((r) => r.id !== currentToken).map((r) => r.id);
+      if (doomed.length > 0) {
+        await db.delete(sessions).where(inArray(sessions.id, doomed));
+      }
+
+      const target = await db
+        .select({ username: users.username })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+
+      await record({
+        kind: SecurityEventKind.SessionRevoked,
+        userId,
+        username: target[0]?.username ?? null,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+        data: { revoked: doomed.length, keptOwnSession: rows.length !== doomed.length },
+      });
+      return { ok: true, revoked: doomed.length };
+    },
+  );
+
+  // ── disable / enable an account (re-auth: the sharpest thing here) ───────
+  app.post<{ Params: { id: string } }>(
+    '/admin/users/:id/disable',
+    { preHandler: requireFreshAuth },
+    async (req) => {
+      const me = req.user!;
+      const userId = parseBigint(req.params.id, 'id');
+      if (userId === undefined) throw validation('id required');
+
+      // ⚠️ Guarded explicitly rather than trusting nobody to try it. Disabling
+      // yourself would delete your own sessions and, if you are the only
+      // owner, make the console unreachable from inside the app entirely —
+      // recoverable only by editing the database by hand.
+      if (userId === me.id) throw forbidden('You cannot disable your own account');
+
+      const updated = await db
+        .update(users)
+        .set({ disabledAt: new Date() })
+        .where(and(eq(users.id, userId), isNull(users.disabledAt)))
+        .returning({ id: users.id, username: users.username });
+      if (updated.length === 0) throw notFound('no such enabled user');
+
+      // Sessions are deleted as cleanup; resolveSession refusing a disabled
+      // user is what actually enforces this (auth/session.ts).
+      await db.delete(sessions).where(eq(sessions.userId, userId));
+
+      await record({
+        kind: SecurityEventKind.UserDisabled,
+        userId,
+        username: updated[0]!.username,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return { ok: true };
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    '/admin/users/:id/enable',
+    { preHandler: requireFreshAuth },
+    async (req) => {
+      const me = req.user!;
+      const userId = parseBigint(req.params.id, 'id');
+      if (userId === undefined) throw validation('id required');
+
+      const updated = await db
+        .update(users)
+        .set({ disabledAt: null })
+        .where(eq(users.id, userId))
+        .returning({ id: users.id, username: users.username });
+      if (updated.length === 0) throw notFound('no such user');
+
+      await record({
+        kind: SecurityEventKind.UserEnabled,
+        userId,
+        username: updated[0]!.username,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+      });
+      return { ok: true };
+    },
+  );
 }
 
 /**

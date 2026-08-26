@@ -88,6 +88,7 @@ export async function resolveSession(
       username: users.username,
       displayName: users.displayName,
       avatarKey: users.avatarKey,
+      disabledAt: users.disabledAt,
     })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
@@ -99,6 +100,19 @@ export async function resolveSession(
 
   if (row.expiresAt.getTime() <= Date.now()) {
     // Expired — clean it up.
+    await db.delete(sessions).where(eq(sessions.id, token));
+    reply.clearCookie(SESSION_COOKIE, { path: '/', domain: env.cookieDomain });
+    return null;
+  }
+
+  // Disabled accounts resolve to nothing (docs/ADMIN_CONSOLE.md §7). ⚠️ The
+  // check belongs HERE rather than only on the login routes: sessions last 30
+  // rolling days, so a login-only check would let an already-signed-in user
+  // keep working for a month after being disabled. Disabling also deletes
+  // their session rows, but this is the guard that makes that a cleanup step
+  // rather than the whole mechanism — a row written between the two, or a
+  // socket holding a token, still dies here.
+  if (row.disabledAt) {
     await db.delete(sessions).where(eq(sessions.id, token));
     reply.clearCookie(SESSION_COOKIE, { path: '/', domain: env.cookieDomain });
     return null;

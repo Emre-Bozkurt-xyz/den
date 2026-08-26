@@ -29,6 +29,7 @@ import type {
   RegistrationResponseJSON,
 } from '@simplewebauthn/server';
 import {
+  ErrorCode,
   PasskeyLimits,
   type AuthResponse,
   type PasskeyCredential,
@@ -57,7 +58,7 @@ import { SecurityEventKind, isUnfamiliarUserAgent, record } from '../admin/event
 import { clientIp } from '../auth/clientIp.js';
 import { env } from '../env.js';
 import { toPublicUser } from '../mappers.js';
-import { notFound, validation } from '../errors.js';
+import { AppError, notFound, validation } from '../errors.js';
 
 /** Same coarse flood backstop the credential routes use (docs/AUTH_HARDENING.md
  *  §2.3). These are unauthed endpoints that do real work; nothing more is
@@ -232,6 +233,7 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
           username: users.username,
           displayName: users.displayName,
           avatarKey: users.avatarKey,
+          disabledAt: users.disabledAt,
         })
         .from(webauthnCredentials)
         .innerJoin(users, eq(users.id, webauthnCredentials.userId))
@@ -261,6 +263,13 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
         throw passkeyFailed();
       }
       if (!verification.verified) throw passkeyFailed();
+
+      // Same rule as the password path: a disabled account cannot sign in, and
+      // the check comes AFTER the assertion is verified so it can never be used
+      // to probe which credentials map to disabled accounts.
+      if (cred.disabledAt) {
+        throw new AppError(403, ErrorCode.AccountDisabled, 'This account has been disabled');
+      }
 
       // ⚠️ Signature-counter check (docs/PASSKEYS.md §5). Most platform
       // authenticators (Apple, Google) always report 0 — that is normal and

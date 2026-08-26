@@ -1,12 +1,11 @@
 # Admin / security console — plan
 
-Status: **read-only half BUILT** 2026-08-26 (migration 016), verified against
-the compose stack — see §10. Passkeys shipped first, as §1 requires.
+Status: **BUILT** 2026-08-26 (migration 016) — both halves. Verified against
+the compose stack with a 55-check probe; see §10. Passkeys shipped first, as
+§1 requires.
 
-**Still unbuilt: the state-changing half** (build steps 4-5) — unlock, revoke
-session, revoke invite, mint invite, disable/enable, and the re-auth gate.
-Those columns exist (`users.disabled_at`, `invite_codes.revoked_at`) and the
-event kinds are defined, but nothing writes them yet.
+⚠️ **Never opened in a browser.** The probe exercises the API. The React
+screen, the re-auth prompt and the layout on a phone are all unverified.
 
 Shape settled by the owner: **owner-only**, **inside the PWA** (a section of
 Settings, not a separate app or subdomain).
@@ -289,10 +288,39 @@ probe rather than a code review.
 Gates: `npm run typecheck` and `npm run lint` clean (no new warnings);
 `npm run test` — 98 tests, 98 pass.
 
+### The state-changing half — verified 2026-08-26
+
+| Area | Checks |
+|---|---|
+| Gate | disable and revoke-sessions without fresh auth → `401 reauth_required` · **clearing a lock and minting invites deliberately do NOT require it** · wrong password refused · right password accepted · **the owner's re-auth marker does not authorize a different account** |
+| Actions | sessions revoked and the target's session dies · **the owner's own session survives** · unused invite revoked · revoking twice → 404, not a silent success · **a revoked invite cannot be claimed** |
+| Disable | the owner cannot disable themselves · a disabled account cannot sign in with the *right* password · a *wrong* password on a disabled account still says `invalid_credentials` (no enumeration) · re-enable restores sign-in |
+| Audit | all six owner actions recorded with the acting username |
+
+**The bug this found, and it was a real one.** Console revocation shipped
+marking `invite_codes.revoked_at`, but the registration route's claim query
+only checked `used_by IS NULL`. A revoked invite still created an account,
+while the console displayed it as "Revoked". **A control that reports success
+and does nothing is worse than one that was never built, because it stops
+anyone from looking.** The claim now requires `revoked_at IS NULL` too, and
+the probe asserts a revoked code is unclaimable rather than merely that the
+API returned 200.
+
+Two design points the checks pin down deliberately:
+
+- **Low-harm actions are exempt from re-auth on purpose.** Clearing a lock and
+  minting an invite ask for no confirmation. A prompt on every action trains
+  the owner to click through it, which is how a confirmation step stops being
+  a control. The gate covers the irreversible ones only.
+- **Bulk session revocation never touches the caller's own current session.**
+  Locking yourself out of the console mid-incident is a real way to make a bad
+  situation worse and is trivially avoidable.
+
 **Not yet verified:** the console has never been opened in a browser — the
-probe exercises the API, not the React screen. And nothing here has been seen
-on iOS; the layout note in §8 (stacked cards, never sideways-scrolling tables)
-is unconfirmed on a real phone.
+probe exercises the API, not the React screen, the re-auth prompt, or the
+`useGuardedAction` retry-after-confirm path. And nothing here has been seen on
+a phone; the §8 layout note (stacked cards, never sideways-scrolling tables) is
+unconfirmed on a real device.
 
 ### Original plan for the state-changing half
 

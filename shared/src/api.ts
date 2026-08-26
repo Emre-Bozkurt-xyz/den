@@ -45,6 +45,11 @@ export const ErrorCode = {
   /** Refusing to remove a user's last remaining way to sign in
    *  (docs/PASSKEYS.md §9 — the ≥1-login-method rule). */
   LastLoginMethod: 'last_login_method',
+  /** The caller IS allowed to do this, but must prove who they are again first
+   *  (docs/ADMIN_CONSOLE.md §6). Distinct from `unauthorized` so the client can
+   *  show a re-auth prompt rather than an error, and from `forbidden` because
+   *  retrying after confirming will succeed. */
+  ReauthRequired: 'reauth_required',
   /** A feature is switched off by server configuration, not by permissions —
    *  e.g. Vault linking with no `VAULT_TOKEN_ENC_KEY` set. Distinct from
    *  `forbidden` (the caller could never fix that by retrying) and from
@@ -335,6 +340,32 @@ export interface AdminPushHealthResponse {
   /** Server-side: whether VAPID is configured at all. A zero everywhere with
    *  this false means "push is switched off", not "everyone unsubscribed". */
   pushConfigured: boolean;
+}
+
+/** Result of `GET /admin/reauth` — how much proof-of-identity freshness is
+ *  left, and which methods this account can use to refresh it. */
+export interface ReauthStatus {
+  freshSeconds: number;
+  canUsePasskey: boolean;
+  canUsePassword: boolean;
+}
+
+export interface ReauthPasswordRequest {
+  password: string;
+}
+
+export interface ReauthPasskeyVerifyRequest {
+  response: Record<string, unknown>;
+}
+
+/** Body of `POST /admin/invites`. */
+export interface MintInvitesRequest {
+  /** How many codes to mint. Server clamps. */
+  count?: number;
+}
+
+export interface MintInvitesResponse {
+  codes: string[];
 }
 
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────

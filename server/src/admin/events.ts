@@ -33,6 +33,8 @@ export const SecurityEventKind = {
   InviteClaimed: 'invite.claimed',
   /** Owner action: a lock was cleared by hand. */
   LockCleared: 'lock.cleared',
+  /** Owner action: invite codes were minted from the console. */
+  InviteMinted: 'invite.minted',
   /** Owner action: an unused invite was revoked. */
   InviteRevoked: 'invite.revoked',
   /** Owner action: a session was revoked. */

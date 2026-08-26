@@ -204,11 +204,25 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     // Transaction: claim invite (single-use) + create user, atomically.
     const user = await db.transaction(async (tx) => {
-      // Claim the invite only if it exists AND is unused — the WHERE guards the race.
+      // Claim the invite only if it exists, is unused AND is not revoked — the
+      // WHERE guards the race.
+      //
+      // ⚠️ `revoked_at IS NULL` is load-bearing and was missing when console
+      // revocation shipped (migration 016): the code checked only `used_by`,
+      // so a revoked invite still registered an account while the admin UI
+      // cheerfully displayed it as "Revoked". A control that reports success
+      // and does nothing is worse than one that was never built, because it
+      // stops anyone looking. Caught by scripts/probe-admin.ts §8.
       const claimed = await tx
         .update(inviteCodes)
         .set({ usedAt: sql`now()` })
-        .where(and(eq(inviteCodes.code, inviteCode), isNull(inviteCodes.usedBy)))
+        .where(
+          and(
+            eq(inviteCodes.code, inviteCode),
+            isNull(inviteCodes.usedBy),
+            isNull(inviteCodes.revokedAt),
+          ),
+        )
         .returning({ code: inviteCodes.code });
       if (claimed.length === 0) {
         throw new AppError(400, ErrorCode.InvalidInvite, 'invite code is invalid or already used');
@@ -282,6 +296,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         displayName: users.displayName,
         avatarKey: users.avatarKey,
         passwordHash: users.passwordHash,
+        disabledAt: users.disabledAt,
       })
       .from(users)
       .where(eq(users.username, username))
@@ -330,6 +345,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       throw new AppError(401, ErrorCode.InvalidCredentials, 'incorrect username or password');
+    }
+
+    // ⚠️ Checked AFTER the password verify, deliberately: answering "that
+    // account is disabled" before checking credentials would tell a stranger
+    // which usernames exist and which are disabled, undoing the no-enumeration
+    // work above. You must first prove the account is yours.
+    if (row.disabledAt) {
+      throw new AppError(403, ErrorCode.AccountDisabled, 'This account has been disabled');
     }
 
     // Proving who you are resets your own counter — so a burst of wrong

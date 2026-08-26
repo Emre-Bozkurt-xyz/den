@@ -219,6 +219,95 @@ async function main(): Promise<void> {
   const locked = (locks.body?.locks ?? []).find((l: { username: string }) => l.username === plainName);
   check('the lock shows in the locks panel', locked?.locked === true, JSON.stringify(locked ?? null));
 
+  // ── 7. the re-auth gate (docs/ADMIN_CONSOLE.md §6) ──────────────────────
+  //
+  // A valid session is enough to READ. It is deliberately not enough to do
+  // anything irreversible — that is the whole point of the gate, so it is
+  // checked before any of the destructive actions are exercised.
+  console.log('\n7. destructive actions require fresh proof of identity');
+  const plainIdStr = plainId.toString();
+
+  const noFresh = await owner.call(`/api/admin/users/${plainIdStr}/disable`, { method: 'POST' });
+  check('disable without re-auth → reauth_required', noFresh.status === 401 && noFresh.code === 'reauth_required', `${noFresh.status} ${noFresh.code}`);
+  const noFresh2 = await owner.call(`/api/admin/users/${plainIdStr}/sessions`, { method: 'DELETE' });
+  check('revoke-sessions without re-auth → reauth_required', noFresh2.status === 401 && noFresh2.code === 'reauth_required', `${noFresh2.status} ${noFresh2.code}`);
+
+  // Low-harm actions deliberately do NOT demand it — a prompt on every unlock
+  // trains the owner to click through, which is how a control stops working.
+  const unlock = await owner.call(`/api/admin/locks/${plainName}/clear`, { method: 'POST' });
+  check('clearing a lock needs no re-auth', unlock.status === 200, `${unlock.status} ${unlock.code ?? ''}`);
+  const mint = await owner.call('/api/admin/invites', { body: { count: 2 } });
+  check('minting invites needs no re-auth', mint.status === 200 && mint.body?.codes?.length === 2, `${mint.status}`);
+
+  const badPw = await owner.call('/api/admin/reauth/password', { body: { password: 'not-my-password' } });
+  check('re-auth with a wrong password is refused', badPw.status === 401 && badPw.code === 'invalid_credentials', `${badPw.status} ${badPw.code}`);
+
+  const goodPw = await owner.call('/api/admin/reauth/password', { body: { password } });
+  check('re-auth with the right password succeeds', goodPw.status === 200, `${goodPw.status} ${goodPw.code ?? ''}`);
+
+  // ⚠️ A marker minted by the owner must not authorize the OTHER account, even
+  // though the cookie is validly signed. The subject check is what stops that.
+  const stolen = await plain.call(`/api/admin/users/${plainIdStr}/disable`, { method: 'POST' });
+  check("another user cannot ride the owner's re-auth", stolen.status === 403, `${stolen.status} ${stolen.code}`);
+
+  // ── 8. the actions themselves ───────────────────────────────────────────
+  console.log('\n8. actions, now that identity is fresh');
+
+  const revoked = await owner.call(`/api/admin/users/${plainIdStr}/sessions`, { method: 'DELETE' });
+  check('sessions revoked', revoked.status === 200, `${revoked.status} ${revoked.code ?? ''}`);
+  const deadSession = await plain.call('/api/me');
+  check("the other user's session is dead", deadSession.status === 401, `${deadSession.status}`);
+
+  const ownerStillIn = await owner.call('/api/me');
+  check('the owner is still signed in', ownerStillIn.status === 200, `${ownerStillIn.status}`);
+
+  const revokeInvite = await owner.call(`/api/admin/invites/${mint.body.codes[0]}`, { method: 'DELETE' });
+  check('an unused invite can be revoked', revokeInvite.status === 200, `${revokeInvite.status} ${revokeInvite.code ?? ''}`);
+  const revokeAgain = await owner.call(`/api/admin/invites/${mint.body.codes[0]}`, { method: 'DELETE' });
+  check('revoking it twice is a 404, not a silent success', revokeAgain.status === 404, `${revokeAgain.status}`);
+
+  // A revoked code must not be claimable.
+  const claimRevoked = await new Session().call('/api/auth/register', {
+    body: { username: `rev-${rnd()}`, password, displayName: 'x', inviteCode: mint.body.codes[0] },
+  });
+  check('a revoked invite cannot be claimed', claimRevoked.status === 400 && claimRevoked.code === 'invalid_invite', `${claimRevoked.status} ${claimRevoked.code}`);
+
+  // ── 9. disable (docs/ADMIN_CONSOLE.md §7) ───────────────────────────────
+  console.log('\n9. disabling an account');
+  const selfDisable = await owner.call(`/api/admin/users/${meAfter.body.id}/disable`, { method: 'POST' });
+  check('the owner cannot disable themselves', selfDisable.status === 403, `${selfDisable.status} ${selfDisable.code}`);
+
+  const disabled = await owner.call(`/api/admin/users/${plainIdStr}/disable`, { method: 'POST' });
+  check('the other account is disabled', disabled.status === 200, `${disabled.status} ${disabled.code ?? ''}`);
+
+  const loginDisabled = await new Session().call('/api/auth/login', {
+    body: { username: plainName, password },
+  });
+  check('a disabled account cannot sign in with the right password', loginDisabled.status === 403 && loginDisabled.code === 'account_disabled', `${loginDisabled.status} ${loginDisabled.code}`);
+
+  const wrongPwDisabled = await new Session().call('/api/auth/login', {
+    body: { username: plainName, password: 'wrong-password-here' },
+  });
+  check(
+    'a wrong password on a disabled account still says invalid_credentials (no enumeration)',
+    wrongPwDisabled.status === 401 && wrongPwDisabled.code === 'invalid_credentials',
+    `${wrongPwDisabled.status} ${wrongPwDisabled.code}`,
+  );
+
+  const reEnabled = await owner.call(`/api/admin/users/${plainIdStr}/enable`, { method: 'POST' });
+  check('the account can be re-enabled', reEnabled.status === 200, `${reEnabled.status}`);
+  const loginAgain = await new Session().call('/api/auth/login', { body: { username: plainName, password } });
+  check('and can sign in again', loginAgain.status === 200, `${loginAgain.status} ${loginAgain.code ?? ''}`);
+
+  // ── 10. every action is attributed ──────────────────────────────────────
+  console.log('\n10. the audit trail names who did what');
+  const audit = await owner.call('/api/admin/events');
+  const actioned = (audit.body?.events ?? []).filter((e: { actorUsername: string | null }) => e.actorUsername);
+  for (const kind of ['lock.cleared', 'invite.minted', 'invite.revoked', 'session.revoked', 'user.disabled', 'user.enabled']) {
+    const found = actioned.find((e: { kind: string }) => e.kind === kind);
+    check(`${kind} recorded with an actor`, found?.actorUsername === ownerName, found ? String(found.actorUsername) : 'missing');
+  }
+
   console.log(`\n${failures === 0 ? '✓ all checks passed' : `✗ ${failures} check(s) failed`}\n`);
   await closeDb();
   if (failures > 0) process.exitCode = 1;
