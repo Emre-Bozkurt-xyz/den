@@ -74,14 +74,31 @@ host fails loudly and changes nothing.
 
   ```bash
   cd /opt/apps/den/repo
+  git pull                                      # see the warning below
   C="docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml"
 
+  $C up -d --build api                          # rebuild from the checkout
   $C exec api npm -w server run db:migrate      # migrations
   $C exec api npm run invite create 1           # mint an invite
   $C exec api npm run owner list                # who is an owner
-  $C exec api npm run owner grant <username>    # make someone an owner
   $C exec api npm run auth:unlock status        # live login locks
+
+  USER=emre                                     # no angle brackets - see below
+  $C exec api npm run owner grant "$USER"
   ```
+
+  ⚠️ **`git pull` first, and rebuild.** The image is built from whatever is in
+  this checkout — `up -d --build` rebuilding successfully says nothing about
+  the code being current. A stale checkout fails in two ways that look
+  unrelated: `npm error Missing script: "owner"` (the script isn't in that
+  commit's `package.json`) and a migrate run that reports only "schema
+  'drizzle' already exists, skipping" — which is drizzle's own bookkeeping, not
+  your migration, so it looks like success while applying nothing.
+
+  ⚠️ **Never paste `<placeholder>` into bash.** `<` is input redirection and a
+  bare `>` is a syntax error, so `npm run owner grant <username>` dies with
+  `syntax error near unexpected token 'newline'` before npm is even reached.
+  Every placeholder in this file is a shell variable for that reason.
 
   ⚠️ **`--env-file` is not optional, even for `exec`.** `docker-compose.yml`
   interpolates `${SESSION_SECRET:?...}`, so compose refuses to parse the file
@@ -98,6 +115,15 @@ host fails loudly and changes nothing.
   found" before the script runs, so every admin CLI would be host-only. Any new
   admin CLI must use the `-if-exists` form or it will work in exactly one of
   the two places.
+- **Check what actually shipped** when something behaves like it wasn't
+  deployed:
+
+  ```bash
+  git -C /opt/apps/den/repo log --oneline -1     # what the image was built from
+  $C exec api sh -c 'npm run 2>&1 | head -30'    # scripts present in the image
+  $C exec -T postgres psql -U den -d den -c '\d security_events'
+  ```
+
 - **`npm run owner grant` is the ONLY way to make someone an owner**
   (docs/ADMIN_CONSOLE.md §4). There is no API route and no in-app toggle, by
   design — privilege is conferred from the host shell, so a fully compromised
