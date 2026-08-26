@@ -46,6 +46,7 @@ import { useKeyboardInset } from '../hooks/useKeyboardInset';
 import { useMediaTags } from '../hooks/useMediaTags';
 import { useGifFavoriteActions, type GifFavoriteApi } from '../hooks/useGifFavorites';
 import { useBackHandler } from '../lib/backStack';
+import { useTypers } from '../lib/typing';
 import { AlbumCard } from './AlbumCard';
 import { AttachmentSheet } from './AttachmentSheet';
 import { Composer } from './Composer';
@@ -216,8 +217,9 @@ export function ChatView({
   onAttachmentsChange: (attachments: StagedAttachment[]) => void;
 }) {
   const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useMessages(chat.id);
-  const { sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat } = useRealtime();
+  const { sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat, sendTyping } = useRealtime();
   const receipts = useReceipts(chat.id);
+  const typers = useTypers(chat.id);
   const qc = useQueryClient();
   const isMobile = useIsMobile();
   const [draft, setDraftState] = useState(initialDraft);
@@ -226,6 +228,15 @@ export function ChatView({
   function setDraft(value: string) {
     setDraftState(value);
     onDraftChange(value);
+    // docs/TYPING_INDICATORS.md §3. Every draft edit routes through here, so
+    // this is the one hook point — the throttle lives in the provider, so
+    // calling it per keystroke is intended, not wasteful.
+    //
+    // ⚠️ Clearing the box is a STOP, not a start: `setDraft('')` runs on send,
+    // on cancelling an edit and on cancelling a reply, and reporting "typing"
+    // there would leave the indicator up for the full expiry after someone
+    // pressed enter.
+    sendTyping(chat.id, value.length > 0);
   }
   // Search panel state (docs/MESSAGE_SEARCH.md §4.1) — same mirror-into-cache
   // shape as `draft`/`setDraft` above, for the same remount-survival reason.
@@ -1774,6 +1785,8 @@ export function ChatView({
         </div>
       )}
 
+      <TypingLine typers={typers} chat={chat} />
+
       {editing ? (
         <EditingBar message={editing} onCancel={cancelEdit} />
       ) : (
@@ -2695,5 +2708,36 @@ function QuotedBlock({
         </p>
       </div>
     </button>
+  );
+}
+
+/**
+ * "Alex is typing…" (docs/TYPING_INDICATORS.md §3).
+ *
+ * ⚠️ Fixed height whether or not anyone is typing. The alternative — render
+ * nothing when idle — makes the message list jump by a line every time someone
+ * starts or stops, right under the reader's thumb. That is the same rule the
+ * edited-indicator work settled on, for the same reason.
+ *
+ * Names come from `chat.members`, already in the client cache; a typing frame
+ * never triggers a fetch.
+ */
+function TypingLine({ typers, chat }: { typers: string[]; chat: ChatSummary }) {
+  const names = typers
+    .map((id) => chat.members.find((m) => m.id === id)?.displayName)
+    .filter((n): n is string => Boolean(n));
+
+  let text = '';
+  if (names.length === 1) text = `${names[0]} is typing…`;
+  else if (names.length === 2) text = `${names[0]} and ${names[1]} are typing…`;
+  else if (names.length > 2) text = `${names.length} people are typing…`;
+
+  return (
+    <div
+      className="h-4 shrink-0 truncate px-4 text-xs text-text-secondary"
+      aria-live="polite"
+    >
+      {text}
+    </div>
   );
 }

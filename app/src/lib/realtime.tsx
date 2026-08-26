@@ -22,6 +22,8 @@ import {
   type ReceiptsResponse,
   type ReplyPreview,
   type TagAddedPayload,
+  type TypingStatePayload,
+  TypingTimings,
 } from '@den/shared';
 import { fetchMessages } from './chats';
 import { mergeNewestPage, type MessagesCache } from './messageSync';
@@ -51,6 +53,8 @@ export function isFailedId(id: string): boolean {
 export function isLocalId(id: string): boolean {
   return isPendingId(id) || isFailedId(id);
 }
+
+import { applyTypingState, clearAllTyping } from './typing';
 
 interface RealtimeCtx {
   connected: boolean;
@@ -94,6 +98,16 @@ interface RealtimeCtx {
    * live socket silently suppressed its own notifications.
    */
   setActiveChat: (chatId: string | null) => void;
+  /**
+   * Report that the user is (or has stopped) typing in `chatId`
+   * (docs/TYPING_INDICATORS.md §3).
+   *
+   * ⚠️ Call this on every keystroke — the throttling lives HERE, not in the
+   * caller, so there is exactly one place that decides the wire rate and it
+   * cannot drift from `TypingTimings.serverExpiryMs`. `typing: false` is never
+   * throttled: a stop must go out immediately or the indicator lingers.
+   */
+  sendTyping: (chatId: string, typing: boolean) => void;
 }
 
 const Ctx = createContext<RealtimeCtx>({
@@ -105,6 +119,7 @@ const Ctx = createContext<RealtimeCtx>({
   notePendingReaction: () => {},
   clearPendingReaction: () => {},
   setActiveChat: () => {},
+  sendTyping: () => {},
 });
 
 export function useRealtime(): RealtimeCtx {
@@ -325,6 +340,34 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
    * Must be re-sent on every reconnect: presence lives on the *socket*, so a
    * new socket starts with none.
    */
+  /**
+   * chatId → when we last put a `typing: true` on the wire for it. A ref, not
+   * state: throttling must not re-render anything.
+   */
+  const typingSentAtRef = useRef<Map<string, number>>(new Map());
+
+  function sendTyping(chatId: string, typing: boolean): void {
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+
+    const sentAt = typingSentAtRef.current;
+    if (typing) {
+      const last = sentAt.get(chatId) ?? 0;
+      // Refresh at half the server's expiry, so one dropped frame can't blink
+      // the indicator off mid-sentence.
+      if (Date.now() - last < TypingTimings.refreshMs) return;
+      sentAt.set(chatId, Date.now());
+    } else {
+      // A stop is never throttled and always clears the throttle window —
+      // otherwise the next keystroke after a send would be swallowed and the
+      // indicator wouldn't come back.
+      if (!sentAt.has(chatId)) return;
+      sentAt.delete(chatId);
+    }
+
+    socket.emit('ws', makeEnvelope(WsType.TypingUpdate, { chatId, typing }));
+  }
+
   function sendPresence(): void {
     const socket = socketRef.current;
     if (!socket?.connected) return;
@@ -468,7 +511,14 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       sendPresence();
       resync();
     });
-    socket.on('disconnect', () => setConnected(false));
+    socket.on('disconnect', () => {
+      setConnected(false);
+      // Typing state is per-socket on the server, so everything we believe
+      // about it dies with the connection. Keeping it would leave indicators
+      // frozen on screen for the client expiry while the truth is already
+      // gone (docs/TYPING_INDICATORS.md §2).
+      clearAllTyping();
+    });
 
     socket.on('ws', (frame: WsEnvelope) => {
       switch (frame.type) {
@@ -530,6 +580,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           );
           void qc.invalidateQueries({ queryKey: ['chats'] });
           sendDeliveredAck([{ chatId: message.chatId, messageId: message.id }]);
+          break;
+        }
+        case WsType.TypingState: {
+          const p = frame.payload as TypingStatePayload;
+          applyTypingState(p.chatId, p.userId, p.typing === true);
           break;
         }
         case WsType.MessageDelivered:
@@ -819,7 +874,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ connected, sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat }}
+      value={{ connected, sendMessage, sendGif, retrySend, discardFailed, notePendingReaction, clearPendingReaction, setActiveChat, sendTyping }}
     >
       {children}
     </Ctx.Provider>

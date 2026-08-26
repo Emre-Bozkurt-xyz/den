@@ -65,6 +65,14 @@ export const WsType = {
   // reactions (post-MVP)
   ReactionAdded: 'reaction.added',
   ReactionRemoved: 'reaction.removed',
+  // typing (post-MVP, docs/TYPING_INDICATORS.md — roadmap item 3's other half)
+  /** Client → server: "I am / am no longer typing in this chat." Throttled by
+   *  the client to one frame per ~3s, never one per keystroke. */
+  TypingUpdate: 'typing.update',
+  /** Server → `chat:{id}` minus the sender: someone's typing state changed.
+   *  Also emitted by the SERVER on expiry, so a client that dies mid-word
+   *  cannot leave the indicator stuck on for everyone else. */
+  TypingState: 'typing.state',
   // receipts (post-MVP, docs/RECEIPTS.md)
   DeliveredAck: 'delivered.ack',
   MessageDelivered: 'message.delivered',
@@ -72,6 +80,37 @@ export const WsType = {
 } as const;
 
 export type WsTypeName = (typeof WsType)[keyof typeof WsType];
+
+// ─── typing (post-MVP, docs/TYPING_INDICATORS.md) ───────────────────────────
+
+/** Client → server. `chatId` is client-supplied, so the server MUST
+ *  `assertMember` before acting on it (hard invariant 1). */
+export interface TypingUpdatePayload {
+  chatId: string;
+  typing: boolean;
+}
+
+/** Server → the chat room, minus the person typing. */
+export interface TypingStatePayload {
+  chatId: string;
+  userId: string;
+  typing: boolean;
+}
+
+/**
+ * Timings, shared so the two sides cannot drift apart — and they must not.
+ * The client refresh has to stay comfortably below the server expiry or the
+ * indicator blinks off between keystrokes; the client's own floor has to stay
+ * above it so a dropped stop frame still resolves.
+ */
+export const TypingTimings = {
+  /** Client re-sends `typing: true` at most this often while still typing. */
+  refreshMs: 3_000,
+  /** Server emits `typing: false` itself if no refresh arrives within this. */
+  serverExpiryMs: 6_000,
+  /** Receiving client drops an indicator it has not heard about in this long. */
+  clientExpiryMs: 8_000,
+} as const;
 
 // ─── presence (post-MVP, docs/NOTIFICATIONS.md §2.1) ────────────────────────
 

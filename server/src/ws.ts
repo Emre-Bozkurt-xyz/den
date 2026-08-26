@@ -35,6 +35,7 @@ import {
   type DeliveredAckPayload,
   type MessageSendPayload,
   type PresenceUpdatePayload,
+  type TypingUpdatePayload,
   type Message as MessageDto,
 } from '@den/shared';
 import { env, gifsEnabled } from './env.js';
@@ -49,6 +50,7 @@ import { AppError, unavailable } from './errors.js';
 import { isValidGifSlug } from './gifs/klipy.js';
 import { aspectHint } from './aspectHint.js';
 import { chatRoom, userRoom } from './realtime/rooms.js';
+import { clearSocket, clearTyping, setTyping } from './realtime/typing.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -130,15 +132,98 @@ export function attachWs(app: FastifyInstance): IOServer {
         case WsType.PresenceUpdate:
           void handlePresenceUpdate(socket, userId, frame as WsEnvelope<string, PresenceUpdatePayload>);
           break;
+        case WsType.TypingUpdate:
+          void handleTypingUpdate(socket, userId, frame as WsEnvelope<string, TypingUpdatePayload>);
+          break;
         default:
           // Unknown types are ignored — real handlers land per-stage.
           break;
+      }
+    });
+
+    // ⚠️ Announce the stops on disconnect (docs/TYPING_INDICATORS.md §2,
+    // defence #2). Without this a clean tab close leaves "X is typing…" up
+    // for everyone until the server-side expiry fires — correct eventually,
+    // but visibly wrong for six seconds every single time someone closes the
+    // app mid-word, which is often.
+    socket.on('disconnect', () => {
+      for (const chatId of clearSocket(socket.id)) {
+        emitTypingState(socket, chatId, userId, false);
       }
     });
   });
 
   app.decorate('io', io);
   return io;
+}
+
+
+/**
+ * Fan a typing state to the chat room, **excluding the socket it came from**.
+ *
+ * ⚠️ `socket.to(room)`, never `io.to(room)`. The difference is not just wasted
+ * traffic: the client keys typers by userId and resolves names from
+ * `chat.members`, so an echo back to the sender renders as *"You are typing…"*
+ * on your own screen. Written with `io.to()` first and caught by
+ * scripts/probe-typing.ts §1, which is exactly the check that exists for it.
+ *
+ * Also correct on the expiry and disconnect paths: the socket is gone by then,
+ * so excluding it is a no-op, and the person who was typing has no use for
+ * their own stop either.
+ */
+function emitTypingState(socket: Socket, chatId: string, userId: bigint, typing: boolean): void {
+  socket.to(chatRoom(BigInt(chatId))).emit(
+    'ws',
+    makeEnvelope(WsType.TypingState, { chatId, userId: userId.toString(), typing }),
+  );
+}
+
+/**
+ * Client → server typing state (docs/TYPING_INDICATORS.md §1).
+ *
+ * ⚠️ `assertMember` is not optional here. `chatId` arrives from the client, so
+ * without it anyone could both broadcast into and — via the echo — learn about
+ * activity in a chat they are not part of. Hard invariant 1 governs WS frames
+ * exactly as it governs REST routes.
+ *
+ * Broadcasts only on an actual *transition*. The client refreshes every ~3s
+ * while someone keeps typing, and re-fanning that to every member each time
+ * would turn a cosmetic feature into steady per-member traffic for no added
+ * information.
+ */
+async function handleTypingUpdate(
+  socket: Socket,
+  userId: bigint,
+  frame: WsEnvelope<string, TypingUpdatePayload>,
+): Promise<void> {
+  const payload = frame.payload;
+  const rawChatId = typeof payload?.chatId === 'string' ? payload.chatId : null;
+  if (!rawChatId) return;
+
+  let chatId: bigint;
+  try {
+    chatId = BigInt(rawChatId);
+  } catch {
+    return; // garbage id — ignore silently, same as a malformed presence claim
+  }
+
+  try {
+    await assertMember(userId, chatId);
+  } catch {
+    return; // not a member: no echo, no error frame, nothing to learn from
+  }
+
+  const key = chatId.toString();
+  if (payload?.typing === true) {
+    // The expiry callback is the server announcing the stop on behalf of a
+    // client that may no longer exist — the defence that does not depend on
+    // anyone being alive to send `typing: false`.
+    const isNew = setTyping(socket.id, key, () => emitTypingState(socket, key, userId, false));
+    if (isNew) emitTypingState(socket, key, userId, true);
+  } else {
+    const had = clearTyping(socket.id, key);
+    if (had) emitTypingState(socket, key, userId, false);
+  }
 }
 
 async function handleMessageSend(
