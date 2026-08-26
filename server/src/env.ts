@@ -4,6 +4,7 @@
  */
 
 import { loadDotenv } from './env-file.js';
+import { parseIpStrategy } from './auth/clientIp.js';
 
 // Populate process.env from the root .env for local runs before we read it.
 // No-op under Docker/prod (compose injects env). This must run before the
@@ -41,6 +42,18 @@ export const env = Object.freeze({
     ? required('SESSION_SECRET')
     : optional('SESSION_SECRET', 'dev-insecure-session-secret-change-me'),
   cookieDomain: optional('COOKIE_DOMAIN') || undefined,
+
+  // How to identify the calling client (docs/AUTH_HARDENING.md §2.1).
+  //   none       — the socket peer. The only value that cannot be forged.
+  //   cloudflare — CF-Connecting-IP, when Cloudflare reaches the origin intact.
+  //   xff        — the RIGHTMOST X-Forwarded-For entry (one trusted proxy).
+  // Default `none` deliberately: as of 2026-08-26 the real client IP does not
+  // survive Den's Cloudflare → VPS → frp → Caddy chain at all, so any other
+  // value would be a guess. `GET /api/debug/client-ip` settles it — see §2.5.
+  trustedProxy: parseIpStrategy(optional('TRUSTED_PROXY', 'none')),
+  // Fastify's own req.ip/protocol rewriting. Was hardcoded `true` (= believe
+  // the leftmost, client-supplied XFF entry); now off unless asked for.
+  trustProxy: optional('TRUST_PROXY', 'false') === 'true',
 
   // Web Push (VAPID). Optional at boot so the server still starts before keys
   // are generated; the push routes check presence and 503 if unset.

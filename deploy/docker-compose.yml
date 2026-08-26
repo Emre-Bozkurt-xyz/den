@@ -92,6 +92,10 @@ services:
       # host-only cookie, which is what local dev needs. Real prod .env always
       # sets this explicitly (see .env.example), so production is unaffected.
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+      # Client-address resolution (docs/AUTH_HARDENING.md §2.1). Defaults are
+      # the unforgeable ones; see .env.example before changing either.
+      TRUSTED_PROXY: ${TRUSTED_PROXY:-none}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY:-}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:-}
       VAPID_SUBJECT: ${VAPID_SUBJECT:-mailto:admin@ems-place.com}

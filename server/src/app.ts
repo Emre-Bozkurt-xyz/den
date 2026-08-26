@@ -10,8 +10,10 @@ import multipart from '@fastify/multipart';
 import { ErrorCode, type ApiError } from '@den/shared';
 import { env } from './env.js';
 import { AppError } from './errors.js';
+import { clientIp } from './auth/clientIp.js';
 import { healthRoutes } from './routes/health.js';
 import { authRoutes } from './routes/auth.js';
+import { passkeyRoutes } from './routes/passkeys.js';
 import { friendRoutes } from './routes/friends.js';
 import { chatRoutes } from './routes/chats.js';
 import { pushRoutes } from './routes/push.js';
@@ -21,6 +23,7 @@ import { galleryRoutes } from './routes/gallery.js';
 import { voicePocRoutes } from './routes/voice-poc.js';
 import { integrationsVaultRoutes } from './routes/integrations-vault.js';
 import { stageRoutes } from './routes/stage.js';
+import { debugRoutes } from './routes/debug.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -31,7 +34,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     // the voice PoC's small uploads. Media proper never transits here (§ hard
     // invariant 2) — this limit only guards the throwaway PoC endpoint.
     bodyLimit: 30 * 1024 * 1024,
-    trustProxy: true,
+    // ⚠️ Was hardcoded `true`, which tells Fastify to read req.ip from the
+    // LEFTMOST X-Forwarded-For entry — a value the caller writes. Every
+    // IP-keyed limit in the app inherits that. Now opt-in via TRUST_PROXY,
+    // and the auth paths resolve the client through auth/clientIp.ts with an
+    // explicitly configured source instead (docs/AUTH_HARDENING.md §2.1).
+    trustProxy: env.trustProxy,
   });
 
   await app.register(cookie, { secret: env.sessionSecret });
@@ -40,6 +48,12 @@ export async function buildApp(): Promise<FastifyInstance> {
     global: false, // opt-in per-route (auth routes get it in Stage 1)
     max: 100,
     timeWindow: '1 minute',
+    // Key on the explicitly-resolved client, not Fastify's req.ip. Under the
+    // default `none` strategy this is the socket peer, which in prod is one
+    // constant for everybody — so this limiter is a flood backstop only. The
+    // per-account bound that actually stops credential guessing lives in
+    // auth/throttle.ts (docs/AUTH_HARDENING.md §2.3).
+    keyGenerator: (req) => clientIp(req, env.trustedProxy),
   });
 
   // ─── LOCKED error envelope ────────────────────────────────────────────────
@@ -67,6 +81,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   // ─── routes ───────────────────────────────────────────────────────────────
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: '/api' });
+  await app.register(passkeyRoutes, { prefix: '/api' });
   await app.register(friendRoutes, { prefix: '/api' });
   await app.register(chatRoutes, { prefix: '/api' });
   await app.register(pushRoutes, { prefix: '/api' });
@@ -76,6 +91,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(voicePocRoutes, { prefix: '/api' });
   await app.register(integrationsVaultRoutes, { prefix: '/api' });
   await app.register(stageRoutes, { prefix: '/api' });
+  await app.register(debugRoutes, { prefix: '/api' });
 
   return app;
 }

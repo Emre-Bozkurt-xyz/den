@@ -4,6 +4,7 @@ import { GIF_RATINGS, type GifRating, type MeResponse } from '@den/shared';
 import { updateMe } from '../lib/auth';
 import { VaultLinkSection } from './Profile';
 import { NotificationsSection, PushPoc } from './PushPoc';
+import { PasskeysSection } from './PasskeysSection';
 import { VoicePoc } from './VoicePoc';
 import { WsProbe } from './WsProbe';
 import { KeyboardProbe } from './KeyboardProbe';
@@ -26,6 +27,7 @@ export function Settings({ me, onBack }: { me: MeResponse; onBack: () => void })
           paddingRight: 'max(env(safe-area-inset-right), 1rem)',
         }}
       >
+        <PasskeysSection />
         <MediaPrivacySection me={me} />
         <NotificationsSection />
         <VaultLinkSection />

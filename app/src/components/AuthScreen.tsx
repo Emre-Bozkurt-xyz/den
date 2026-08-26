@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { AuthLimits } from '@den/shared';
-import { AtSign, KeyRound, Loader2, Lock, User as UserIcon } from 'lucide-react';
+import { AtSign, Fingerprint, KeyRound, Loader2, Lock, User as UserIcon } from 'lucide-react';
 import { login, register } from '../lib/auth';
 import { ApiFetchError } from '../lib/api';
+import { PasskeyCancelled, loginWithPasskey, passkeysSupported } from '../lib/passkeys';
 
 type Mode = 'login' | 'register';
 
@@ -15,6 +16,10 @@ export function AuthScreen() {
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  // Computed once: whether the browser supports WebAuthn cannot change while
+  // the screen is mounted, and calling it during render keeps the button out
+  // of the DOM entirely on browsers that could only fail.
+  const [canUsePasskey] = useState(passkeysSupported);
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -27,12 +32,36 @@ export function AuthScreen() {
     },
   });
 
-  const err = mutation.error;
+  /**
+   * Passkey sign-in is a separate mutation, not a `mode`. It shares nothing
+   * with the credential form — no fields, no validation — and folding it in
+   * would mean every branch below asking "which kind of login is this?".
+   *
+   * ⚠️ `mutationFn` is invoked synchronously from the button's onClick, which
+   * is what preserves the user-gesture chain the WebAuthn call needs
+   * (docs/PASSKEYS.md §10). Do not move this behind a confirmation step.
+   */
+  const passkeyMutation = useMutation({
+    mutationFn: loginWithPasskey,
+    onSuccess: (user) => qc.setQueryData(['me'], user),
+  });
+
+  const err = mutation.error ?? passkeyMutation.error;
+  // A cancelled ceremony is the user closing a sheet they opened — showing an
+  // error for it would be scolding them for changing their mind.
   const message =
-    err instanceof ApiFetchError ? err.message : err instanceof Error ? err.message : null;
+    err instanceof PasskeyCancelled
+      ? null
+      : err instanceof ApiFetchError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : null;
+  const busy = mutation.isPending || passkeyMutation.isPending;
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
+    passkeyMutation.reset();
     mutation.mutate();
   }
 
@@ -54,6 +83,32 @@ export function AuthScreen() {
             {mode === 'login' ? 'Welcome back.' : 'You need an invite to join.'}
           </p>
         </div>
+
+        {mode === 'login' && canUsePasskey && (
+          <div className="flex flex-col gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                mutation.reset();
+                passkeyMutation.mutate();
+              }}
+              disabled={busy}
+              className="flex items-center justify-center gap-2 rounded-md border border-border px-4 py-3 text-sm font-semibold transition-colors hover:bg-surface-hover disabled:pointer-events-none disabled:opacity-40"
+            >
+              {passkeyMutation.isPending ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Fingerprint size={16} />
+              )}
+              Sign in with a passkey
+            </button>
+            <div className="flex items-center gap-3 text-xs text-text-secondary">
+              <span className="h-px flex-1 bg-border" />
+              or
+              <span className="h-px flex-1 bg-border" />
+            </div>
+          </div>
+        )}
 
         <form onSubmit={submit} className="flex flex-col gap-3">
           {mode === 'register' && (
@@ -98,7 +153,7 @@ export function AuthScreen() {
 
           <button
             type="submit"
-            disabled={mutation.isPending}
+            disabled={busy}
             className="mt-1 flex items-center justify-center gap-2 rounded-md bg-accent px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-accent-hover disabled:pointer-events-none disabled:opacity-40"
           >
             {mutation.isPending && <Loader2 size={16} className="animate-spin" />}
@@ -112,6 +167,7 @@ export function AuthScreen() {
             onClick={() => {
               setMode(mode === 'login' ? 'register' : 'login');
               mutation.reset();
+              passkeyMutation.reset();
             }}
             className="font-semibold text-indigo-600 dark:text-indigo-400"
           >

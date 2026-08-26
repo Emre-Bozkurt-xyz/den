@@ -95,6 +95,32 @@ async function sendOne(sub: SubRow, payload: string, topic: string): Promise<voi
   }
 }
 
+/**
+ * Send one non-chat notification to a single user, on every device they have
+ * registered (docs/AUTH_HARDENING.md §2.4). Reuses the same VAPID config,
+ * TTL and 404/410 pruning as the chat fanout — the only difference is the
+ * payload carries `title` instead of chat identity, which `sw.ts:titleFor`
+ * renders verbatim.
+ *
+ * ⚠️ Fire-and-forget by contract: callers sit on the login path, so this
+ * never throws and its outcome must never influence the response. A user with
+ * no subscriptions is a no-op, not an error.
+ */
+export async function notifyUser(
+  userId: bigint,
+  alert: { title: string; body: string; topic: string },
+): Promise<void> {
+  try {
+    if (!ensureVapid()) return;
+    const subs = await subscriptionsForUsers([userId]);
+    if (subs.length === 0) return;
+    const payload = JSON.stringify({ title: alert.title, preview: alert.body, url: '/' });
+    await Promise.all(subs.map((s) => sendOne(s, payload, alert.topic)));
+  } catch (e) {
+    console.error('notifyUser failed:', e instanceof Error ? e.message : e);
+  }
+}
+
 const MEDIA_LABEL: Record<'image' | 'video' | 'voice', string> = {
   image: '📷 Photo',
   video: '🎥 Video',

@@ -42,6 +42,11 @@
  *   vault_links — one row per Den user; OAuth tokens ENCRYPTED at rest
  *   (server/src/integrations/crypto.ts), never sent to the client.
  *
+ * Migration 015 (post-MVP, docs/AUTH_HARDENING.md §2.2): login throttle.
+ *   login_failures — append-only record of every failed login, keyed by the
+ *   SUBMITTED username (which may not exist). Doubles as the per-account
+ *   brute-force bound and the audit trail; there was previously neither.
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -143,6 +148,37 @@ export const sessions = pgTable(
     userAgent: text('user_agent'),
   },
   (t) => [index('sessions_user').on(t.userId)],
+);
+
+/**
+ * Failed-login ledger (docs/AUTH_HARDENING.md §2.2, migration 015).
+ *
+ * ⚠️ `username` is what the caller SUBMITTED, not a foreign key — rows are
+ * written for usernames that don't exist too. That is deliberate: a throttle
+ * that only engaged for real accounts would answer "does this user exist?"
+ * from the outside, undoing the constant-time/no-enumeration work in
+ * routes/auth.ts. No FK to `users` for the same reason.
+ *
+ * A successful login DELETES the account's rows, so this table holds only
+ * unresolved failures — it is a live counter, not history. Anything wanting
+ * durable history should read the logs.
+ */
+export const loginFailures = pgTable(
+  'login_failures',
+  {
+    id: bigint('id', { mode: 'bigint' }).generatedAlwaysAsIdentity().primaryKey(),
+    username: citext('username').notNull(),
+    /** Best-effort: currently a constant in prod (see §1 of the plan doc). */
+    ip: text('ip'),
+    userAgent: text('user_agent'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // The hot query: failures for one username inside the window.
+    index('login_failures_username_time').on(t.username, t.createdAt),
+    // Sweeping expired rows.
+    index('login_failures_time').on(t.createdAt),
+  ],
 );
 
 export const pushSubscriptions = pgTable(
