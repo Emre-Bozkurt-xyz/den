@@ -183,9 +183,39 @@ Postgres the DB-backed integration suites fail; that is an environment
 condition, not a code one — it reproduced identically on a stashed working tree
 before any of this work.)
 
-Still outstanding:
+### ✅ Closed 2026-08-26: prod is per-client
 
-- **Set `TRUSTED_PROXY` in prod.** Sign in on a phone over mobile data, hit
+`TRUSTED_PROXY=cloudflare` is set in prod and verified:
+
+```
+limit 120/min · v4 counter moved by 1 across 5 v6 requests + 1 v4 request
+PER-CLIENT ✓ — a forged header is ignored, and two different real clients get
+  separate buckets.
+```
+
+`CF-Connecting-IP` carries the real client to the origin (confirmed via
+`/api/debug/client-ip` from a phone on mobile data); `X-Forwarded-For` only
+ever holds the Docker gateway, so the `xff` strategy would have been wrong.
+
+⚠️ **The remaining assumption:** trusting `CF-Connecting-IP` is only sound while
+the origin cannot be reached *around* Cloudflare. Anyone who can hit the VPS
+directly can forge that header and choose their own bucket. Restricting the
+VPS to Cloudflare's IP ranges (or moving to a Cloudflare Tunnel) is what makes
+this airtight. Not urgent — the per-account throttle does not depend on the
+address at all, which is exactly why it is keyed on the username.
+
+⚠️ **The probe silently rotted and this is worth remembering.** It drove the
+limiter to 429 with a hardcoded 12 attempts, which worked against the original
+10/min ceiling and proved nothing the moment §2.3 raised it to 120 — it just
+reported INCONCLUSIVE, which reads like "couldn't tell" rather than "this tool
+is broken". It now *measures the counter* instead of exhausting it: cheaper,
+immune to the limit changing, and it no longer briefly consumes everyone's
+login allowance to run. **A verification tool with a hardcoded assumption about
+the thing it verifies will stop verifying without saying so.**
+
+Previously outstanding:
+
+- ~~**Set `TRUSTED_PROXY` in prod.**~~ Sign in on a phone over mobile data, hit
   `/api/debug/client-ip`, and see which candidate shows the phone's real
   address. Until then the strategy is `none` and the flood backstop is
   effectively global — harmless now that it is 120/min and the per-account
