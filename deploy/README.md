@@ -67,24 +67,37 @@ host fails loudly and changes nothing.
   `docker compose up` (prod, and the CI deploy workflow below) never starts
   it. To bring it up for local Docker-based dev: add `--profile dev` to the
   `up` command.
-- **Migrations**: run inside the api container once the domain schema exists —
-  `docker compose exec api npm -w server run db:migrate`.
-- **Admin CLIs inside the container** — invites, owner grants, login-lock
-  clearing. Same commands as on the host:
+- **Migrations & admin CLIs**: run inside the api container. On the prod host
+  the repo is `/opt/apps/den/repo` and the env file is
+  `/opt/apps/den/secrets/.env` (outside the checkout — see CI/CD below), so
+  every compose call needs `--env-file` at that path:
 
-  ```
-  docker compose exec api npm run invite create 1
-  docker compose exec api npm run owner list
-  docker compose exec api npm run owner grant <username>
-  docker compose exec api npm run auth:unlock status
+  ```bash
+  cd /opt/apps/den/repo
+  C="docker compose --env-file /opt/apps/den/secrets/.env -f deploy/docker-compose.yml"
+
+  $C exec api npm -w server run db:migrate      # migrations
+  $C exec api npm run invite create 1           # mint an invite
+  $C exec api npm run owner list                # who is an owner
+  $C exec api npm run owner grant <username>    # make someone an owner
+  $C exec api npm run auth:unlock status        # live login locks
   ```
 
-  ⚠️ These use `node --env-file-if-exists=.env`, not `--env-file=.env`, and
-  that is deliberate: the image has **no `.env`** — compose injects the
-  environment — so the strict form aborts with "file not found" before the
-  script runs, while on the host the same command still reads `.env` normally.
-  Any new admin CLI must use the `-if-exists` form or it will only work in one
-  of the two places.
+  ⚠️ **`--env-file` is not optional, even for `exec`.** `docker-compose.yml`
+  interpolates `${SESSION_SECRET:?...}`, so compose refuses to parse the file
+  at all without it — the failure is `required variable SESSION_SECRET is
+  missing a value`, which reads like a broken container rather than a missing
+  flag. Locally the same commands work with `--env-file .env` from the repo
+  root.
+
+  ⚠️ **Two different env files are in play and they are not interchangeable.**
+  The `--env-file` above is read by *compose on the host* to build the
+  container's environment. Inside the container there is **no `.env` at all**,
+  which is why these npm scripts use `node --env-file-if-exists=.env` rather
+  than the strict `--env-file=.env` — the strict form aborts with "file not
+  found" before the script runs, so every admin CLI would be host-only. Any new
+  admin CLI must use the `-if-exists` form or it will work in exactly one of
+  the two places.
 - **`npm run owner grant` is the ONLY way to make someone an owner**
   (docs/ADMIN_CONSOLE.md §4). There is no API route and no in-app toggle, by
   design — privilege is conferred from the host shell, so a fully compromised
