@@ -69,6 +69,27 @@ host fails loudly and changes nothing.
   `up` command.
 - **Migrations**: run inside the api container once the domain schema exists —
   `docker compose exec api npm -w server run db:migrate`.
+- **Admin CLIs inside the container** — invites, owner grants, login-lock
+  clearing. Same commands as on the host:
+
+  ```
+  docker compose exec api npm run invite create 1
+  docker compose exec api npm run owner list
+  docker compose exec api npm run owner grant <username>
+  docker compose exec api npm run auth:unlock status
+  ```
+
+  ⚠️ These use `node --env-file-if-exists=.env`, not `--env-file=.env`, and
+  that is deliberate: the image has **no `.env`** — compose injects the
+  environment — so the strict form aborts with "file not found" before the
+  script runs, while on the host the same command still reads `.env` normally.
+  Any new admin CLI must use the `-if-exists` form or it will only work in one
+  of the two places.
+- **`npm run owner grant` is the ONLY way to make someone an owner**
+  (docs/ADMIN_CONSOLE.md §4). There is no API route and no in-app toggle, by
+  design — privilege is conferred from the host shell, so a fully compromised
+  session cannot escalate. The Admin section appears in Settings on that user's
+  next `/me` fetch (reload the app).
 - **ffmpeg** is installed in the api image (voice PoC now; video posters later).
   ⚠️ Stage 3 adds `sharp`/HEIC — install `libvips` in `Dockerfile.api` then and
   re-verify HEIC decode on the VPS (Stage 0 checklist item).
