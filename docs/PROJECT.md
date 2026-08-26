@@ -234,6 +234,8 @@ Envelope (LOCKED): `{type, payload, ts, reqId?}` — `shared/src/ws.ts`. One con
 
 Current types: `hello ping pong error` · `message.send message.new` · `chat.created` · `friend.request friend.accepted` · `media.ready` · `tag.added tag.removed` (emitted since Stage 5; the client handler was invalidate-only until docs/MEDIA_ATTACHMENTS.md §4.5 taught it to patch `media[].sensitivity` in place, so marking an old photo `nsfw` re-blurs it live for everyone) · `message.deleted message.restored` · `message.edited` · `reaction.added reaction.removed` · `delivered.ack` (client→server, batched, fire-and-forget) · `message.delivered message.read` (docs/RECEIPTS.md — room broadcasts, only on a real watermark advance) · `embed.ready` (docs/EMBEDS.md §4.2 — room broadcast, identical shape/reasoning to `media.ready`: the resolved card replaces the `'processing'` placeholder in place) · `presence.update` (client→server, fire-and-forget, docs/NOTIFICATIONS.md §2.1 — `{chatId|null, visible}`; membership-gated, never echoed, and read by exactly one consumer: push targeting).
 
+**Typing indicators** (docs/TYPING_INDICATORS.md) added `typing.update` (client→server) and `typing.state` (server→room). Ephemeral and per-socket like presence — nothing persisted. ⚠️ Two rules: `assertMember` on every inbound frame (the client supplies `chatId`), and the echo uses `socket.to(room)` not `io.to(room)` — the sender must never receive their own, or the client renders "You are typing…" at you. The **server** owns the 6s expiry and emits the stop itself, which is the only defence that survives the client dying mid-word.
+
 **GIFs added no WS type** (docs/GIFS.md §6). `MessageSendPayload` gained an optional `gif: {slug, width?, height?}` intent instead — the "client sets an intent" half of docs/EMBEDS.md §4.3's mint path, designed from the start and unused until now. Overloading `message.send` rather than adding a route or a type means GIFs inherit optimistic send, `reqId` dedup, room fanout, push and unread counts with no parallel path to keep in sync. Only the slug is authoritative; the dimensions are a clamped cosmetic hint (§5).
 
 Rules:
@@ -314,6 +316,8 @@ Dev device: Samsung, with the PWA installable in **both Chrome and Firefox** —
 
 **Also shipped off-roadmap:** notifications second pass — `docs/NOTIFICATIONS.md`, 2026-08-23, no migration. Deep-link on tap, presence-based push targeting, `renotify`/urgency/TTL/topic, subscription self-healing, app badge. Server verified with a scripted multi-account flow (fake push service, decrypted payloads — §9 of the plan doc). ✅ **Owner reports notifications working on iOS in normal use, 2026-08-26.** ⚠️ The §9 edge cases (burst `renotify`, tray dismissal, badge) fail *selectively* by nature and are not covered by day-to-day use — still open (§12).
 
+**Also shipped on-roadmap 2026-08-26:** typing indicators (`docs/TYPING_INDICATORS.md`, item 3's other half) and the video transcode pipeline (`docs/VIDEO_TRANSCODE.md`, part of item 8). Neither needed a migration. ⚠️ Video: existing rows are **not** backfilled — they keep their original bytes and the old hardcoded mime; a `backfill-video.ts` is the follow-up. ⚠️ Both awaiting device passes (typing: a browser pass; video: iOS playback + an iPhone-recorded round trip).
+
 **Also shipped off-roadmap:** auth hardening, Tier 0 — `docs/AUTH_HARDENING.md`, 2026-08-26, migration 015 (`login_failures`). Per-account login throttle, explicit client-address resolution, the flood backstop re-aimed, an owner push alert, and `GET /api/debug/client-ip`. Verified against the compose stack (`docs/AUTH_HARDENING.md` §4): lock/bystander/backoff/unlock/ceiling all pass, and a successful login provably clears its own counter. ✅ **Complete 2026-08-26**: `TRUSTED_PROXY=cloudflare` is live in prod and the probe reports PER-CLIENT (`CF-Connecting-IP` carries the real client; `X-Forwarded-For` only ever held the Docker gateway). ⚠️ One standing assumption: trusting that header is sound only while the origin cannot be reached around Cloudflare — restricting the VPS to Cloudflare's ranges would close it.
 
 **Next, in this order** (owner-sequenced 2026-08-26, both planned and unbuilt):
@@ -324,12 +328,12 @@ Dev device: Samsung, with the PWA installable in **both Chrome and Firefox** —
 **Roadmap (ordered; from archive §12):**
 1. ~~**Passkeys**~~ — **shipped 2026-08-26** (`docs/PASSKEYS.md`, no migration; `@simplewebauthn/server` ^13.3.3 + `browser` ^13.3.0). Discoverable credentials, enrolment from Settings, sign-in from AuthScreen, rename/remove with the ≥1-login-method guard. Recovery model is **Option A — passwords stay permanently**. ⚠️ iOS device gate outstanding (§12). ⚠️ Two things in that plan are load-bearing beyond the feature itself: the **rpID trap** (the first registered passkey freezes `den.ems-place.com` forever, no migration path), and the **throttle interaction** (§7 — passkey login must never be gated by the password lock, which is what finally retires the lockout-DoS tradeoff `docs/AUTH_HARDENING.md` §2.2 had to accept).
 2. **OAuth (Google)** — code + PKCE, full-page redirect; match on provider sub; invites still gate creation.
-3. ~~Read receipts~~ — shipped 2026-07-23 out of order, `docs/RECEIPTS.md` (sent/delivered/seen/failed). **Typing indicators remain** on the roadmap (cheap WS types, not built here).
+3. ~~Read receipts~~ — shipped 2026-07-23 out of order, `docs/RECEIPTS.md` (sent/delivered/seen/failed). ~~Typing indicators~~ — **shipped 2026-08-26**, `docs/TYPING_INDICATORS.md`, no migration. Item 3 is now complete.
 4. ~~Replies/reactions~~ — shipped 2026-07-22 out of order.
 5. **E2EE v2** (libsodium sealed-box, per-chat keys wrapped per-member; tags stay plaintext — decide then).
 6. **Calls** — see §15 below.
 7. **Native wrappers** if PWA friction is real (Capacitor APK sideload / Tauri).
-8. ~~Server-side waveform peaks~~ (shipped 2026-07-22, `docs/VOICE_WAVEFORM.md`), video transcode pipeline, per-chat export/backup.
+8. ~~Server-side waveform peaks~~ (shipped 2026-07-22, `docs/VOICE_WAVEFORM.md`), ~~video transcode pipeline~~ (**shipped 2026-08-26**, `docs/VIDEO_TRANSCODE.md`, no migration — a correctness fix: iPhone HEVC was being stored as-is and labelled `video/mp4`, so it silently failed to play for most Android/Chrome users). **Per-chat export/backup remains.**
 9. ~~Per-chat message search~~ — shipped 2026-07-22 out of order, `docs/MESSAGE_SEARCH.md`.
 
 **Icebox (parked, with reasons — see archive §13 for full write-ups):**
