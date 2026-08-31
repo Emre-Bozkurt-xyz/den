@@ -15,6 +15,53 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+/**
+ * The full-size "not ready yet" card — one implementation for every surface
+ * that draws media at its natural size, so the reserved box and the wording
+ * can't drift apart between them. Extracted from `MediaBubble` when the fanned
+ * `MediaStack` turned out to need exactly the same thing (owner report,
+ * 2026-08-31 — a still-transcoding video at the top of a fan drew an empty
+ * frame, the same defect albums had). Tile-sized surfaces (an album's mosaic,
+ * the grid sheet) deliberately do NOT share this: at ~95px square there is no
+ * room for the full label, so they carry their own compact variant.
+ *
+ * `MediaStatus` is exactly `processing | ready | failed`, so a caller that has
+ * ruled out `ready` has ruled in one of these two branches.
+ */
+export function MediaPlaceholder({ media }: { media: MediaInfo }) {
+  if (media.status === 'failed') {
+    return (
+      <div className="flex h-24 w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-red-500/20 bg-red-500/10 px-2 text-center text-xs text-red-500">
+        <TriangleAlert size={16} />
+        {LABEL[media.kind]} failed to process
+      </div>
+    );
+  }
+  // docs/MEDIA_ATTACHMENTS.md §4.6 — reserve the real aspect when the sender
+  // sent a size hint, so this card is already the shape the finished image
+  // will be. The fixed `h-32` below is now only the fallback for rows with
+  // no dimensions (voice, a file the sender's browser couldn't measure, or
+  // anything uploaded before the hint existed). Without this the card grew
+  // when processing finished, shoving the message list under whoever was
+  // reading — the same class of bug `PreviewImage` fixes for loaded media
+  // (PROJECT.md §14, 2026-07-22).
+  const aspect = media.width && media.height ? `${media.width} / ${media.height}` : undefined;
+  return (
+    <div
+      className={
+        'flex w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-border bg-surface-sunken text-xs text-text-muted ' +
+        (aspect ? '' : 'h-32')
+      }
+      // Capped at the same max height a loaded image gets, so an extreme
+      // portrait hint can't reserve a taller box than the real thing will.
+      style={aspect ? { aspectRatio: aspect, maxHeight: '18rem' } : undefined}
+    >
+      <Loader2 size={18} className="animate-spin" />
+      Processing {LABEL[media.kind]}…
+    </div>
+  );
+}
+
 /** Renders one media item (§7). As of UI-7 photos/videos are drawn *bare* —
  *  no bubble behind them, Instagram-style — so the rounding here is the
  *  visible edge of the message, not an inset thumbnail. Voice stays a
@@ -58,40 +105,7 @@ export function MediaBubble({
   const { reveal } = useSensitivity();
   const blurred = useIsBlurred(media);
 
-  if (media.status === 'processing') {
-    // docs/MEDIA_ATTACHMENTS.md §4.6 — reserve the real aspect when the sender
-    // sent a size hint, so this card is already the shape the finished image
-    // will be. The fixed `h-32` below is now only the fallback for rows with
-    // no dimensions (voice, a file the sender's browser couldn't measure, or
-    // anything uploaded before the hint existed). Without this the card grew
-    // when processing finished, shoving the message list under whoever was
-    // reading — the same class of bug `PreviewImage` fixes for loaded media
-    // (PROJECT.md §14, 2026-07-22).
-    const aspect = media.width && media.height ? `${media.width} / ${media.height}` : undefined;
-    return (
-      <div
-        className={
-          'flex w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-border bg-surface-sunken text-xs text-text-muted ' +
-          (aspect ? '' : 'h-32')
-        }
-        // Capped at the same max height a loaded image gets, so an extreme
-        // portrait hint can't reserve a taller box than the real thing will.
-        style={aspect ? { aspectRatio: aspect, maxHeight: '18rem' } : undefined}
-      >
-        <Loader2 size={18} className="animate-spin" />
-        Processing {LABEL[media.kind]}…
-      </div>
-    );
-  }
-
-  if (media.status === 'failed') {
-    return (
-      <div className="flex h-24 w-48 max-w-full flex-col items-center justify-center gap-1.5 rounded-md border border-red-500/20 bg-red-500/10 px-2 text-center text-xs text-red-500">
-        <TriangleAlert size={16} />
-        {LABEL[media.kind]} failed to process
-      </div>
-    );
-  }
+  if (media.status !== 'ready') return <MediaPlaceholder media={media} />;
 
   if (media.kind === 'image') {
     return (

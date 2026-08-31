@@ -38,8 +38,32 @@ export function SensitiveOverlay({
   compact = false,
   /** Matches the host's clipping so the blur can't bleed past a rounded
    *  corner. The wrapper is `overflow-hidden` regardless; this only sets the
-   *  radius. */
+   *  radius. Hosts whose box is a fixed size (a mosaic tile, a gallery tile,
+   *  the viewer stage) pass their sizing here too — see `contentClassName`
+   *  for why that alone isn't enough. */
   className = '',
+  /** Classes for the *inner* element that actually carries the blur filter,
+   *  and therefore the element the media's own `h-full` / `max-h-full` resolve
+   *  against.
+   *
+   *  This exists because the filter has to live on a node the reveal pill is
+   *  NOT inside — so there are two boxes, and sizing only the outer one leaves
+   *  the inner one auto-sized. A percentage height against an auto-height
+   *  parent resolves to `auto`, which silently un-clamps the media: measured
+   *  in Chrome at a 390×780 viewport, a portrait video in the full-screen
+   *  viewer rendered 414×735 at its intrinsic aspect instead of 358×636, so
+   *  its native controls bar landed underneath the tag strip and filmstrip
+   *  ("the bottom bar covers the seek bar"); an album's square mosaic tile
+   *  grew from 143×143 to 152×269, taking the centred play badge with it
+   *  ("the play button is centred on the video, not on the box"). Both were
+   *  reported as separate bugs and are this one line (owner report,
+   *  2026-08-31).
+   *
+   *  The default is a no-op for content-sized hosts (`height: 100%` against an
+   *  auto parent stays `auto`; `width: 100%` against a shrink-to-fit flex item
+   *  is the width it already had) and correct for fixed-size ones. Hosts that
+   *  also center their media pass the centering flex here as well. */
+  contentClassName = 'h-full w-full',
   /** False = blur and label, but no reveal affordance: the tap belongs to the
    *  host. Used by gallery album covers, where tapping opens the album and
    *  "revealing" a decorative cover would be meaningless (the grid inside
@@ -52,6 +76,7 @@ export function SensitiveOverlay({
   children: ReactNode;
   compact?: boolean;
   className?: string;
+  contentClassName?: string;
   interactive?: boolean;
 }) {
   // Not sensitive at all: render the media untouched, with no extra wrapper
@@ -62,6 +87,7 @@ export function SensitiveOverlay({
   return (
     <div className={'relative overflow-hidden ' + className}>
       <div
+        className={contentClassName}
         // `scale` hides the transparent fringe a large blur radius pulls in
         // from outside the element's edges. ⚠️ iOS: `filter: blur()` over
         // several images in a scrolling list is a known perf risk on older

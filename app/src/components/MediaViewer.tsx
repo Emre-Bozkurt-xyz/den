@@ -770,6 +770,12 @@ export function MediaViewer({
           blurred={blurred}
           onReveal={() => reveal(media.id)}
           className="flex h-full w-full items-center justify-center"
+          // The blur node is a second box between the wrapper and the media,
+          // so it needs the same definite, centering box — see
+          // `contentClassName`'s own doc. Without it a portrait video here
+          // rendered at intrinsic size with its native controls bar behind the
+          // tag strip/filmstrip.
+          contentClassName="flex h-full w-full items-center justify-center"
         >
           {media.kind === 'image' ? (
             <img
@@ -840,6 +846,7 @@ export function MediaViewer({
               onReveal={() => reveal(standIn.id)}
               interactive={false}
               className="flex h-full w-full items-center justify-center"
+              contentClassName="flex h-full w-full items-center justify-center"
             >
               <img src={standIn.thumbUrl ?? undefined} alt="" draggable={false} className="max-h-full max-w-full object-contain" />
             </SensitiveOverlay>
@@ -925,6 +932,7 @@ function NeighbourSlide({
       onReveal={() => {}}
       interactive={false}
       className="flex h-full w-full items-center justify-center"
+      contentClassName="flex h-full w-full items-center justify-center"
     >
       <img src={item.thumbUrl ?? undefined} alt="" draggable={false} className="max-h-full max-w-full object-contain" />
     </SensitiveOverlay>

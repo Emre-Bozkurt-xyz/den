@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react';
-import { Play } from 'lucide-react';
+import { Loader2, Play, TriangleAlert } from 'lucide-react';
 import type { MediaInfo } from '@den/shared';
 import { useIsBlurred, useSensitivity } from '../lib/sensitivity';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
@@ -212,6 +212,46 @@ function AlbumTile({
     width: rect.width,
     height: rect.height,
   };
+
+  // A tile that isn't `ready` yet has no thumbnail to draw, and until this
+  // existed it rendered a bare `<img>` with `src={undefined}` — an empty box
+  // that looked identical to a slow-loading photo, sat there indefinitely, and
+  // opened nothing when tapped (owner report, 2026-08-31: "just a blank image
+  // till it fully loads" / "videos are hard to open"). A single photo/video has
+  // said "Processing…" since docs/MEDIA_ATTACHMENTS.md §4.6 (see MediaBubble);
+  // an album's tiles were simply never given the same treatment. Video is the
+  // visible case because transcoding takes far longer than an image resize.
+  //
+  // Deliberately drawn *before* the SensitiveOverlay: there are no real bytes
+  // on screen to blur, and blurring a spinner would only make the state harder
+  // to read. The tap is inert too — `ChatView.openAlbumViewer` refuses
+  // non-ready items, so a placeholder that looked tappable would be a lie.
+  // Clicks still bubble to the block wrapper, which is what keeps the tile
+  // selectable in multi-select.
+  //
+  // The "+N" overflow tile is exempt: its job is to say how many more items
+  // there are and open the grid sheet, which it can still do with nothing
+  // underneath it. Replacing it with a processing placeholder would strand the
+  // 7th–10th items with no way in.
+  if (media.status !== 'ready' && overflowCount === 0) {
+    const failed = media.status === 'failed';
+    return (
+      <div style={style}>
+        <div
+          className={
+            'flex h-full w-full flex-col items-center justify-center gap-1 px-1 text-center text-[10px] leading-tight ' +
+            (failed ? 'bg-red-500/10 text-red-500' : 'bg-surface-sunken text-text-muted')
+          }
+        >
+          {failed ? <TriangleAlert size={14} /> : <Loader2 size={14} className="animate-spin" />}
+          {/* The smallest tile in the §5.3 table is ~95px wide (the 3×2
+              layout), which still fits one short word per line. */}
+          <span>{failed ? 'Failed' : media.kind === 'video' ? 'Processing video' : 'Processing'}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={style}>
       <SensitiveOverlay

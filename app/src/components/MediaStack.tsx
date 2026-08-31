@@ -1,8 +1,9 @@
-import { Eye, Layers, Play, X } from 'lucide-react';
+import { Eye, Layers, Loader2, Play, TriangleAlert, X } from 'lucide-react';
 import type { MediaInfo, Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
 import { blurredIdsOf, useIsBlurred, useSensitivity } from '../lib/sensitivity';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
+import { MediaPlaceholder } from './MediaBubble';
 import { PreviewImage } from './PreviewImage';
 import { SensitiveOverlay } from './SensitiveOverlay';
 
@@ -37,9 +38,18 @@ const BACK_CARDS = [
   { rotate: 3.5, x: 5, y: 3 },
 ] as const;
 
+/** The poster to draw for a stack card, or `undefined` when there is nothing
+ *  to draw yet.
+ *
+ *  Gated on `status` rather than just falling back through the URLs: for an
+ *  item that is still processing both are null, and for one that is *mid*
+ *  processing `url` can be the raw upload — a video file, which in an `<img>`
+ *  is a broken image rather than a poster. Callers treat `undefined` as "draw
+ *  the placeholder", so this is the single place that decides it. */
 function thumbOf(m: Message): string | undefined {
   const media = m.media[0];
-  return media?.thumbUrl ?? media?.url ?? undefined;
+  if (!media || media.status !== 'ready') return undefined;
+  return media.thumbUrl ?? media.url ?? undefined;
 }
 
 export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: () => void }) {
@@ -59,34 +69,58 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
       onContextMenu={suppressTouchContextMenu}
       style={{ touchAction: 'manipulation' }}
     >
-      {backs.map((m, i) => (
-        <img
-          key={m.id}
-          src={thumbOf(m)}
-          alt=""
-          aria-hidden
-          // inset-0 resolves against the box the in-flow top card establishes
-          // below, so the pile always matches the top card's dimensions.
-          className="absolute inset-0 h-full w-full rounded-md object-cover shadow-soft"
-          style={{
+      {backs.map((m, i) => {
+        const thumb = thumbOf(m);
+        // inset-0 resolves against the box the in-flow top card establishes
+        // below, so the pile always matches the top card's dimensions.
+        // `key` is passed explicitly at each call below, never through this
+        // object — React 19 warns when a spread props object carries one.
+        const shared = {
+          'aria-hidden': true,
+          className: 'absolute inset-0 h-full w-full rounded-md object-cover shadow-soft',
+          style: {
             transform: `translate(${BACK_CARDS[i]!.x}px, ${BACK_CARDS[i]!.y}px) rotate(${BACK_CARDS[i]!.rotate}deg)`,
             zIndex: 0,
-          }}
-        />
-      ))}
+          },
+        };
+        // A sibling that hasn't finished processing has no poster, and an
+        // `<img>` with no `src` is an invisible card — the pile silently loses
+        // its depth and stops reading as a pile at all. A blank fill keeps the
+        // shape; the count badge and the grid sheet carry the real information.
+        return thumb ? (
+          <img key={m.id} {...shared} src={thumb} alt="" />
+        ) : (
+          <div key={m.id} {...shared} className={shared.className + ' bg-surface-sunken'} />
+        );
+      })}
       {/* In-flow top card establishes the pile's box — reserve it pre-load so
           the open-chat scroll-to-bottom isn't measuring a collapsed stack.
           Blur is scoped to this one item only (a fan's items are
           independently addressable, D4) — tapping the reveal pill reveals
           just the top card, not the whole pile. */}
-      <SensitiveOverlay
-        sensitivity={topMedia.sensitivity}
-        blurred={topBlurred}
-        onReveal={() => reveal(topMedia.id)}
-        className="relative z-10"
-      >
-        <PreviewImage media={top.media[0]} src={thumbOf(top)} alt="" className="max-h-72 max-w-full rounded-md object-cover" />
-      </SensitiveOverlay>
+      {topMedia.status !== 'ready' ? (
+        // Same treatment a single photo/video has had since
+        // docs/MEDIA_ATTACHMENTS.md §4.6, and the same shared card an album's
+        // tiles now draw their compact version of: without it a fan whose top
+        // item was still transcoding showed an empty frame with no explanation
+        // and no indication it would ever fill in (owner report, 2026-08-31).
+        // No `SensitiveOverlay` — there are no bytes on screen to blur yet, and
+        // blurring a spinner only makes the state harder to read. The pile
+        // stays tappable: the grid sheet behind it may hold items that ARE
+        // ready, and it now labels the ones that aren't.
+        <div className="relative z-10">
+          <MediaPlaceholder media={topMedia} />
+        </div>
+      ) : (
+        <SensitiveOverlay
+          sensitivity={topMedia.sensitivity}
+          blurred={topBlurred}
+          onReveal={() => reveal(topMedia.id)}
+          className="relative z-10"
+        >
+          <PreviewImage media={top.media[0]} src={thumbOf(top)} alt="" className="max-h-72 max-w-full rounded-md object-cover" />
+        </SensitiveOverlay>
+      )}
       <span className="absolute right-2 top-2 z-20 flex items-center gap-1 rounded-pill bg-black/60 px-2 py-0.5 text-[11px] font-semibold text-white">
         <Layers size={12} />
         {messages.length}
@@ -101,6 +135,23 @@ export function MediaStack({ messages, onOpen }: { messages: Message[]; onOpen: 
 function GridTile({ media, thumbUrl, onClick }: { media: MediaInfo; thumbUrl: string | undefined; onClick: () => void }) {
   const { reveal } = useSensitivity();
   const blurred = useIsBlurred(media);
+  // Matches `AlbumCard`'s mosaic tile: an item that isn't ready has no
+  // thumbnail, so without this it drew an empty square that opened nothing.
+  // Inert rather than tappable — ChatView's `onPick` refuses non-ready items.
+  if (media.status !== 'ready') {
+    const failed = media.status === 'failed';
+    return (
+      <div
+        className={
+          'flex aspect-square flex-col items-center justify-center gap-1 rounded-sm px-1 text-center text-[10px] leading-tight ' +
+          (failed ? 'bg-red-500/10 text-red-400' : 'bg-white/5 text-white/60')
+        }
+      >
+        {failed ? <TriangleAlert size={14} /> : <Loader2 size={14} className="animate-spin" />}
+        <span>{failed ? 'Failed' : media.kind === 'video' ? 'Processing video' : 'Processing'}</span>
+      </div>
+    );
+  }
   return (
     <button
       onClick={onClick}

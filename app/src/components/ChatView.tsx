@@ -71,6 +71,18 @@ type UploadState = { index: number; total: number; progress: number; label?: str
  *  with the exact same component the gallery uses. */
 type ViewerState = { list: MediaInfo[]; index: number } | null;
 
+/** What the full-screen viewer can actually put on screen. `MediaViewer`
+ *  returns `null` for anything else (`media.status !== 'ready' || !media.url`),
+ *  so opening it on a still-processing item mounts an empty overlay — the tap
+ *  reads as "nothing happened", and the back gesture is then spent closing an
+ *  invisible viewer. Every path into the viewer filters through this, and the
+ *  *list* is filtered too, not just the tapped item: prev/next through an album
+ *  that is still transcoding would otherwise step into the same dead frame
+ *  (owner report, 2026-08-31 — "videos are hard to open"). */
+function viewable(media: MediaInfo): boolean {
+  return media.status === 'ready' && (media.kind === 'image' || media.kind === 'video');
+}
+
 /** The focus menu's (UI-8d) target — the message plus what was captured at
  *  the moment it opened: the bubble's on-screen rect (the lift animates from
  *  it) and the live DOM node (cloned for the lift — see MessageFocusMenu). */
@@ -961,6 +973,15 @@ export function ChatView({
     // bubble — no click event, so onBubbleClick never got to reset it).
     // Without this, that next tap would be silently swallowed.
     suppressClickRef.current = false;
+    // Disarm any previous gesture before the early returns below, not after
+    // them: every `return` in this function used to leave a live
+    // `swipeGestureRef` in place, so a press on a pending bubble (or a
+    // right-click) inherited the last block's gesture, and if that one was
+    // engaged its block kept the transform it was dragged to with nothing left
+    // to snap it back.
+    const stale = swipeGestureRef.current;
+    swipeGestureRef.current = null;
+    if (stale?.engaged) snapBack(stale.msg.id);
     const m = msgs[0];
     // Pending bubbles have nothing to act on yet (no server-side id at all)
     // and stay excluded entirely. Failed ones are deliberately let through —
@@ -1438,7 +1459,7 @@ export function ChatView({
   function openViewer(m: Message) {
     if (mediaTapSuppressed()) return;
     const media = m.media[0];
-    if (media?.status === 'ready' && (media.kind === 'image' || media.kind === 'video')) {
+    if (media && viewable(media)) {
       handleTap(m, () => setViewer({ list: [media], index: 0 }));
     }
   }
@@ -1449,7 +1470,18 @@ export function ChatView({
    *  already shows what you're picking, unlike a legacy fan). */
   function openAlbumViewer(m: Message, index: number) {
     if (mediaTapSuppressed()) return;
-    handleTap(m, () => setViewer({ list: m.media, index }));
+    // `index` addresses the mosaic's own tile order (which includes items that
+    // aren't ready yet, so the album's shape doesn't change under the reader
+    // as each one finishes); the viewer gets the `viewable` subset, so the
+    // tapped item has to be re-found in it. A tile that isn't ready draws a
+    // "Processing…" placeholder instead of a thumbnail (AlbumCard) and never
+    // reaches the viewer at all.
+    const target = m.media[index];
+    if (!target || !viewable(target)) return;
+    const list = m.media.filter(viewable);
+    const at = list.indexOf(target);
+    if (at === -1) return;
+    handleTap(m, () => setViewer({ list, index: at }));
   }
 
   /** The "+N" overflow tile on a 7–10 item album — reuses the same
@@ -1678,7 +1710,15 @@ export function ChatView({
         // `scrollTop < 300` and until that page lands this element is pinned at
         // its limit, so every further pull chains. `contain` rather than `none`
         // so the scroller keeps its own rubber-band feel; only the chain is cut.
-        style={{ overflowAnchor: 'none', overscrollBehaviorY: 'contain' }}
+        //
+        // `overflow-x: hidden` (rather than the `auto` that `overflow-y: auto`
+        // would otherwise force on this axis) because swipe-to-reply drags an
+        // incoming block up to `SWIPE_REPLY_MAX_PX` to the RIGHT — which grows
+        // this element's scrollWidth mid-gesture and hands the browser a real
+        // horizontal scroll range to compete for. The blocks' `touch-action:
+        // pan-y` already keeps the gesture ours; this makes sure there is
+        // nothing to scroll even if something else starts a horizontal pan.
+        style={{ overflowAnchor: 'none', overscrollBehaviorY: 'contain', overflowX: 'hidden' }}
       >
         {isLoading && <p className="text-center text-sm text-text-muted">Loading…</p>}
         {!isLoading && messages.length === 0 && (
@@ -1826,7 +1866,15 @@ export function ChatView({
         <MediaGridSheet
           items={gridSheetItems.map((media) => ({ media, thumbUrl: media.thumbUrl ?? media.url ?? undefined }))}
           onClose={() => setGridSheetItems(null)}
-          onPick={(index) => setViewer({ list: gridSheetItems, index })}
+          // Same `viewable` remap as `openAlbumViewer` — the sheet lists every
+          // item (including the ones still processing, which draw their own
+          // placeholder tile), the viewer only ever gets the ones it can show.
+          onPick={(index) => {
+            const target = gridSheetItems[index];
+            if (!target || !viewable(target)) return;
+            const list = gridSheetItems.filter(viewable);
+            setViewer({ list, index: list.indexOf(target) });
+          }}
         />
       )}
 
@@ -2416,7 +2464,34 @@ function MessageBlockRow({
           (intro ? 'animate-bubble-in ' : '')
         }
         style={{
-          touchAction: 'manipulation',
+          // `pan-y`, NOT `manipulation` — this is what makes swipe-to-reply
+          // work at all on a touch device, and it is not interchangeable with
+          // the `manipulation` used on ordinary controls elsewhere in the app.
+          //
+          // `manipulation` permits the browser to pan on BOTH axes. Inside the
+          // vertically-scrolling message list that means a horizontal drag is
+          // still a candidate scroll gesture, so Blink's compositor claims the
+          // touch the moment it passes its own ~8px slop — before our 12px
+          // engage threshold — and fires `pointercancel`. Measured against
+          // Chrome with real touch events: a 72px horizontal drag on a
+          // `manipulation` block delivers 3 pointermoves and then
+          // pointercancel with no pointerup at all, while the same drag on a
+          // `pan-y` block delivers every move and the release. That is
+          // precisely the reported symptom — the bubble twitches a few px, the
+          // cancel path snaps it back, and no reply ever fires (owner report,
+          // 2026-08-31; the 2026-08-23 fix addressed staleness and pointer
+          // capture, neither of which can help if the events stop arriving).
+          //
+          // `pan-y` keeps the list's vertical scrolling native and gives the
+          // horizontal axis to us. Double-tap-to-zoom stays suppressed exactly
+          // as `manipulation` suppressed it (any value other than `auto` does),
+          // so the double-tap-to-react gesture is unaffected. touch-action
+          // intersects down the ancestor chain, so descendants that set
+          // `manipulation` for themselves (media previews, the global
+          // button/a/[role=button] rule in index.css) are narrowed to `pan-y`
+          // here too — which is what we want: the swipe has to work when the
+          // finger starts on a photo or a link, not just on bubble padding.
+          touchAction: 'pan-y',
           WebkitTouchCallout: 'none',
           WebkitUserSelect: 'none',
           userSelect: 'none',
