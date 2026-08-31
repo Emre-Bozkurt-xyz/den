@@ -42,6 +42,7 @@ import {
   type ReauthStatus,
   type SecurityEvent,
   type SecurityEventsResponse,
+  type SigninFreezeResponse,
 } from '@den/shared';
 import { db } from '../db/index.js';
 import {
@@ -63,6 +64,7 @@ import {
   verifyOwnPassword,
 } from '../auth/reauth.js';
 import { expectedOrigins, passkeyFailed, rpID, setChallenge, takeChallenge } from '../auth/webauthn.js';
+import { frozenUsernames, globalFreeze, setGlobalFreeze, setUserFreeze } from '../auth/freeze.js';
 import { SecurityEventKind, listEvents, record } from '../admin/events.js';
 import { clientIp } from '../auth/clientIp.js';
 import { generateInviteCodes } from '../admin/invites.js';
@@ -154,6 +156,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   //
   // ⚠️ Operator facts only. No message counts, no chat lists — see the header.
   app.get('/admin/users', async () => {
+    const globalFrozenAt = await globalFreeze();
     const rows = await db
       .select({
         id: users.id,
@@ -162,6 +165,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         createdAt: users.createdAt,
         isOwner: users.isOwner,
         disabledAt: users.disabledAt,
+        loginsFrozenAt: users.loginsFrozenAt,
         // ⚠️ Written as literal, TABLE-QUALIFIED SQL rather than with drizzle
         // column interpolation, and that is not a style choice. Interpolating
         // `${users.id}` inside a `sql` template emits a BARE `"id"` with no
@@ -191,6 +195,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         lastSeenAt: r.lastSeenAt ? new Date(r.lastSeenAt).toISOString() : null,
         isOwner: r.isOwner,
         disabledAt: r.disabledAt ? r.disabledAt.toISOString() : null,
+        loginsFrozenAt: r.loginsFrozenAt ? r.loginsFrozenAt.toISOString() : null,
+        globalFrozen: globalFrozenAt !== null,
         hasPassword: r.hasPassword,
         passkeyCount: r.passkeyCount,
         vaultLinked: r.vaultLinked,
@@ -525,6 +531,68 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         data: { revoked: doomed.length, keptOwnSession: rows.length !== doomed.length },
       });
       return { ok: true, revoked: doomed.length };
+    },
+  );
+
+
+  // ── sign-in freeze (docs/SIGNIN_FREEZE.md §6) ───────────────────────────
+  //
+  // ⚠️ Deliberately NOT behind requireFreshAuth. Freezing is reversible and
+  // low-harm — the same reasoning that exempts clearing a lock. A re-auth
+  // prompt on every flip would train the owner to click through it, and this
+  // is a control you want flipped freely and often.
+
+  app.get('/admin/signin-freeze', async () => {
+    const [globalFrozenAt, frozen] = await Promise.all([globalFreeze(), frozenUsernames()]);
+    const res: SigninFreezeResponse = {
+      globalFrozenAt: globalFrozenAt ? globalFrozenAt.toISOString() : null,
+      frozenUsernames: frozen,
+    };
+    return res;
+  });
+
+  /** The server-wide switch. Freezes every account regardless of its own flag. */
+  app.post<{ Params: { state: string } }>('/admin/signin-freeze/:state', async (req) => {
+    const me = req.user!;
+    if (req.params.state !== 'on' && req.params.state !== 'off') {
+      throw validation('state must be on or off');
+    }
+    const frozen = req.params.state === 'on';
+    await setGlobalFreeze(frozen, me.id);
+    await record({
+      kind: frozen ? SecurityEventKind.SigninFrozen : SecurityEventKind.SigninUnfrozen,
+      actorUserId: me.id,
+      ip: clientIp(req, env.trustedProxy),
+      userAgent: req.headers['user-agent'] ?? null,
+      data: { scope: 'global' },
+    });
+    return { ok: true };
+  });
+
+  /** One account's own switch, independent of the global one. */
+  app.post<{ Params: { id: string; state: string } }>(
+    '/admin/users/:id/signin-freeze/:state',
+    async (req) => {
+      const me = req.user!;
+      const userId = parseBigint(req.params.id, 'id');
+      if (userId === undefined) throw validation('id required');
+      if (req.params.state !== 'on' && req.params.state !== 'off') {
+        throw validation('state must be on or off');
+      }
+      const frozen = req.params.state === 'on';
+      const username = await setUserFreeze(userId, frozen);
+      if (username === null) throw notFound('no such user');
+
+      await record({
+        kind: frozen ? SecurityEventKind.SigninFrozen : SecurityEventKind.SigninUnfrozen,
+        userId,
+        username,
+        actorUserId: me.id,
+        ip: clientIp(req, env.trustedProxy),
+        userAgent: req.headers['user-agent'] ?? null,
+        data: { scope: 'user' },
+      });
+      return { ok: true };
     },
   );
 

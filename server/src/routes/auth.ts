@@ -38,6 +38,7 @@ import { checkLock, clearFailures, recordFailure, sweepExpired } from '../auth/t
 import { clientIp } from '../auth/clientIp.js';
 import { isOwner } from '../auth/owner.js';
 import { SecurityEventKind, isUnfamiliarUserAgent, record } from '../admin/events.js';
+import { assertSigninAllowed } from '../auth/signinGate.js';
 import { notifyUser } from '../push/notify.js';
 import { createSession, destroySession, requireAuth } from '../auth/session.js';
 import { toPublicUser } from '../mappers.js';
@@ -297,6 +298,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         avatarKey: users.avatarKey,
         passwordHash: users.passwordHash,
         disabledAt: users.disabledAt,
+        loginsFrozenAt: users.loginsFrozenAt,
       })
       .from(users)
       .where(eq(users.username, username))
@@ -354,6 +356,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (row.disabledAt) {
       throw new AppError(403, ErrorCode.AccountDisabled, 'This account has been disabled');
     }
+
+    // Sign-in freeze (docs/SIGNIN_FREEZE.md §3). ⚠️ Also after the verify, and
+    // for the same reason as the disabled check above: telling an unverified
+    // caller that an account is frozen would reveal which usernames exist and
+    // which are locked down.
+    await assertSigninAllowed(row.id, row.username, ip, userAgent);
 
     // Proving who you are resets your own counter — so a burst of wrong
     // guesses against you can never accumulate into a lock you can't clear.

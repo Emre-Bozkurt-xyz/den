@@ -16,7 +16,7 @@
  */
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, KeyRound, Loader2, Plus, Shield, Ticket, Trash2, UserX, Users } from 'lucide-react';
+import { AlertTriangle, KeyRound, Loader2, Lock, Plus, Shield, Ticket, Trash2, Unlock, UserX, Users } from 'lucide-react';
 import type { SecurityEvent } from '@den/shared';
 import { ScreenHeader } from './ScreenHeader';
 import { ReauthPrompt } from './ReauthPrompt';
@@ -34,6 +34,9 @@ import {
   mintInvites,
   revokeInvite,
   revokeSessions,
+  setGlobalSigninFreeze,
+  setUserSigninFreeze,
+  signinFreeze,
 } from '../lib/admin';
 
 type Tab = 'feed' | 'users' | 'invites' | 'locks';
@@ -183,6 +186,12 @@ function describe(e: SecurityEvent): string {
       return `${who} was disabled`;
     case 'user.enabled':
       return `${who} was re-enabled`;
+    case 'signin.frozen':
+      return e.data.scope === 'global' ? 'sign-ins were frozen for everyone' : `sign-in was frozen for ${who}`;
+    case 'signin.unfrozen':
+      return e.data.scope === 'global' ? 'sign-ins were unfrozen for everyone' : `sign-in was unfrozen for ${who}`;
+    case 'signin.blocked':
+      return `${who} signed in correctly but was blocked by the freeze`;
     default:
       return `${e.kind} — ${who}`;
   }
@@ -260,6 +269,16 @@ function UsersPanel() {
                 {u.disabledAt && (
                   <p className="mt-0.5 text-xs text-red-600 dark:text-red-400">Disabled</p>
                 )}
+                {(u.loginsFrozenAt || u.globalFrozen) && (
+                  <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
+                    Sign-in frozen
+                    {u.loginsFrozenAt && u.globalFrozen
+                      ? ' (this account + global)'
+                      : u.globalFrozen
+                        ? ' (global switch)'
+                        : ' (this account)'}
+                  </p>
+                )}
 
                 {/* The owner's own row gets no destructive controls: disabling
                     yourself is refused server-side, and revoking your own
@@ -279,6 +298,21 @@ function UsersPanel() {
                         Sign out all devices
                       </button>
                     )}
+                    <button
+                      type="button"
+                      disabled={act.busy}
+                      onClick={() =>
+                        act.run(
+                          u.loginsFrozenAt ? `unfreezing @${u.username}` : `freezing @${u.username}`,
+                          () => setUserSigninFreeze(u.id, !u.loginsFrozenAt),
+                        )
+                      }
+                      className="flex items-center gap-1 text-xs font-semibold text-indigo-600 disabled:opacity-40 dark:text-indigo-400"
+                      style={{ touchAction: 'manipulation' }}
+                    >
+                      {u.loginsFrozenAt ? <Unlock size={12} /> : <Lock size={12} />}
+                      {u.loginsFrozenAt ? 'Allow sign-in' : 'Freeze sign-in'}
+                    </button>
                     <button
                       type="button"
                       disabled={act.busy}
@@ -431,7 +465,10 @@ function LocksPanel() {
   });
 
   return (
-    <Panel title="Failed sign-ins">
+    <>
+      <GlobalFreezePanel />
+      <div className="mt-4" />
+      <Panel title="Failed sign-ins">
       {act.prompt}
       {act.error && <p className="mb-2 text-sm text-red-600 dark:text-red-400">{act.error}</p>}
       {q.isPending && <Pending />}
@@ -475,6 +512,82 @@ function LocksPanel() {
           <span className="font-mono">npm run auth:unlock clear &lt;username&gt;</span>.
         </span>
       </p>
-    </Panel>
+      </Panel>
+    </>
+  );
+}
+
+/**
+ * The server-wide sign-in freeze (docs/SIGNIN_FREEZE.md §6).
+ *
+ * ⚠️ The copy has to be exact about what this does, because the failure mode
+ * is an owner who thinks it signs people out (it does not) or who forgets it
+ * is on and quietly locks out a friend whose session expired.
+ */
+function GlobalFreezePanel() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ['admin', 'freeze'], queryFn: signinFreeze });
+
+  const toggle = useMutation({
+    mutationFn: (frozen: boolean) => setGlobalSigninFreeze(frozen),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin'] }),
+  });
+
+  const frozen = Boolean(q.data?.globalFrozenAt);
+
+  return (
+    <section
+      className={
+        'rounded-lg border p-4 ' +
+        (frozen ? 'border-red-600 bg-surface-raised dark:border-red-400' : 'border-border bg-surface-raised')
+      }
+    >
+      <h3 className="flex items-center gap-2 text-sm font-semibold text-text-primary">
+        {frozen ? <Lock size={15} /> : <Unlock size={15} />} Sign-in freeze
+      </h3>
+
+      {q.isPending && <Pending />}
+
+      {q.isSuccess && (
+        <>
+          <p className="mt-2 text-xs text-text-secondary">
+            {frozen
+              ? 'No account can start a new session — not with a password, not with a passkey, even if the credentials are right. Everyone already signed in is unaffected.'
+              : 'Sign-ins are open. Freeze to stop any new session being created while everyone who needs access is already signed in.'}
+          </p>
+
+          <button
+            type="button"
+            disabled={toggle.isPending}
+            onClick={() => toggle.mutate(!frozen)}
+            className={
+              'mt-3 flex items-center gap-2 rounded-md px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-40 ' +
+              (frozen
+                ? 'bg-accent text-white hover:bg-accent-hover'
+                : 'border border-border hover:bg-surface-hover')
+            }
+            style={{ touchAction: 'manipulation' }}
+          >
+            {toggle.isPending ? <Loader2 size={14} className="animate-spin" /> : frozen ? <Unlock size={14} /> : <Lock size={14} />}
+            {frozen ? 'Unfreeze everyone' : 'Freeze all sign-ins'}
+          </button>
+
+          {frozen && (
+            <p className="mt-2 text-xs text-text-secondary">
+              ⚠️ Anyone who gets signed out while this is on — an expired session, cleared site
+              data, a reinstalled PWA — will need you to unfreeze before they can get back in.
+              You&apos;ll get a notification if someone with the right credentials is turned away.
+            </p>
+          )}
+
+          {(q.data.frozenUsernames.length > 0) && (
+            <p className="mt-2 text-xs text-text-secondary">
+              Individually frozen (independent of this switch):{' '}
+              <span className="font-mono">{q.data.frozenUsernames.join(', ')}</span>
+            </p>
+          )}
+        </>
+      )}
+    </section>
   );
 }

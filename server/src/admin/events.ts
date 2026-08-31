@@ -42,6 +42,13 @@ export const SecurityEventKind = {
   /** Owner action: an account was disabled / re-enabled. */
   UserDisabled: 'user.disabled',
   UserEnabled: 'user.enabled',
+  /** Owner action: sign-in freeze toggled (per-user or global). */
+  SigninFrozen: 'signin.frozen',
+  SigninUnfrozen: 'signin.unfrozen',
+  /** ⚠️ The alarm worth having (docs/SIGNIN_FREEZE.md §5): a sign-in was
+   *  refused AFTER the credentials checked out. Either a locked-out friend
+   *  needs help, or someone holds a working credential. Both are urgent. */
+  SigninBlocked: 'signin.blocked',
 } as const;
 
 export type SecurityEventKindName = (typeof SecurityEventKind)[keyof typeof SecurityEventKind];

@@ -37,6 +37,10 @@ export const ErrorCode = {
   /** The account exists but is not permitted to sign in (docs/ADMIN_CONSOLE.md
    *  §7 reserves this for disabled accounts; nothing sets it yet). */
   AccountDisabled: 'account_disabled',
+  /** Sign-in is administratively paused for this account (docs/SIGNIN_FREEZE.md).
+   *  The credentials were CORRECT — this is not a rejection of them. Clients
+   *  should show the server's message verbatim, since it names who to contact. */
+  SigninFrozen: 'signin_frozen',
   /** A passkey ceremony could not be completed — expired/absent challenge,
    *  failed verification, or an unknown credential (docs/PASSKEYS.md §6).
    *  Deliberately ONE code for all of them: distinguishing "no such credential"
@@ -275,6 +279,11 @@ export interface AdminUser {
   lastSeenAt: string | null;
   isOwner: boolean;
   disabledAt: string | null;
+  /** This account's own sign-in freeze (docs/SIGNIN_FREEZE.md). */
+  loginsFrozenAt: string | null;
+  /** True when the SERVER-WIDE switch is on. Same for every row; carried per
+   *  row so the UI can say "frozen (global)" without a second lookup. */
+  globalFrozen: boolean;
   /** Credential inventory (docs/ADMIN_CONSOLE.md §3d). */
   hasPassword: boolean;
   passkeyCount: number;
@@ -366,6 +375,14 @@ export interface MintInvitesRequest {
 
 export interface MintInvitesResponse {
   codes: string[];
+}
+
+/** Global sign-in freeze state (docs/SIGNIN_FREEZE.md §6). */
+export interface SigninFreezeResponse {
+  /** Server-wide switch: when set, every account is frozen. */
+  globalFrozenAt: string | null;
+  /** Accounts with their OWN flag set — independent of the global switch. */
+  frozenUsernames: string[];
 }
 
 // ─── push (Stage 0 PoC + Stage 2 real) ──────────────────────────────────────

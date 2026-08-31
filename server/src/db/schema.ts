@@ -51,6 +51,9 @@
  *   substrate. security_events (append-only history) · users.is_owner ·
  *   users.disabled_at · invite_codes.revoked_at.
  *
+ * Migration 017 (post-MVP, docs/SIGNIN_FREEZE.md): sign-in freeze.
+ *   users.logins_frozen_at · app_settings (first singleton config row).
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -111,6 +114,32 @@ export const users = pgTable('users', {
   // every login path refuses. NOT a delete: messages, media and memberships
   // are untouched, because they are part of other people's conversations.
   disabledAt: timestamp('disabled_at', { withTimezone: true }),
+  // Migration 017 (docs/SIGNIN_FREEZE.md). Set → no NEW session may be created
+  // for this account by any means, even with correct credentials. ⚠️ Existing
+  // sessions are untouched: that is the entire point, and `resolveSession`
+  // must never consult this or freezing would sign everyone out.
+  loginsFrozenAt: timestamp('logins_frozen_at', { withTimezone: true }),
+});
+
+/**
+ * Server-wide settings — a single row, id always 1 (migration 017,
+ * docs/SIGNIN_FREEZE.md §2).
+ *
+ * ⚠️ Kept SEPARATE from `users.logins_frozen_at` rather than folded into one
+ * "is frozen" flag: lifting a global lockdown must not silently clear the
+ * per-user freezes an owner set during the same incident. Two switches, either
+ * of which freezes; neither knows about the other.
+ *
+ * First config table in Den. Keep it to genuinely global operational state —
+ * anything per-user belongs on `users`, anything per-preference belongs in
+ * `users.settings`.
+ */
+export const appSettings = pgTable('app_settings', {
+  id: integer('id').primaryKey().default(1),
+  /** Set → every account is frozen, regardless of its own flag. */
+  signinsFrozenAt: timestamp('signins_frozen_at', { withTimezone: true }),
+  updatedBy: bigint('updated_by', { mode: 'bigint' }).references(() => users.id),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const authIdentities = pgTable(

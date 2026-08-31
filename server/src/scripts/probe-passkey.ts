@@ -12,12 +12,9 @@
  *
  *   npx tsx server/src/scripts/probe-passkey.ts http://localhost:3000
  */
-import { createHash, createSign, generateKeyPairSync, randomBytes } from 'node:crypto';
-import { isoBase64URL, isoCBOR } from '@simplewebauthn/server/helpers';
-
-/** The CBOR value type the encoder accepts — mirrored rather than imported,
- *  since tiny-cbor is a transitive dep and not ours to depend on directly. */
-type CBOR = number | bigint | string | Uint8Array | boolean | null | undefined | CBOR[] | Map<string | number, CBOR>;
+import { randomBytes } from 'node:crypto';
+import { isoBase64URL } from '@simplewebauthn/server/helpers';
+import { Authenticator, b64u } from './lib/softAuthenticator.js';
 
 const base = (process.argv[2] ?? 'http://localhost:3000').replace(/\/+$/, '');
 const ORIGIN = base;
@@ -80,108 +77,6 @@ class Session {
   }
 }
 
-// ─── software authenticator ─────────────────────────────────────────────────
-
-const b64u = (b: Buffer | Uint8Array): string => isoBase64URL.fromBuffer(new Uint8Array(b));
-
-/** Build the COSE_Key (EC2/P-256/ES256) form of a raw uncompressed public key. */
-function coseKey(raw: Buffer): Uint8Array {
-  const x = raw.subarray(1, 33);
-  const y = raw.subarray(33, 65);
-  const m = new Map<string | number, CBOR>([
-    [1, 2], // kty: EC2
-    [3, -7], // alg: ES256
-    [-1, 1], // crv: P-256
-    [-2, new Uint8Array(x)],
-    [-3, new Uint8Array(y)],
-  ]);
-  return new Uint8Array(isoCBOR.encode(m));
-}
-
-/** `authenticatorData`: rpIdHash | flags | signCount | [attestedCredentialData] */
-function authData(rpId: string, flags: number, signCount: number, attested?: Buffer): Buffer {
-  const rpIdHash = createHash('sha256').update(rpId).digest();
-  const counter = Buffer.alloc(4);
-  counter.writeUInt32BE(signCount);
-  return Buffer.concat([rpIdHash, Buffer.from([flags]), counter, attested ?? Buffer.alloc(0)]);
-}
-
-class Authenticator {
-  readonly credentialId = randomBytes(32);
-  private privateKey: string;
-  private publicRaw: Buffer;
-  /** Reported sign counter. 0 means "this authenticator doesn't count", which
-   *  is what Apple and Google actually do — the server must tolerate it. */
-  signCount: number;
-
-  constructor(signCount = 0) {
-    const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    this.privateKey = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
-    this.publicRaw = Buffer.from(publicKey.export({ type: 'spki', format: 'der' })).subarray(-65);
-    this.signCount = signCount;
-  }
-
-  private clientData(type: string, challenge: string): Buffer {
-    return Buffer.from(JSON.stringify({ type, challenge, origin: ORIGIN, crossOrigin: false }));
-  }
-
-  /** A registration response, `none` attestation. */
-  register(rpId: string, challenge: string): Record<string, unknown> {
-    const cose = coseKey(this.publicRaw);
-    const attested = Buffer.concat([
-      Buffer.alloc(16), // AAGUID: all zeroes
-      Buffer.from([this.credentialId.length >> 8, this.credentialId.length & 0xff]),
-      this.credentialId,
-      Buffer.from(cose),
-    ]);
-    // UP | UV | AT
-    const data = authData(rpId, 0x01 | 0x04 | 0x40, this.signCount, attested);
-    const attestationObject = isoCBOR.encode(
-      new Map<string | number, CBOR>([
-        ['fmt', 'none'],
-        ['attStmt', new Map<string | number, CBOR>()],
-        ['authData', new Uint8Array(data)],
-      ]),
-    );
-    const clientDataJSON = this.clientData('webauthn.create', challenge);
-    return {
-      id: b64u(this.credentialId),
-      rawId: b64u(this.credentialId),
-      type: 'public-key',
-      clientExtensionResults: {},
-      response: {
-        clientDataJSON: b64u(clientDataJSON),
-        attestationObject: b64u(new Uint8Array(attestationObject)),
-        transports: ['internal'],
-      },
-    };
-  }
-
-  /** An assertion. `counterOverride` lets a test present a stale counter. */
-  authenticate(rpId: string, challenge: string, counterOverride?: number): Record<string, unknown> {
-    const count = counterOverride ?? (this.signCount === 0 ? 0 : ++this.signCount);
-    const data = authData(rpId, 0x01 | 0x04, count); // UP | UV
-    const clientDataJSON = this.clientData('webauthn.get', challenge);
-    const signed = Buffer.concat([
-      data,
-      createHash('sha256').update(clientDataJSON).digest(),
-    ]);
-    const signature = createSign('SHA256').update(signed).sign(this.privateKey);
-    return {
-      id: b64u(this.credentialId),
-      rawId: b64u(this.credentialId),
-      type: 'public-key',
-      clientExtensionResults: {},
-      response: {
-        clientDataJSON: b64u(clientDataJSON),
-        authenticatorData: b64u(data),
-        signature: b64u(signature),
-        userHandle: null,
-      },
-    };
-  }
-}
-
 // ─── the run ────────────────────────────────────────────────────────────────
 
 const rnd = () => randomBytes(5).toString('hex');
@@ -230,7 +125,7 @@ async function main(): Promise<void> {
 
   // ── 1. registration ─────────────────────────────────────────────────────
   console.log('1. register a passkey');
-  const auth = new Authenticator();
+  const auth = new Authenticator(ORIGIN);
   const regOpts = await alice.call('/api/auth/passkey/register/options', { body: {} });
   check('options issued', regOpts.status === 200 && !!regOpts.body?.challenge, String(regOpts.status));
   const regVerify = await alice.call('/api/auth/passkey/register/verify', {
@@ -344,7 +239,7 @@ async function main(): Promise<void> {
   // throughout. A counter that IS in use and goes backwards means a cloned
   // credential, and must not be.
   console.log('\n8. sign-count regression (a counting authenticator)');
-  const counting = new Authenticator(5);
+  const counting = new Authenticator(ORIGIN, 5);
   const rOpts = await bob.call('/api/auth/passkey/register/options', { body: {} });
   const rVerify = await bob.call('/api/auth/passkey/register/verify', {
     body: { response: counting.register(rpId, rOpts.body.challenge), label: 'Counting key' },

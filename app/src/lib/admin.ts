@@ -20,6 +20,7 @@ import type {
   PasskeyCeremonyOptions,
   ReauthStatus,
   SecurityEventsResponse,
+  SigninFreezeResponse,
 } from '@den/shared';
 import { ApiFetchError, api } from './api';
 
@@ -118,4 +119,26 @@ export function disableUser(userId: string): Promise<void> {
 /** Needs fresh auth. */
 export function enableUser(userId: string): Promise<void> {
   return api(`/api/admin/users/${encodeURIComponent(userId)}/enable`, { method: 'POST' });
+}
+
+// ─── sign-in freeze (docs/SIGNIN_FREEZE.md) ─────────────────────────────────
+//
+// No re-auth on these: freezing is reversible and low-harm, and a prompt on
+// every flip would train the owner to click through it.
+
+export function signinFreeze(): Promise<SigninFreezeResponse> {
+  return api<SigninFreezeResponse>('/api/admin/signin-freeze');
+}
+
+/** The server-wide switch — freezes every account at once. */
+export function setGlobalSigninFreeze(frozen: boolean): Promise<void> {
+  return api(`/api/admin/signin-freeze/${frozen ? 'on' : 'off'}`, { method: 'POST' });
+}
+
+/** One account's own switch, independent of the global one. */
+export function setUserSigninFreeze(userId: string, frozen: boolean): Promise<void> {
+  return api(
+    `/api/admin/users/${encodeURIComponent(userId)}/signin-freeze/${frozen ? 'on' : 'off'}`,
+    { method: 'POST' },
+  );
 }

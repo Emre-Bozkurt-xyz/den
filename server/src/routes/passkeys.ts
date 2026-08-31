@@ -55,6 +55,7 @@ import {
   takeChallenge,
 } from '../auth/webauthn.js';
 import { SecurityEventKind, isUnfamiliarUserAgent, record } from '../admin/events.js';
+import { assertSigninAllowed } from '../auth/signinGate.js';
 import { clientIp } from '../auth/clientIp.js';
 import { env } from '../env.js';
 import { toPublicUser } from '../mappers.js';
@@ -234,6 +235,7 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
           displayName: users.displayName,
           avatarKey: users.avatarKey,
           disabledAt: users.disabledAt,
+          loginsFrozenAt: users.loginsFrozenAt,
         })
         .from(webauthnCredentials)
         .innerJoin(users, eq(users.id, webauthnCredentials.userId))
@@ -270,6 +272,17 @@ export async function passkeyRoutes(app: FastifyInstance): Promise<void> {
       if (cred.disabledAt) {
         throw new AppError(403, ErrorCode.AccountDisabled, 'This account has been disabled');
       }
+
+      // ⚠️ A passkey is not an exemption. It proves identity beautifully and
+      // says nothing about whether the door is bolted — a frozen account is
+      // frozen against every credential type, or the freeze means nothing to
+      // anyone who has enrolled one (docs/SIGNIN_FREEZE.md §3).
+      await assertSigninAllowed(
+        cred.userId,
+        cred.username,
+        clientIp(req, env.trustedProxy),
+        req.headers['user-agent'] ?? null,
+      );
 
       // ⚠️ Signature-counter check (docs/PASSKEYS.md §5). Most platform
       // authenticators (Apple, Google) always report 0 — that is normal and
