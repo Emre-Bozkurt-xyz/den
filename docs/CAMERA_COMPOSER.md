@@ -184,16 +184,19 @@ Per PROJECT.md §12, everything here is unverified on iOS and none of it can be 
 - **The rehauled pill against the iOS keyboard** — the composer's `--kb-inset` behavior is unchanged in principle, but the pill now grows multi-line with controls pinned inside it, which is new geometry over load-bearing padding logic (docs/IOS_KEYBOARD.md).
 - **The mic gesture inside the pill.** Unchanged code (D9), new surroundings — the drag-left-to-cancel path now travels across two sibling buttons. Pointer capture should make that a non-event; confirm it is.
 
-## 8. Video — deliberately phase 2, not now (D3)
+## 8. Video (phase 2 — shipped 2026-09-01)
 
-Recorded here so the phase-1 shape doesn't foreclose it:
+**Tap the shutter for a photo, hold it for video.** Release stops and goes to review; sliding up past the lock threshold goes hands-free, after which only a tap on the shutter stops it.
 
-- The shutter's **ring is a separate element** specifically so it can become the recording progress ring without restructuring the button.
-- The gesture is a direct port of the voice recorder's, which is already tuned and dev-verified: `LOCK_THRESHOLD_DY = -115` slide-up-to-lock, `CANCEL_THRESHOLD_DX = -120` slide-left-to-cancel, haptic tick on threshold crossing, `setPointerCapture` on pointerdown, `pointercancel` handled. `lib/pressGesture.ts` is the precedent for the tap-vs-hold discriminator the shutter needs and the mic doesn't.
-- Phase 2 must request `audio: true`, which means a second permission prompt and re-checking the iOS gesture rules for `AudioContext`.
-- Container variance is already a solved problem: the transcode pipeline (docs/VIDEO_TRANSCODE.md, shipped 2026-08-26) normalizes whatever the platform records to h264+aac mp4, so Safari's `video/mp4` and Chrome's `video/webm` are both fine — the same posture voice already has.
-- Needs a duration cap against `MediaLimits.maxBytes.video` (500MB) — a MediaRecorder left running is unbounded.
-- The review step (§5.5) needs a `<video>` variant; the tray and `AttachmentSheet` already handle `kind: 'video'` thumbs.
+- **Tap vs hold is resolved by `lib/pressGesture.ts`**, reused rather than reimplemented — this button has the *same* hazard the GIF picker had, which is what that module exists for: the click that follows a completed hold must not also fire the tap action. There it would send a GIF; here it would snap a photo on top of the video you just recorded. `pressMove` is deliberately **not** used — it exists to abandon a pending press when the surface underneath scrolls, and this panel has no scroller; movement here is a *meaningful* gesture (slide up to lock), not a cancellation signal.
+- `HOLD_TO_RECORD_MS = 300`. The mic button needs no equivalent because it has only one meaning; this button has two.
+- **Lock at `LOCK_THRESHOLD_DY = -115`**, the same value as the voice recorder so muscle memory transfers — but its own constant, not a shared one, so retuning one surface on a device pass can't silently drag the other along. ⚠️ The shutter carries `touch-action: none` for the same measured reason the mic does (PROJECT.md §12, 2026-08-31).
+- **No slide-left-to-cancel**, unlike voice: the review step (Retake / Back) is already the escape hatch, and a second destructive drag on the same button is surface nobody asked for.
+- **Audio is requested up front**, with the camera, not when a recording starts — prompting mid-hold would interrupt the very gesture that triggered it. ⚠️ **A refused or absent mic must never cost you the camera**: the acquire retries video-only and downgrades to silent video, with a standing "No microphone — video will be silent" label so a mute clip is never a surprise.
+- `MAX_VIDEO_MS = 60_000`, auto-stopping into review, with the ring drawing elapsed against it. `MediaRecorder` left running is unbounded and `MediaLimits.maxBytes.video` is 500MB; a time cap is the practical proxy. Longer video still has a path — pick it from the gallery, where the real limit applies.
+- **No `mimeType` option on `MediaRecorder`**, exactly as the voice path does it: the platform picks its native container (Safari mp4, Chrome webm) and the server normalizes to h264+aac mp4 (docs/VIDEO_TRANSCODE.md). Choosing here would mean an `isTypeSupported` ladder that buys nothing. The `;codecs=` parameter is stripped off the stored mime; the server validates by *family* plus a magic-number sniff, so both containers pass unchanged.
+- Review renders a `<video controls>` rather than an autoplaying muted loop — you cannot judge a clip whose audio you are not allowed to hear.
+- Unmounting mid-recording discards via a `discardRef`, mirroring `Composer`. Backgrounding mid-recording **finishes** rather than discards: the bytes so far are real and review can still bin them.
 
 ## 9. Docs & bookkeeping (same change, not a follow-up)
 
@@ -232,4 +235,12 @@ Run against a throwaway Vite harness mounting the real components with the real 
 - **Track teardown verified by track state, not by inspection**: `live` while open, `ended` after Close, `ended` on `visibilitychange → hidden`, and a *new* stream acquired on return to visible with the feed live again.
 - Both failure states render the right message with the gallery fallback present and the shutter/switch withdrawn: `NotAllowedError` → "Camera access is off for this site…", `NotFoundError` → "No camera found on this device."
 
-**Not covered by this pass** (and not claimable from it): anything WebKit-specific in §7, real camera hardware, orientation on a physically rotated device, the front-camera mirroring judgment (D11), and actual capture quality (D2) — the source here was a flat synthetic canvas.
+**Video capture (phase 2), same harness, 2026-09-01**
+- Tap → photo, hold → video, and **no stray photo on release** — the `pressGesture` suppression works on the surface it was borrowed for.
+- Slide-up-to-lock: a 60px drag holds (under the −115px threshold), a 130px drag locks. **Lifting the finger while locked keeps recording** — the trailing click is swallowed — and a subsequent genuine tap stops it and lands in review. That is the case that would have been silently broken, and it is the reason to test it rather than reason about it.
+- The handed-over file is `camera-<ts>.webm`, `video/webm`, with the `;codecs=` parameter stripped.
+- Mic refused: audio is still requested, the camera **still works**, the "No microphone" label shows, video still records, and no error state appears.
+
+⚠️ **Two probe bugs in this pass, both of which faked a product failure**, and both the same shape as the composer pass's `aria-label` mistake — worth stating plainly because it has now happened three times: (1) a `recording()` detector querying `svg circle` document-wide matched the `<circle>` inside **lucide icons**, so it returned true on a freshly loaded page; `until(recording)` then returned instantly and every simulated drag fired *before* the 300ms hold had elapsed, making a correct lock look broken. (2) Test cases were driving a single long-lived panel, so state leaked between them — a recording still in flight from an earlier case makes `pointerdown` correctly early-return, which reads as a dead gesture. Fixes: scope the detector to the shutter's own ring, and reload the page between cases. **The general rule: a detector that can match anything other than the exact thing under test is not evidence, and a shared fixture makes every later case a lie.**
+
+**Not covered by this pass** (and not claimable from it): anything WebKit-specific in §7, real camera hardware, orientation on a physically rotated device, the front-camera mirroring judgment (D11), actual capture quality (D2), the 60s auto-stop (not waited out), and real audio in a recorded clip — the harness stream is a canvas with no audio track. The source here was a flat synthetic canvas.

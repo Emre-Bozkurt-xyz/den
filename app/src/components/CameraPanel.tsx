@@ -1,18 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, Check, Image as ImageIcon, RotateCcw, SwitchCamera } from 'lucide-react';
+import { ArrowLeft, Check, ChevronUp, Image as ImageIcon, Lock, MicOff, RotateCcw, SwitchCamera } from 'lucide-react';
 import { useBackHandler } from '../lib/backStack';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
+import { IDLE, pressCancel, pressClick, pressDown, pressFire, type PressState } from '../lib/pressGesture';
 
 /**
- * docs/CAMERA_COMPOSER.md §5 — the in-app camera.
+ * docs/CAMERA_COMPOSER.md §5 (photo) and §8 (video) — the in-app camera.
  *
- * Photo only (D3): all of the platform risk lives in video (MediaRecorder
- * with a video track on iOS, baked-in stream orientation, unbounded duration
- * against the 500MB ceiling), and photo-only never asks for the microphone,
- * so this prompts for exactly one permission. Phase 2 is §8 of that doc —
- * the shutter's ring is a separate element specifically so it can become a
- * recording progress ring without restructuring the button.
+ * **Tap the shutter for a photo, hold it for video.** Release stops and goes
+ * to review; sliding up past the lock threshold goes hands-free, after which
+ * only a tap on the shutter stops it. Container variance is a non-issue: the
+ * server transcodes whatever the platform records to h264+aac mp4
+ * (docs/VIDEO_TRANSCODE.md), exactly as it already does for voice, so this
+ * passes `new MediaRecorder(stream)` with no options and lets each browser
+ * pick its native container.
  *
  * This component knows nothing about uploads. A capture becomes a `File` and
  * goes out through `onFiles`, which `ChatView` points at the same
@@ -47,14 +49,48 @@ const JPEG_QUALITY = 0.92;
  *  selfie during the device pass is a one-word change. */
 const MIRROR_FRONT_CAPTURE = false;
 
+/** How long the shutter must be held before it starts recording instead of
+ *  taking a photo. The mic button needs no equivalent because it has only one
+ *  meaning; this button has two, and this is what separates them. */
+const HOLD_TO_RECORD_MS = 300;
+/** Hard ceiling on one clip. `MediaRecorder` left running is unbounded, and
+ *  `MediaLimits.maxBytes.video` is 500MB — a time cap is the practical proxy,
+ *  and 60s matches what every messenger allows in-line. Longer video still has
+ *  a path: pick it from the gallery, where the real 500MB limit applies. */
+const MAX_VIDEO_MS = 60_000;
+/** Slide up past this to lock (hands-free). Deliberately the same value as
+ *  `Composer`'s voice recorder, so muscle memory transfers between the two
+ *  hold-to-record gestures — but kept as its own constant rather than shared,
+ *  because if a device pass retunes one surface it should not silently drag
+ *  the other along. There is intentionally NO slide-left-to-cancel here: the
+ *  review step (Retake / Back) is already the escape hatch, and a second
+ *  destructive drag on the same button is surface nobody asked for. */
+const LOCK_THRESHOLD_DY = -115;
+
 type Facing = 'environment' | 'user';
-type Captured = { file: File; url: string };
+type Captured = { file: File; url: string; kind: 'image' | 'video' };
+/** `locked` = recording hands-free; the finger is gone and only a tap on the
+ *  shutter resolves it. */
+type RecState = 'idle' | 'recording' | 'locked';
+
+/** Best-effort haptic tick on crossing the lock threshold, mirroring
+ *  `Composer`'s. Android Chrome supports the Vibration API; iOS Safari does
+ *  not expose it at all, so this is a silent no-op there — feature-detected,
+ *  never assumed. */
+function haptic(ms: number): void {
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') navigator.vibrate(ms);
+}
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(Math.max(0, ms) / 1000);
+  return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+}
 
 export function CameraPanel({
   onFiles,
   onClose,
 }: {
-  /** Captured photo, or a pick from the device gallery — both go to
+  /** Captured photo or video, or a pick from the device gallery — all go to
    *  `ChatView.handleAddFiles`, so `stageFiles` enforces kind/size/the
    *  10-attachment cap centrally and this component owns no validation. */
   onFiles: (files: File[]) => void;
@@ -67,6 +103,13 @@ export function CameraPanel({
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [recState, setRecState] = useState<RecState>('idle');
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [lockProgress, setLockProgress] = useState(0);
+  /** False when the mic was refused or absent but the camera worked — video
+   *  still records, silently, and the UI says so rather than surprising
+   *  someone with a mute clip. */
+  const [audioAvailable, setAudioAvailable] = useState(true);
   /** Bumped to force the acquire effect to re-run after the stream was torn
    *  down for a backgrounded tab (see the visibility effect). */
   const [restartKey, setRestartKey] = useState(0);
@@ -76,9 +119,39 @@ export function CameraPanel({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
+  // Gesture bookkeeping. `pressRef` owns only the tap-vs-hold decision — see
+  // lib/pressGesture.ts, reused here because this button has the *same*
+  // hazard the GIF picker had: the click that follows a completed hold must
+  // not also fire the tap action. There it would send a GIF; here it would
+  // snap a photo on top of the video you just recorded.
+  // `pressMove` is deliberately NOT used: that exists to abandon a pending
+  // press when the surface underneath scrolls, and this panel has no
+  // scroller. Movement here is a *meaningful* gesture (slide up to lock), not
+  // a cancellation signal.
+  const pressRef = useRef<PressState>(IDLE);
+  const holdTimerRef = useRef<number | null>(null);
+  const gestureRef = useRef<{ pointerId: number; startY: number } | null>(null);
+
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  /** Set before `stop()` when the clip must be thrown away rather than
+   *  reviewed — unmounting mid-recording. Mirrors `Composer`'s `discardRef`. */
+  const discardRef = useRef(false);
+  const recTimerRef = useRef<number | null>(null);
+
   function stopStream() {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+  }
+
+  function clearHoldTimer() {
+    if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+  }
+
+  function clearRecTimer() {
+    if (recTimerRef.current !== null) window.clearInterval(recTimerRef.current);
+    recTimerRef.current = null;
   }
 
   // Acquire the camera. Keyed on `captured` too, which is what makes the
@@ -89,35 +162,48 @@ export function CameraPanel({
     let cancelled = false;
     setReady(false);
     (async () => {
+      // `width`/`height` are HINTS, never guarantees (D2) — the real
+      // dimensions are read back off the element at capture time.
+      const video = { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } };
+      let stream: MediaStream | null = null;
+      let withAudio = true;
       try {
-        // `width`/`height` are HINTS, never guarantees (D2) — the real
-        // dimensions are read back off the element at capture time.
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
+        // Audio is requested up front, not when a recording starts: prompting
+        // mid-hold would interrupt the very gesture that triggered it, and on
+        // iOS would almost certainly lose the recording.
+        stream = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+      } catch {
+        // Mic refused or absent must never cost you the camera. Retry without
+        // it and downgrade to silent video rather than failing outright.
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video });
+          withAudio = false;
+        } catch (err) {
+          if (cancelled) return;
+          const name = err instanceof Error ? err.name : '';
+          setError(
+            name === 'NotAllowedError'
+              ? 'Camera access is off for this site. Enable it in your browser settings.'
+              : name === 'NotFoundError'
+                ? 'No camera found on this device.'
+                : "Couldn't start the camera.",
+          );
           return;
         }
-        streamRef.current = stream;
-        setError(null);
-        const el = videoRef.current;
-        if (el) {
-          el.srcObject = stream;
-          // Safari rejects this promise on interruption (a fast close/switch);
-          // that is not an error worth surfacing.
-          void el.play().catch(() => {});
-        }
-      } catch (err) {
-        if (cancelled) return;
-        const name = err instanceof Error ? err.name : '';
-        setError(
-          name === 'NotAllowedError'
-            ? 'Camera access is off for this site. Enable it in your browser settings.'
-            : name === 'NotFoundError'
-              ? 'No camera found on this device.'
-              : "Couldn't start the camera.",
-        );
+      }
+      if (cancelled) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      streamRef.current = stream;
+      setAudioAvailable(withAudio);
+      setError(null);
+      const el = videoRef.current;
+      if (el) {
+        el.srcObject = stream;
+        // Safari rejects this promise on interruption (a fast close/switch);
+        // that is not an error worth surfacing.
+        void el.play().catch(() => {});
       }
     })();
     return () => {
@@ -133,6 +219,9 @@ export function CameraPanel({
   useEffect(() => {
     function onVisibility() {
       if (document.visibilityState === 'hidden') {
+        // A recording in flight is finished rather than dropped — the bytes
+        // so far are real and the review step can still deal with them.
+        if (recorderRef.current && recorderRef.current.state !== 'inactive') finishRecording();
         stopStream();
         setReady(false);
       } else {
@@ -141,10 +230,24 @@ export function CameraPanel({
     }
     document.addEventListener('visibilitychange', onVisibility);
     return () => document.removeEventListener('visibilitychange', onVisibility);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount/unmount only; the handler reads refs, not state
   }, []);
 
-  // One revoke covering every exit: Retake (url changes), Done and Close
-  // (unmount). Leaking an object URL per photo is exactly the bug the
+  // Full teardown on unmount (the user backs out mid-recording, or switches
+  // chats) — discards rather than reviewing a stray clip, and releases the
+  // camera and mic either way.
+  useEffect(() => {
+    return () => {
+      discardRef.current = true;
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') recorderRef.current.stop();
+      clearHoldTimer();
+      clearRecTimer();
+      stopStream();
+    };
+  }, []);
+
+  // One revoke covering every exit: Retake (url changes), Done and Back
+  // (unmount). Leaking an object URL per capture is exactly the bug the
   // composer tray's lifecycle effects exist to prevent.
   useEffect(() => {
     const url = captured?.url;
@@ -159,7 +262,7 @@ export function CameraPanel({
    * reproduces `object-cover`'s own arithmetic to find the visible source
    * rect, and never upscales (the canvas is sized in *video* pixels).
    */
-  function capture() {
+  function capturePhoto() {
     const video = videoRef.current;
     const box = feedRef.current;
     if (!video || !box || !video.videoWidth || !video.videoHeight) return;
@@ -201,11 +304,132 @@ export function CameraPanel({
         // The explicit type matters: `kindForMime` reads it and `stageFiles`
         // rejects anything that isn't image/video.
         const file = new File([blob], `camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
-        setCaptured({ file, url: URL.createObjectURL(blob) });
+        setCaptured({ file, url: URL.createObjectURL(blob), kind: 'image' });
       },
       'image/jpeg',
       JPEG_QUALITY,
     );
+  }
+
+  function beginRecording() {
+    const stream = streamRef.current;
+    if (!stream) return;
+    try {
+      // No `mimeType` option, exactly as the voice path does it: the platform
+      // picks its native container (Safari mp4, Chrome webm) and the server
+      // normalizes. Choosing here would mean an `isTypeSupported` ladder that
+      // buys nothing.
+      const rec = new MediaRecorder(stream);
+      chunksRef.current = [];
+      discardRef.current = false;
+      rec.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+      rec.onstop = () => {
+        const discarded = discardRef.current;
+        discardRef.current = false;
+        const chunks = chunksRef.current;
+        chunksRef.current = [];
+        if (discarded || chunks.length === 0) return;
+        const type = (rec.mimeType || 'video/webm').split(';')[0]!; // drop the ;codecs= parameter
+        const blob = new Blob(chunks, { type });
+        const ext = type.includes('mp4') ? 'mp4' : 'webm';
+        const file = new File([blob], `camera-${Date.now()}.${ext}`, { type });
+        setCaptured({ file, url: URL.createObjectURL(blob), kind: 'video' });
+      };
+      recorderRef.current = rec;
+      rec.start();
+      setElapsedMs(0);
+      const startedAt = Date.now();
+      recTimerRef.current = window.setInterval(() => {
+        const ms = Date.now() - startedAt;
+        setElapsedMs(ms);
+        if (ms >= MAX_VIDEO_MS) finishRecording();
+      }, 100);
+      setRecState('recording');
+      haptic(20);
+    } catch {
+      setError("Couldn't start recording.");
+    }
+  }
+
+  /** Stop and keep — `onstop` builds the file and flips into review, which in
+   *  turn tears the stream down via the acquire effect's cleanup. */
+  function finishRecording() {
+    const rec = recorderRef.current;
+    recorderRef.current = null;
+    clearRecTimer();
+    setLockProgress(0);
+    setRecState('idle');
+    if (rec && rec.state !== 'inactive') rec.stop();
+  }
+
+  function lockRecording() {
+    haptic(30);
+    gestureRef.current = null;
+    setLockProgress(0);
+    setRecState('locked');
+  }
+
+  // --- Shutter gesture. Tap → photo (resolved on click, so a completed hold
+  // can suppress it); hold → video; slide up while recording → lock. ---
+
+  function onShutterPointerDown(e: React.PointerEvent<HTMLButtonElement>) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setPressed(true);
+    // Already recording hands-free: this press is the user reaching to stop.
+    // Arming a second hold timer here would try to start a second recorder.
+    // `pressRef` stays IDLE so the click that follows reads as a real tap.
+    if (recState !== 'idle') return;
+    pressRef.current = pressDown(e.clientX, e.clientY);
+    gestureRef.current = { pointerId: e.pointerId, startY: e.clientY };
+    clearHoldTimer();
+    holdTimerRef.current = window.setTimeout(() => {
+      holdTimerRef.current = null;
+      pressRef.current = pressFire(pressRef.current);
+      beginRecording();
+    }, HOLD_TO_RECORD_MS);
+  }
+
+  function onShutterPointerMove(e: React.PointerEvent<HTMLButtonElement>) {
+    const g = gestureRef.current;
+    if (!g || g.pointerId !== e.pointerId || recState !== 'recording') return;
+    const dy = Math.min(0, e.clientY - g.startY);
+    setLockProgress(Math.min(1, Math.max(0, dy / LOCK_THRESHOLD_DY)));
+    if (dy <= LOCK_THRESHOLD_DY) lockRecording();
+  }
+
+  function onShutterPointerUp() {
+    setPressed(false);
+    clearHoldTimer();
+    gestureRef.current = null;
+    pressRef.current = pressCancel(pressRef.current);
+    // Locked recordings ignore the release entirely — only a tap stops them.
+    if (recState === 'recording') finishRecording();
+  }
+
+  function onShutterPointerCancel() {
+    setPressed(false);
+    clearHoldTimer();
+    gestureRef.current = null;
+    pressRef.current = pressCancel(pressRef.current);
+    // The browser took the gesture (an edge swipe, a system sheet). Keep what
+    // was recorded rather than binning it — review can still discard.
+    if (recState === 'recording') finishRecording();
+  }
+
+  function onShutterClick() {
+    // Consume suppression FIRST. A completed hold always produces a trailing
+    // click, and that click must be swallowed whether the recording already
+    // stopped (unlocked release) or is still running (locked) — otherwise
+    // locking and lifting your finger would instantly stop the recording you
+    // just went hands-free with.
+    const { state, send } = pressClick(pressRef.current);
+    pressRef.current = state;
+    if (!send) return;
+    if (recState === 'locked') {
+      finishRecording();
+      return;
+    }
+    capturePhoto();
   }
 
   function useCaptured() {
@@ -223,6 +447,10 @@ export function CameraPanel({
   }
 
   const mirrored = facing === 'user';
+  const recording = recState !== 'idle';
+  const progress = Math.min(1, elapsedMs / MAX_VIDEO_MS);
+  const ringR = (SHUTTER_D - 3) / 2;
+  const ringC = 2 * Math.PI * ringR;
 
   const content = (
     <div className="fixed inset-0 flex flex-col bg-black" style={{ zIndex: 100 }}>
@@ -253,15 +481,28 @@ export function CameraPanel({
             </button>
           </div>
         ) : captured ? (
-          <img
-            src={captured.url}
-            alt="Captured photo"
-            // `.media-preview` + the contextmenu suppressor, like every other
-            // in-app media preview (PROJECT.md §14, 2026-07-22): without them a
-            // long-press raises the browser's own save/share sheet over our UI.
-            className="media-preview h-full w-full object-contain"
-            onContextMenu={suppressTouchContextMenu}
-          />
+          captured.kind === 'image' ? (
+            <img
+              src={captured.url}
+              alt="Captured photo"
+              // `.media-preview` + the contextmenu suppressor, like every other
+              // in-app media preview (PROJECT.md §14, 2026-07-22): without them a
+              // long-press raises the browser's own save/share sheet over our UI.
+              className="media-preview h-full w-full object-contain"
+              onContextMenu={suppressTouchContextMenu}
+            />
+          ) : (
+            // `controls` rather than an autoplaying muted loop on purpose: the
+            // point of review is deciding whether to keep it, and you cannot
+            // judge a clip whose audio you are not allowed to hear.
+            <video
+              src={captured.url}
+              controls
+              playsInline
+              className="media-preview h-full w-full object-contain"
+              onContextMenu={suppressTouchContextMenu}
+            />
+          )
         ) : (
           <video
             ref={videoRef}
@@ -290,6 +531,27 @@ export function CameraPanel({
         >
           <ArrowLeft size={20} />
         </button>
+
+        {/* Recording readout — elapsed against the 60s cap. */}
+        {recording && (
+          <div
+            className="absolute left-1/2 top-3 flex -translate-x-1/2 items-center gap-2 rounded-pill bg-black/55 px-3 py-1.5 text-sm font-semibold tabular-nums text-white"
+            style={{ marginTop: 'env(safe-area-inset-top)' }}
+          >
+            <span className="h-2 w-2 animate-pulse rounded-pill bg-red-500" />
+            {formatElapsed(elapsedMs)}
+            {recState === 'locked' && <Lock size={13} />}
+          </div>
+        )}
+
+        {/* Silent-video warning — only when the mic was refused or absent.
+            Better a standing label than a muted clip nobody expected. */}
+        {!error && !captured && !audioAvailable && (
+          <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-pill bg-black/55 px-3 py-1.5 text-xs text-white/90">
+            <MicOff size={13} />
+            No microphone — video will be silent
+          </div>
+        )}
       </div>
 
       {/* Black strip. Short on purpose — the shutter straddles the boundary
@@ -299,7 +561,7 @@ export function CameraPanel({
         className="relative shrink-0 bg-black"
         style={{ height: STRIP_H, paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
-        {!error && !captured && (
+        {!error && !captured && !recording && (
           <>
             <button
               type="button"
@@ -320,6 +582,18 @@ export function CameraPanel({
               <SwitchCamera size={24} />
             </button>
           </>
+        )}
+
+        {/* Hold-to-record hint, shown only in the resting state so it teaches
+            the gesture without nagging. */}
+        {!error && !captured && !recording && ready && (
+          <p className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[11px] text-white/45">
+            Tap for photo · hold for video
+          </p>
+        )}
+
+        {recState === 'locked' && (
+          <p className="absolute bottom-2 left-1/2 -translate-x-1/2 text-[11px] text-white/60">Tap to stop</p>
         )}
 
         {captured && (
@@ -346,37 +620,88 @@ export function CameraPanel({
         )}
       </div>
 
+      {/* Slide-up-to-lock affordance — rises toward the finger as the drag
+          climbs, then snaps solid once armed. Mirrors `RecordingBar`'s lock
+          chevron so the two hold-to-record gestures read the same. */}
+      {recState === 'recording' && lockProgress > 0.05 && (
+        <span
+          className={
+            'absolute left-1/2 flex -translate-x-1/2 flex-col items-center gap-0.5 rounded-pill px-2 py-1.5 ' +
+            (lockProgress >= 1 ? 'bg-white/20 text-white' : 'text-white/70')
+          }
+          style={{
+            bottom: `calc(${STRIP_H + SHUTTER_D * 0.7 + 12}px + env(safe-area-inset-bottom))`,
+            transform: `translateX(-50%) translateY(${-lockProgress * 18}px) scale(${1 + lockProgress * 0.4})`,
+          }}
+          aria-hidden
+        >
+          <ChevronUp size={12} className="animate-pulse" />
+          <Lock size={16} fill={lockProgress >= 1 ? 'currentColor' : 'none'} />
+        </span>
+      )}
+
       {/* Shutter — anchored to the OUTER container so it can straddle the
           feed/strip boundary (D5): ~70% over the video, ~30% on the black.
-          The ring is a separate element from the fill on purpose — phase 2's
-          recording progress draws on it (§8) — and both react to the press so
-          the button feels alive under the thumb. */}
+          The ring is a separate element from the fill on purpose: idle it is a
+          plain white ring, recording it becomes the elapsed-time arc. */}
       {!error && !captured && (
         <button
           type="button"
-          onClick={capture}
-          onPointerDown={() => setPressed(true)}
-          onPointerUp={() => setPressed(false)}
-          onPointerCancel={() => setPressed(false)}
-          onPointerLeave={() => setPressed(false)}
-          disabled={!ready}
-          aria-label="Take photo"
+          onClick={onShutterClick}
+          onPointerDown={onShutterPointerDown}
+          onPointerMove={onShutterPointerMove}
+          onPointerUp={onShutterPointerUp}
+          onPointerCancel={onShutterPointerCancel}
+          disabled={!ready && !recording}
+          aria-label={recState === 'locked' ? 'Stop recording' : 'Take photo, or hold to record video'}
           className="absolute left-1/2 grid place-items-center rounded-pill transition-opacity disabled:opacity-40"
           style={{
             width: SHUTTER_D,
             height: SHUTTER_D,
             marginLeft: -SHUTTER_D / 2,
             bottom: `calc(${STRIP_H - SHUTTER_D * 0.3}px + env(safe-area-inset-bottom))`,
-            touchAction: 'manipulation',
+            // ⚠️ `none`, not `manipulation` (PROJECT.md §12, measured
+            // 2026-08-31): `manipulation` lets the compositor claim the touch
+            // at its own slop and fire pointercancel before the slide-up-to-
+            // lock threshold can ever engage.
+            touchAction: 'none',
           }}
         >
+          {recording ? (
+            <svg
+              className="absolute inset-0 -rotate-90"
+              width={SHUTTER_D}
+              height={SHUTTER_D}
+              aria-hidden
+            >
+              <circle cx={SHUTTER_D / 2} cy={SHUTTER_D / 2} r={ringR} fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth={3} />
+              <circle
+                cx={SHUTTER_D / 2}
+                cy={SHUTTER_D / 2}
+                r={ringR}
+                fill="none"
+                stroke="#ef4444"
+                strokeWidth={3}
+                strokeLinecap="round"
+                strokeDasharray={ringC}
+                strokeDashoffset={ringC * (1 - progress)}
+              />
+            </svg>
+          ) : (
+            <span
+              className="absolute inset-0 rounded-pill border-[3px] border-white transition-transform duration-150"
+              style={{ transform: pressed ? 'scale(1.06)' : 'scale(1)' }}
+            />
+          )}
           <span
-            className="absolute inset-0 rounded-pill border-[3px] border-white transition-transform duration-150"
-            style={{ transform: pressed ? 'scale(1.06)' : 'scale(1)' }}
-          />
-          <span
-            className="rounded-pill bg-white transition-transform duration-150"
-            style={{ width: SHUTTER_D - 14, height: SHUTTER_D - 14, transform: pressed ? 'scale(0.86)' : 'scale(1)' }}
+            className={
+              'transition-all duration-150 ' + (recording ? 'rounded-md bg-red-500' : 'rounded-pill bg-white')
+            }
+            style={
+              recording
+                ? { width: 26, height: 26 }
+                : { width: SHUTTER_D - 14, height: SHUTTER_D - 14, transform: pressed ? 'scale(0.86)' : 'scale(1)' }
+            }
           />
         </button>
       )}
