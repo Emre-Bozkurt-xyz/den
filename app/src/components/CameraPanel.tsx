@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Image as ImageIcon, RotateCcw, SwitchCamera, X } from 'lucide-react';
+import { ArrowLeft, Check, Image as ImageIcon, RotateCcw, SwitchCamera } from 'lucide-react';
 import { useBackHandler } from '../lib/backStack';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
 
@@ -276,15 +276,19 @@ export function CameraPanel({
           />
         )}
 
-        {/* Close — top-left, over the feed, present in every state. */}
+        {/* Back — top-left, over the feed, present in every state. A back
+            arrow rather than an ✕ (owner, 2026-09-01): this is a surface you
+            navigate out of, not a dialog you dismiss, and the arrow says so.
+            Same treatment as every other full-screen surface (`ScreenHeader`,
+            `GifPanel`, mobile Stage/search). */}
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close camera"
+          aria-label="Back to chat"
           className="absolute left-3 top-3 grid h-10 w-10 place-items-center rounded-pill bg-black/40 text-white"
           style={{ touchAction: 'manipulation', paddingTop: 0, marginTop: 'env(safe-area-inset-top)' }}
         >
-          <X size={20} />
+          <ArrowLeft size={20} />
         </button>
       </div>
 

@@ -1,4 +1,4 @@
-import { Eye, Layers, Loader2, Play, TriangleAlert, X } from 'lucide-react';
+import { ArrowLeft, Eye, Layers, Loader2, Play, TriangleAlert, X } from 'lucide-react';
 import type { MediaInfo, Message } from '@den/shared';
 import { useBackHandler } from '../lib/backStack';
 import { blurredIdsOf, useIsBlurred, useSensitivity } from '../lib/sensitivity';
@@ -241,8 +241,16 @@ export function MediaGridSheet({
                 Reveal all ({blurredIds.length})
               </button>
             )}
+            {/* Back arrow on mobile, ✕ on desktop (owner, 2026-09-01) — the
+                app-wide split: this sheet is full-bleed on a phone, where it
+                is a surface you navigate out of, but a bounded centered panel
+                on desktop, where it is a dialog you dismiss. Branched with the
+                same `md:` breakpoint the panel itself uses rather than an
+                `isMobile` hook, so the icon can never disagree with the layout
+                it belongs to. */}
             <button onClick={onClose} aria-label="Close" style={{ touchAction: 'manipulation' }}>
-              <X size={22} />
+              <ArrowLeft size={22} className="md:hidden" />
+              <X size={22} className="hidden md:block" />
             </button>
           </div>
         </div>
