@@ -194,8 +194,8 @@ Per PROJECT.md §12, everything here is unverified on iOS and none of it can be 
 - **No slide-left-to-cancel**, unlike voice: the review step (Retake / Back) is already the escape hatch, and a second destructive drag on the same button is surface nobody asked for.
 - **Audio is requested up front**, with the camera, not when a recording starts — prompting mid-hold would interrupt the very gesture that triggered it. ⚠️ **A refused or absent mic must never cost you the camera**: the acquire retries video-only and downgrades to silent video, with a standing "No microphone — video will be silent" label so a mute clip is never a surprise.
 - `MAX_VIDEO_MS = 60_000`, auto-stopping into review, with the ring drawing elapsed against it. `MediaRecorder` left running is unbounded and `MediaLimits.maxBytes.video` is 500MB; a time cap is the practical proxy. Longer video still has a path — pick it from the gallery, where the real limit applies.
-- **No `mimeType` option on `MediaRecorder`**, exactly as the voice path does it: the platform picks its native container (Safari mp4, Chrome webm) and the server normalizes to h264+aac mp4 (docs/VIDEO_TRANSCODE.md). Choosing here would mean an `isTypeSupported` ladder that buys nothing. The `;codecs=` parameter is stripped off the stored mime; the server validates by *family* plus a magic-number sniff, so both containers pass unchanged.
-- Review renders a `<video controls>` rather than an autoplaying muted loop — you cannot judge a clip whose audio you are not allowed to hear.
+- **The recorder codec is pinned to H.264 via an `isTypeSupported` ladder** (`RECORDER_MIME_PREFERENCE`), with `videoBitsPerSecond` capped at 2.5Mbps. ⚠️ **This reverses the original decision** — see §11. The `;codecs=` parameter is stripped off the stored mime; the server validates by *family* plus a magic-number sniff, so any container in the ladder passes unchanged.
+- Review renders `<video controls autoPlay muted loop>`. ⚠️ The autoplay is **load-bearing, not decoration** — see §11.
 - Unmounting mid-recording discards via a `discardRef`, mirroring `Composer`. Backgrounding mid-recording **finishes** rather than discards: the bytes so far are real and review can still bin them.
 
 ## 9. Docs & bookkeeping (same change, not a follow-up)
@@ -244,3 +244,31 @@ Run against a throwaway Vite harness mounting the real components with the real 
 ⚠️ **Two probe bugs in this pass, both of which faked a product failure**, and both the same shape as the composer pass's `aria-label` mistake — worth stating plainly because it has now happened three times: (1) a `recording()` detector querying `svg circle` document-wide matched the `<circle>` inside **lucide icons**, so it returned true on a freshly loaded page; `until(recording)` then returned instantly and every simulated drag fired *before* the 300ms hold had elapsed, making a correct lock look broken. (2) Test cases were driving a single long-lived panel, so state leaked between them — a recording still in flight from an earlier case makes `pointerdown` correctly early-return, which reads as a dead gesture. Fixes: scope the detector to the shutter's own ring, and reload the page between cases. **The general rule: a detector that can match anything other than the exact thing under test is not evidence, and a shared fixture makes every later case a lie.**
 
 **Not covered by this pass** (and not claimable from it): anything WebKit-specific in §7, real camera hardware, orientation on a physically rotated device, the front-camera mirroring judgment (D11), actual capture quality (D2), the 60s auto-stop (not waited out), and real audio in a recorded clip — the harness stream is a canvas with no audio track. The source here was a flat synthetic canvas.
+
+## 11. Device pass 1 — Samsung, 2026-09-01 (two bugs, one of them a reversal)
+
+First real hardware. Photo capture and the composer pill were fine; video capture was badly broken, in two independent ways.
+
+### 11.1 "1-2fps the moment I hold the shutter" — the codec was never pinned
+
+**Reported:** the preview is smooth until the hold starts recording, then drops to 1-2fps; the resulting clip is also 1-2fps and looks terrible.
+
+**Cause:** `new MediaRecorder(stream)` with no `mimeType` lets the browser choose the codec, and Chrome on Android can choose one with **no hardware encoder** on that device. Software-encoding 1080p in real time runs at roughly this speed and starves the preview sharing the same pipeline — which is exactly why the feed died at `rec.start()` and recovered on stop.
+
+**Fix:** an `isTypeSupported` ladder preferring **H.264** in whichever container the browser will provide (`video/mp4;codecs=avc1`, then `video/webm;codecs=h264`, then VP8, then bare containers), plus an explicit 2.5Mbps ceiling so a 60s clip stays ~19MB. H.264 is the one video codec with a hardware encoder on effectively every phone. Constructor options are wrapped in a `try` that falls back to the unconstrained form, so a browser we guessed wrong about still records.
+
+**The reversal, and the lesson.** §8 originally said *no `mimeType` option, the platform picks and the server normalizes* — borrowed wholesale from the voice path. That reasoning is correct about **containers** and wrong about **codecs**, and the difference is the whole bug: the server can remux any container, but it cannot un-drop frames that were never captured. **"Downstream normalizes it" only covers what downstream can actually reach.** A transcode fixes a wrapper; it cannot fix a capture.
+
+Worth noting the harness could never have caught this — desktop Chromium hardware-encodes everything it offered, so the unpinned choice was fine there. This needed a phone.
+
+### 11.2 "0s long, nothing to play, just a black screen" — but the sent video was fine
+
+**Reported:** the review step shows a black frame and 0s duration, yet pressing Done sends a video that plays.
+
+**Cause:** not a recording bug at all. A `MediaRecorder` **webm carries no duration in its header** — the muxer cannot know the length while it is still streaming — so a paused `<video controls>` reports 0s and sits on a black poster having never decoded a frame. The bytes were always intact, which is why Done sent something real.
+
+**Fix:** `autoPlay muted loop` on the review element, so it decodes and plays on arrival and visibly proves the clip exists. `controls` stays for unmute and scrubbing. ⚠️ Scrubbing a duration-less webm remains unreliable by nature; the H.264-in-mp4 path from §11.1 sidesteps it entirely where mp4 recording is supported, and the server's transcode is what gives the *sent* video a real duration regardless.
+
+Also added: a zero-byte guard on the finished blob, surfacing "That recording came out empty" rather than handing the composer a file that could only fail later at upload with a much worse message.
+
+**Verified after the fix** (harness, desktop Chromium): the ladder resolves to `video/mp4;codecs=avc1`, the handed-over file is `camera-<ts>.mp4` of type `video/mp4`, and the review element reaches `readyState: 4` and plays rather than sitting black. ⚠️ Whether the Samsung's framerate is actually fixed can only be confirmed on the Samsung.

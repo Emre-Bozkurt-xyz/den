@@ -58,6 +58,41 @@ const HOLD_TO_RECORD_MS = 300;
  *  and 60s matches what every messenger allows in-line. Longer video still has
  *  a path: pick it from the gallery, where the real 500MB limit applies. */
 const MAX_VIDEO_MS = 60_000;
+/**
+ * Recorder codec preference, most-wanted first.
+ *
+ * ⚠️ **This list exists because of a real device failure** (Samsung, owner
+ * report 2026-09-01): with no `mimeType` given, Chrome on Android chose a
+ * codec with no hardware encoder — software-encoding 1080p in real time runs
+ * at 1-2fps and starves the preview alongside it, so the feed died the
+ * instant recording started and the clip came out at 1-2fps too.
+ *
+ * The original "let the platform pick, the server normalizes" posture was
+ * borrowed from the voice path, and it is right about *containers* — but the
+ * server can only remux what it is given, and it cannot un-drop frames that
+ * were never captured. H.264 is the one video codec with a hardware encoder
+ * on essentially every phone, so it is what we ask for first, in whichever
+ * container the browser will put it.
+ */
+const RECORDER_MIME_PREFERENCE = [
+  'video/mp4;codecs=avc1', // Safari's native container; some Chromium builds too
+  'video/webm;codecs=h264', // Android Chrome: H.264 in webm — hardware on effectively every phone
+  'video/webm;codecs=vp8', // widely hardware-accelerated; VP9 is the trap this list exists to avoid
+  'video/mp4',
+  'video/webm',
+];
+
+/** Cap the encoder so a 60s clip stays a sane size (~19MB at this rate)
+ *  rather than whatever the browser's default happens to be. */
+const VIDEO_BITS_PER_SECOND = 2_500_000;
+
+/** Returns the first supported entry, or undefined to let the browser decide
+ *  (which is the pre-2026-09-01 behaviour, kept only as a last resort). */
+function pickRecorderMime(): string | undefined {
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') return undefined;
+  return RECORDER_MIME_PREFERENCE.find((m) => MediaRecorder.isTypeSupported(m));
+}
+
 /** Slide up past this to lock (hands-free). Deliberately the same value as
  *  `Composer`'s voice recorder, so muscle memory transfers between the two
  *  hold-to-record gestures — but kept as its own constant rather than shared,
@@ -315,11 +350,21 @@ export function CameraPanel({
     const stream = streamRef.current;
     if (!stream) return;
     try {
-      // No `mimeType` option, exactly as the voice path does it: the platform
-      // picks its native container (Safari mp4, Chrome webm) and the server
-      // normalizes. Choosing here would mean an `isTypeSupported` ladder that
-      // buys nothing.
-      const rec = new MediaRecorder(stream);
+      // Ask for a hardware-encodable codec rather than taking the browser's
+      // default — see RECORDER_MIME_PREFERENCE for the device failure that
+      // put this here. Falls back to the unconstrained constructor if the
+      // options are refused, so a browser we guessed wrong about still
+      // records rather than erroring.
+      const mimeType = pickRecorderMime();
+      let rec: MediaRecorder;
+      try {
+        rec = new MediaRecorder(stream, {
+          ...(mimeType ? { mimeType } : {}),
+          videoBitsPerSecond: VIDEO_BITS_PER_SECOND,
+        });
+      } catch {
+        rec = new MediaRecorder(stream);
+      }
       chunksRef.current = [];
       discardRef.current = false;
       rec.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
@@ -331,6 +376,13 @@ export function CameraPanel({
         if (discarded || chunks.length === 0) return;
         const type = (rec.mimeType || 'video/webm').split(';')[0]!; // drop the ;codecs= parameter
         const blob = new Blob(chunks, { type });
+        // A zero-byte result means the encoder never produced anything. Say
+        // so rather than handing the composer a file that can only fail
+        // later, at upload time, with a much worse message.
+        if (blob.size === 0) {
+          setError("That recording came out empty — try again.");
+          return;
+        }
         const ext = type.includes('mp4') ? 'mp4' : 'webm';
         const file = new File([blob], `camera-${Date.now()}.${ext}`, { type });
         setCaptured({ file, url: URL.createObjectURL(blob), kind: 'video' });
@@ -339,11 +391,16 @@ export function CameraPanel({
       rec.start();
       setElapsedMs(0);
       const startedAt = Date.now();
+      // 200ms, not 100: this drives a React render of the whole panel — the
+      // full-screen <video> included — and it runs during the exact window
+      // where the encoder wants the device to itself. The readout only shows
+      // whole seconds, so the extra renders bought nothing. A secondary
+      // mitigation for the framerate report, not the fix (that's the codec).
       recTimerRef.current = window.setInterval(() => {
         const ms = Date.now() - startedAt;
         setElapsedMs(ms);
         if (ms >= MAX_VIDEO_MS) finishRecording();
-      }, 100);
+      }, 200);
       setRecState('recording');
       haptic(20);
     } catch {
@@ -492,12 +549,24 @@ export function CameraPanel({
               onContextMenu={suppressTouchContextMenu}
             />
           ) : (
-            // `controls` rather than an autoplaying muted loop on purpose: the
-            // point of review is deciding whether to keep it, and you cannot
-            // judge a clip whose audio you are not allowed to hear.
+            // ⚠️ `autoPlay muted loop` is load-bearing, not decoration (owner
+            // report, 2026-09-01: "0s long, nothing to play, just a black
+            // screen"). A MediaRecorder webm carries **no duration in its
+            // header** — the muxer cannot know the length while it is still
+            // streaming — so a paused `<video controls>` reports 0s and sits
+            // on a black poster having never decoded a frame. The bytes were
+            // always fine; only this preview was blind. Playing on arrival
+            // forces a frame out and shows the clip actually exists.
+            // Muted because autoplay with sound is blocked anyway; `controls`
+            // stays so the clip can be unmuted and scrubbed. ⚠️ Scrubbing a
+            // duration-less webm is unreliable by nature — the server's
+            // transcode is what gives the *sent* video a real duration.
             <video
               src={captured.url}
               controls
+              autoPlay
+              muted
+              loop
               playsInline
               className="media-preview h-full w-full object-contain"
               onContextMenu={suppressTouchContextMenu}
