@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, EyeOff, FileQuestion, Mic, Paperclip, Play, Plus, Send, Sparkles, Square, X } from 'lucide-react';
+import { Camera, Check, EyeOff, FileQuestion, Image as ImageIcon, Mic, Play, Plus, Send, Sparkles, Square, X } from 'lucide-react';
 import { detectEmbedUrl, sensitivityOf, type DetectableEmbedProvider, type GifSearchItem } from '@den/shared';
 import { GifPanel } from './GifPanel';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
@@ -33,6 +33,17 @@ const EMBED_CHIP_LABEL: Record<DetectableEmbedProvider, string> = {
  * `onRecordingComplete` rather than reimplementing any of that. It DOES own
  * the tray's own rendering, attach/paste validation staging, and per-thumb
  * object-URL lifecycle (see the tray effects below).
+ *
+ * docs/CAMERA_COMPOSER.md §4 — the input row is ONE pill that owns the
+ * border, background and focus ring; the controls sit *inside* it (camera at
+ * the leading edge, attach/GIF/mic trailing) rather than floating beside it
+ * as separate bordered buttons. The textarea is transparent and border-less
+ * within that pill. This was a **slot restructure only** (D14): every ref,
+ * effect, handler and `recState` transition below is untouched by it, because
+ * this component carries three rounds of keyboard work (docs/IOS_KEYBOARD.md),
+ * the GIF panel's contents-replacement invariant (docs/GIFS.md §8) and the
+ * never-unmount-the-mic-mid-touch rule — none of which a cosmetic pass should
+ * be allowed anywhere near.
  *
  * ⚠️ iOS: `getUserMedia` and `AudioContext` both need a user gesture.
  * `onMicPointerDown`/`onMicClick` create+resume the `AudioContext`
@@ -94,6 +105,7 @@ export function Composer({
   editing,
   gifsEnabled,
   onPickGif,
+  onOpenCamera,
 }: {
   draft: string;
   onDraftChange: (value: string) => void;
@@ -145,6 +157,14 @@ export function Composer({
    *  immediately; there is no staging step and no caption, which is exactly
    *  why this doesn't reuse the `attachments` tray. */
   onPickGif: (gif: GifSearchItem) => void;
+  /** docs/CAMERA_COMPOSER.md §4.4 — opens `ChatView`'s in-app camera panel.
+   *  **Optional on purpose**: the button is rendered only when a handler is
+   *  actually supplied AND `isMobile` (D13 — desktop has no panel yet), so
+   *  the slot can ship with the layout rehaul without a dead control ever
+   *  reaching a user. Wiring it up is one prop in `ChatView` once the panel
+   *  exists. Captured files go out through `onAddFiles` like every other
+   *  entry point — this component never learns what a camera is. */
+  onOpenCamera?: () => void;
 }) {
   // Open state lives here rather than in `ChatView` because the panel
   // *replaces this component's own row* (docs/GIFS.md §8, D5) — nothing above
@@ -537,6 +557,14 @@ export function Composer({
 
   const lockProgress = clamp01(dragY / LOCK_THRESHOLD_DY);
   const cancelProgress = clamp01(dragX / CANCEL_THRESHOLD_DX);
+  /** The cancel drag has crossed its threshold — releasing now discards.
+   *  docs/CAMERA_COMPOSER.md §4.2: the red "this will cancel" tint used to
+   *  live on `RecordingBar`'s own border, but the bar no longer draws one
+   *  (the pill owns all the chrome now), so the *pill* carries the cue
+   *  instead. Strictly louder than before — the whole composer reddens
+   *  rather than an inner bar — which is the direction the original user
+   *  feedback asked for ("a clear 'this will cancel' state"). */
+  const cancelArmed = recState === 'recording' && cancelProgress >= 1;
   // Desktop shows explicit Stop/Cancel buttons for the whole recording
   // lifecycle (no gesture to protect); mobile only swaps to them once
   // locked, since the drag gesture up to that point lives entirely on the
@@ -626,60 +654,63 @@ export function Composer({
         <p className="px-1 text-xs text-text-secondary">{EMBED_CHIP_LABEL[detectedEmbed.provider]}</p>
       )}
 
-      <div className="flex items-end gap-2">
+      {/* docs/CAMERA_COMPOSER.md §4.1 — THE PILL. It owns the border, the
+          background and the focus ring; every control below sits inside it.
+          `items-end` keeps the controls pinned to the bottom as the textarea
+          grows into a multi-line box.
+          ⚠️ No `overflow-hidden` here, ever: `RecordingBar`'s lock chevron
+          deliberately rises *above* the composer edge as the drag climbs
+          (WhatsApp-style), which clipping would silently kill.
+          The 4 children below are fixed positional slots — a falsy branch
+          renders nothing but KEEPS its slot, which is what guarantees the mic
+          in slot 4 is never remounted mid-gesture (see that slot's comment). */}
+      <div
+        className={
+          'flex items-end gap-1 rounded-[22px] border bg-surface p-0.5 transition-colors ' +
+          // Recording: the pill carries the cancel-armed cue that used to live
+          // on the bar's own border (see `cancelArmed`). Idle: the ordinary
+          // focus ring, now `focus-within` because the focusable textarea is
+          // no longer the bordered element.
+          (cancelArmed ? 'border-red-500' : 'border-border focus-within:border-accent')
+        }
+      >
 
-      {/* Leading slot: attach button while idle, an explicit Cancel button
-          once recording has a Stop/Cancel pair (see showExplicitStopCancel).
+      {/* Slot 1 — leading: the camera while idle, an explicit Cancel once
+          recording has a Stop/Cancel pair (see showExplicitStopCancel).
           Hidden entirely in edit mode (docs/MESSAGE_EDIT.md §4.3) — an edit
           only ever touches `body`, never media. */}
-      {editing ? null : recState === 'idle' ? (
-        <>
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          aria-label="Attach photo or video"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
-          style={{ touchAction: 'manipulation' }}
-        >
-          <Paperclip size={18} />
-        </button>
-        {/* docs/GIFS.md §8 — a dedicated button rather than folding both into
-            a menu behind the paperclip: a menu would add a tap to the far more
-            common photo path. Not rendered at all when the server has no Klipy
-            key, and withdrawn again as soon as the composer holds anything
-            (`hasContent`) — a GIF replaces the composer's contents rather than
-            joining them (§8), so it is dead weight the moment there's a draft
-            or a staged attachment, and the row is tight enough at 360px that
-            the text field wants the space back. */}
-        {gifsEnabled && !hasContent && (
-          <button
-            type="button"
-            onClick={() => setGifOpen(true)}
-            disabled={uploading}
-            aria-label="Send a GIF"
-            className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
-            style={{ touchAction: 'manipulation' }}
-          >
-            <Sparkles size={18} />
-          </button>
-        )}
-        </>
-      ) : showExplicitStopCancel ? (
+      {editing ? null : showExplicitStopCancel ? (
         <button
           type="button"
           onClick={cancelRecording}
           aria-label="Cancel recording"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill border border-border text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-pill text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken"
           style={{ touchAction: 'manipulation' }}
         >
           <X size={18} />
         </button>
+      ) : recState === 'idle' && isMobile && onOpenCamera ? (
+        // docs/CAMERA_COMPOSER.md D6 — the one place the composer uses a
+        // filled accent circle for something that isn't Send, deliberately:
+        // the camera is the primary media action and should read as such.
+        // D13: mobile only, and only when a handler actually exists, so this
+        // can never render as a button that does nothing.
+        <button
+          type="button"
+          onClick={onOpenCamera}
+          disabled={uploading}
+          aria-label="Take a photo"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
+          style={{ touchAction: 'manipulation' }}
+        >
+          <Camera size={18} />
+        </button>
       ) : null}
 
-      {/* Middle slot: text input while idle, the live recording bar
+      {/* Slot 2 — middle: text input while idle, the live recording bar
           otherwise. Cross-fades in via .animate-composer-morph on mount —
-          see index.css. */}
+          see index.css. Transparent and border-less now: the pill above
+          draws both, so this must not draw a second set. */}
       {recState === 'idle' ? (
         <textarea
           ref={textareaRef}
@@ -700,7 +731,12 @@ export function Composer({
           }}
           rows={1}
           placeholder="Message"
-          className="max-h-32 min-h-[44px] min-w-0 flex-1 resize-none animate-composer-morph overflow-y-auto rounded-[22px] border border-border bg-surface px-4 py-2.5 text-base leading-6 text-text-primary outline-none transition-colors focus:border-accent"
+          // min-h/py match the 40px control height exactly so a single-line
+          // composer sits its buttons flush with the text baseline box, and
+          // the pill lands at the same 44px total height it had before this
+          // rehaul. max-h-32 mirrors COMPOSER_MAX_HEIGHT (the auto-grow
+          // effect writes an explicit px height on top of this).
+          className="max-h-32 min-h-[40px] min-w-0 flex-1 resize-none animate-composer-morph overflow-y-auto bg-transparent px-2 py-2 text-base leading-6 text-text-primary outline-none"
         />
       ) : (
         <div key="bar" className="animate-composer-morph flex min-w-0 flex-1">
@@ -715,22 +751,65 @@ export function Composer({
         </div>
       )}
 
-      {/* Trailing slot — deliberately the *same* JSX branch (this exact
-          MicTriggerButton) across idle→requesting→recording on mobile, so
-          the pointer-captured element backing the hold/slide gestures is
-          never unmounted mid-touch. It only swaps to the Stop/Send button
-          once locked (drag already fully resolved by then) or on desktop
-          (no drag to protect in the first place). In edit mode
-          (docs/MESSAGE_EDIT.md §4.3) it's the *only* trailing control —
-          recState is always 'idle' there since the mic that drives every
-          other recState is never rendered. */}
+      {/* Slot 3 — secondary trailing actions, present only while idle (a
+          recording takes the whole pill). Attach deliberately does NOT
+          withdraw on `hasContent`: you attach a photo to a message you have
+          already started typing all the time, and the tray's own "+" only
+          exists once something is already staged, so hiding this would leave
+          no way in. The GIF button does withdraw, unchanged from before —
+          docs/GIFS.md §8: a GIF *replaces* the composer's contents rather
+          than joining them, so it is dead weight the moment there's a draft
+          or a staged attachment, and the row is tight enough at 360px that
+          the text field wants the space back. */}
+      {!editing && recState === 'idle' && (
+        <>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading}
+            aria-label="Attach photo or video"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-pill text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
+            style={{ touchAction: 'manipulation' }}
+          >
+            <ImageIcon size={18} />
+          </button>
+          {gifsEnabled && !hasContent && (
+            <button
+              type="button"
+              onClick={() => setGifOpen(true)}
+              disabled={uploading}
+              aria-label="Send a GIF"
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-pill text-text-secondary transition-colors hover:bg-surface-sunken active:bg-surface-sunken disabled:opacity-40"
+              style={{ touchAction: 'manipulation' }}
+            >
+              <Sparkles size={18} />
+            </button>
+          )}
+        </>
+      )}
+
+      {/* Slot 4 — the primary trailing control, and the load-bearing one.
+          The mic branch is deliberately the *same* JSX element across
+          idle→requesting→recording on mobile, so the pointer-captured node
+          backing the hold/slide gestures is never unmounted mid-touch. It
+          only swaps to Stop/Send once locked (drag already fully resolved by
+          then) or on desktop (no drag to protect in the first place).
+          ⚠️ This must stay the LAST child of the pill and must stay its own
+          expression slot: slot 3 collapsing to `false` when recording starts
+          still occupies its position, so this element keeps its index and
+          React reconciles it in place rather than remounting it. Reordering
+          these slots, or folding slot 3 and 4 into one expression, would
+          reintroduce a mid-gesture remount that no test would catch.
+          In edit mode (docs/MESSAGE_EDIT.md §4.3) this is the only trailing
+          control — recState is always 'idle' there since the mic that drives
+          every other recState is never rendered. */}
       {editing ? (
         <button
           type="submit"
           disabled={!draft.trim()}
           onPointerDown={(e) => e.preventDefault()}
           aria-label="Update message"
-          className="flex h-11 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
+          className="flex h-10 shrink-0 items-center gap-1.5 rounded-pill bg-accent px-4 text-sm font-semibold text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
           style={{ touchAction: 'manipulation' }}
         >
           <Check size={15} />
@@ -741,7 +820,7 @@ export function Composer({
           type="button"
           onClick={finishRecording}
           aria-label="Stop and send recording"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover"
           style={{ touchAction: 'manipulation' }}
         >
           <Square size={16} fill="currentColor" />
@@ -755,12 +834,12 @@ export function Composer({
           // Samsung PWA). The click/submit still fires normally; only the
           // default focus shift is cancelled.
           onPointerDown={(e) => e.preventDefault()}
-          // Icon-only, same 44px square as the mic it replaces: the label was
+          // Icon-only, same square as the mic it replaces: the label was
           // costing the text field ~40px of a row that's already crowded on a
           // 360px screen, and a paper plane on an accent pill needs no gloss.
           // The name lives on in `aria-label` for screen readers.
           aria-label="Send message"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-pill bg-accent text-white transition-colors hover:bg-accent-hover active:bg-accent-hover disabled:opacity-40"
           style={{ touchAction: 'manipulation' }}
         >
           <Send size={18} />
@@ -776,9 +855,12 @@ export function Composer({
           disabled={uploading && recState === 'idle'}
           aria-label={recState === 'idle' ? 'Record voice message — press and hold' : 'Recording — release to send'}
           className={
-            'grid h-11 w-11 shrink-0 place-items-center rounded-pill text-white transition-colors disabled:opacity-40 ' +
+            'grid h-10 w-10 shrink-0 place-items-center rounded-pill text-white transition-colors disabled:opacity-40 ' +
             (recState === 'idle' ? 'bg-accent hover:bg-accent-hover active:bg-accent-hover' : 'bg-rose-600')
           }
+          // ⚠️ `none`, not `manipulation` (PROJECT.md §12, measured 2026-08-31):
+          // `manipulation` lets the compositor claim the touch at its own slop
+          // and fire pointercancel before any JS threshold can engage.
           style={{ touchAction: 'none' }}
         >
           <Mic size={18} />

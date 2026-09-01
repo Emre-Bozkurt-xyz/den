@@ -67,11 +67,14 @@ export function RecordingBar({
   return (
     <div
       className={
-        'flex h-11 min-w-0 flex-1 items-center gap-2 rounded-pill border bg-surface px-3 transition-[opacity,border-color] ' +
-        (cancelling ? 'opacity-50 ' : 'opacity-100 ') +
-        // The whole bar tints red the moment cancel arms, reinforcing the
-        // growing stop icon so it's unmissable that a release cancels.
-        (cancelArmed ? 'border-red-500' : 'border-border')
+        // docs/CAMERA_COMPOSER.md §4.2 — no border, background or radius of
+        // its own any more: the composer's pill owns all of that and this bar
+        // now fills the pill's interior rather than sitting inside it as a
+        // second capsule. The red "release cancels" tint moved to the pill's
+        // border for the same reason (`cancelArmed` in `Composer`) — it still
+        // fires, and now reddens the whole composer instead of an inner bar.
+        'flex h-10 min-w-0 flex-1 items-center gap-2 px-2 transition-opacity ' +
+        (cancelling ? 'opacity-50' : 'opacity-100')
       }
     >
       {/* Slide-to-cancel affordance — a passive indicator, not a real button
@@ -120,7 +123,9 @@ export function RecordingBar({
           accent, snapping to a solid accent lock once armed/locked. Origin is
           the bottom so the growth pushes it up toward where the finger is
           headed. `overflow-visible` on the bar (default) lets it rise above
-          the composer edge, WhatsApp-style. */}
+          the composer edge, WhatsApp-style — ⚠️ which means neither this bar
+          NOR the composer pill now wrapping it may ever take
+          `overflow-hidden`, or this affordance silently disappears. */}
       {isMobile && (recState === 'locked' || showDragHints) && (
         <span
           className={

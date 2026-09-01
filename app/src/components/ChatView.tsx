@@ -49,6 +49,7 @@ import { useBackHandler } from '../lib/backStack';
 import { useTypers } from '../lib/typing';
 import { AlbumCard } from './AlbumCard';
 import { AttachmentSheet } from './AttachmentSheet';
+import { CameraPanel } from './CameraPanel';
 import { Composer } from './Composer';
 import { EmbedCard } from './EmbedCard';
 import { MediaBubble } from './MediaBubble';
@@ -287,6 +288,10 @@ export function ChatView({
   }
   // Which staged attachment's `AttachmentSheet` is open, if any.
   const [attachmentSheetFor, setAttachmentSheetFor] = useState<string | null>(null);
+  // docs/CAMERA_COMPOSER.md §5 — the in-app camera panel. Open state lives
+  // here (not in `Composer`) because the panel is a full-screen overlay
+  // portalled to <body>, not part of the composer row the way `GifPanel` is.
+  const [cameraOpen, setCameraOpen] = useState(false);
   // The message id an album mint created, kept around only while some of its
   // items are still `failed` — lets `discardAlbum`/an expired-URL retry
   // soft-delete the right orphaned message. Cleared once nothing staged is
@@ -1849,7 +1854,21 @@ export function ChatView({
         gifsEnabled={me.gifsEnabled}
         onPickGif={handlePickGif}
         editing={!!editing}
+        // docs/CAMERA_COMPOSER.md §4.4/D13 — passing this is what renders the
+        // camera button at all, and `Composer` additionally gates it on
+        // `isMobile`. Desktop has no panel yet, so it gets no button.
+        onOpenCamera={isMobile ? () => setCameraOpen(true) : undefined}
       />
+
+      {cameraOpen && (
+        <CameraPanel
+          // Captures and gallery picks both land in the same `stageFiles`
+          // path as the attach button and clipboard paste — the camera is a
+          // third entry point, not a second pipeline.
+          onFiles={handleAddFiles}
+          onClose={() => setCameraOpen(false)}
+        />
+      )}
 
       {attachmentSheetFor && (
         <AttachmentSheet
