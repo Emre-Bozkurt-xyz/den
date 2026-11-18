@@ -8,6 +8,8 @@ import {
   type Message,
 } from '@den/shared';
 import { api } from './api';
+import { holdBusy } from './busy';
+import { createStallWatchdog } from './stallWatchdog';
 
 /** Best-effort kind from a picked file's mime — matches the three §7 kinds.
  *  Anything else (docs, etc.) isn't part of MVP scope. */
@@ -109,21 +111,120 @@ export class UploadHttpError extends Error {
   }
 }
 
+/** Thrown by `putWithProgress` when the PUT didn't fail so much as get cut
+ *  off: `stalled` = the watchdog gave up on a connection that stopped moving
+ *  bytes; `aborted` = the caller's `AbortSignal` fired (user cancel). Either
+ *  way the presigned URL is still good, so the item is retryable as-is. */
+export class UploadInterruptedError extends Error {
+  readonly reason: 'stalled' | 'aborted';
+  constructor(reason: 'stalled' | 'aborted') {
+    super(reason === 'stalled' ? 'Upload stalled' : 'Upload cancelled');
+    this.name = 'UploadInterruptedError';
+    this.reason = reason;
+  }
+}
+
+/** Same zombie-connection reasoning as api.ts's `REQUEST_TIMEOUT_MS`: a PUT
+ *  over a TCP connection the radio dropped (or that iOS froze with the PWA)
+ *  doesn't fail, it hangs — and with it the composer and the serial album
+ *  loop. But a PUT can legitimately run for minutes, so this is an IDLE
+ *  window (no progress event for this long → give up), not a total cap. */
+const PUT_STALL_MS = 30_000;
+/** Once the browser reports the whole body sent (`upload.onload`), there are
+ *  no more progress events to reset the idle window while we wait for R2's
+ *  response — and "sent" means handed to the network stack, which can buffer
+ *  a lot (HTTP/2 / QUIC windows) that is still draining over a slow link.
+ *  A longer, still bounded, wait for that last stretch avoids false stalls. */
+const PUT_RESPONSE_WAIT_MS = 90_000;
+
 /** PUT straight to R2/MinIO with upload progress (XHR gives progress events;
  *  fetch's upload-stream API isn't there yet cross-browser). No credentials —
- *  the presigned URL's signature *is* the auth (hard invariant 2). */
-function putWithProgress(url: string, body: Blob, contentType: string, onProgress?: (pct: number) => void): Promise<void> {
+ *  the presigned URL's signature *is* the auth (hard invariant 2).
+ *
+ *  Always settles: resolve on 2xx; `UploadHttpError` on any other status;
+ *  `UploadInterruptedError` on stall or `signal` abort; plain `Error` on a
+ *  network error. */
+function putWithProgress(
+  url: string,
+  body: Blob,
+  contentType: string,
+  onProgress?: (pct: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new UploadInterruptedError('aborted'));
+      return;
+    }
     const xhr = new XMLHttpRequest();
+    // Both cut-offs settle FIRST and abort second: the promise then carries
+    // the right reason (`onabort` can't tell them apart), and it settles even
+    // if a suspended/resumed WebKit never dispatches the abort event.
+    const watchdog = createStallWatchdog(() => {
+      settle(new UploadInterruptedError('stalled'));
+      xhr.abort();
+    });
+    const onSignalAbort = () => {
+      settle(new UploadInterruptedError('aborted'));
+      xhr.abort();
+    };
+    signal?.addEventListener('abort', onSignalAbort, { once: true });
+    let settled = false;
+    function settle(err?: Error) {
+      if (settled) return;
+      settled = true;
+      watchdog.stop();
+      signal?.removeEventListener('abort', onSignalAbort);
+      if (err) reject(err);
+      else resolve();
+    }
+
     xhr.open('PUT', url);
     xhr.setRequestHeader('Content-Type', contentType);
     xhr.upload.onprogress = (e) => {
+      watchdog.kick(PUT_STALL_MS);
       if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
     };
-    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new UploadHttpError(xhr.status)));
-    xhr.onerror = () => reject(new Error('Upload network error'));
+    xhr.upload.onload = () => watchdog.kick(PUT_RESPONSE_WAIT_MS);
+    xhr.onload = () => settle(xhr.status >= 200 && xhr.status < 300 ? undefined : new UploadHttpError(xhr.status));
+    xhr.onerror = () => settle(new Error('Upload network error'));
+    xhr.onabort = () => settle(new UploadInterruptedError('aborted'));
+    // `xhr.timeout` is never set (it would be a total cap — see PUT_STALL_MS),
+    // so this shouldn't fire; handled so no event can leave the promise open.
+    xhr.ontimeout = () => settle(new UploadInterruptedError('stalled'));
+    // Armed before send: a connection that never gets going (no first
+    // progress event) is the same hang.
+    watchdog.kick(PUT_STALL_MS);
     xhr.send(body);
   });
+}
+
+/** One signal that aborts when any of `signals` does — `AbortSignal.any` is
+ *  only Safari 17.4+, too new to assume for the iPhones in the circle.
+ *  `release` detaches the listeners (the album-level signal outlives each
+ *  item, so they'd otherwise pile up on it). */
+function linkSignals(...signals: (AbortSignal | undefined)[]): { signal: AbortSignal; release: () => void } {
+  const ctrl = new AbortController();
+  const live = signals.filter((s): s is AbortSignal => s !== undefined);
+  const onAbort = () => ctrl.abort();
+  for (const s of live) {
+    if (s.aborted) ctrl.abort();
+    else s.addEventListener('abort', onAbort, { once: true });
+  }
+  return { signal: ctrl.signal, release: () => live.forEach((s) => s.removeEventListener('abort', onAbort)) };
+}
+
+/** Optional controls for the upload entry points below. */
+export interface UploadOptions {
+  /** Cancels the whole operation: the in-flight PUT is aborted and every item
+   *  not yet completed comes back `ok: false, interrupted: 'aborted'` (with
+   *  its mint info, so `retryAlbumItems` can pick it up). Already aborted
+   *  when `uploadAlbum` is called → rejects with
+   *  `UploadInterruptedError('aborted')` and nothing is minted. The mint and
+   *  `complete` calls themselves are never aborted mid-flight (a cancel
+   *  during one takes effect when it returns): cutting one off would leave
+   *  the client unsure whether the server acted on it. */
+  signal?: AbortSignal;
 }
 
 export interface AlbumItemResult {
@@ -135,6 +236,11 @@ export interface AlbumItemResult {
   /** True when the PUT failed with a status that looks like an expired
    *  presigned URL — the caller should re-mint rather than keep retrying. */
   expired: boolean;
+  /** Set when the item didn't fail so much as get cut off: `stalled` (the
+   *  PUT watchdog gave up) or `aborted` (a caller signal fired, before or
+   *  during its PUT, or before its `complete`). Null for every other
+   *  outcome. Interrupted items are ordinary failures as far as retry goes. */
+  interrupted: 'stalled' | 'aborted' | null;
 }
 
 /** PUT then complete for one already-minted item — shared by the fresh mint
@@ -148,21 +254,56 @@ async function uploadOneItem(
   index: number,
   total: number,
   onProgress?: (itemIndex: number, itemPct: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<AlbumItemResult> {
   const base = { localId: mint.mediaId, mediaId: mint.mediaId, presignedPutUrl: mint.presignedPutUrl, requiredContentType: mint.requiredContentType };
+  const aborted: AlbumItemResult = { ...base, ok: false, expired: false, interrupted: 'aborted' };
+  if (signal?.aborted) return aborted;
   try {
-    await putWithProgress(mint.presignedPutUrl, file, mint.requiredContentType, (pct) => onProgress?.(index, pct, total));
+    await putWithProgress(mint.presignedPutUrl, file, mint.requiredContentType, (pct) => onProgress?.(index, pct, total), signal);
   } catch (e) {
-    return { ...base, ok: false, expired: e instanceof UploadHttpError && (e.status === 403 || e.status === 400) };
+    return {
+      ...base,
+      ok: false,
+      expired: e instanceof UploadHttpError && (e.status === 403 || e.status === 400),
+      interrupted: e instanceof UploadInterruptedError ? e.reason : null,
+    };
   }
+  // Cancelled after the bytes landed but before `complete`: skip it. An item
+  // that's never completed is never fanned out, which is what "cancel" means
+  // to the user; the cost is a re-PUT if they retry instead.
+  if (signal?.aborted) return aborted;
   try {
     const completeBody: CompleteUploadRequest = tags.length > 0 ? { tags } : {};
     await api<Message>(`/api/media/${mint.mediaId}/complete`, { method: 'POST', body: JSON.stringify(completeBody) });
     onProgress?.(index, 100, total);
-    return { ...base, ok: true, expired: false };
+    return { ...base, ok: true, expired: false, interrupted: null };
   } catch {
-    return { ...base, ok: false, expired: false };
+    return { ...base, ok: false, expired: false, interrupted: null };
   }
+}
+
+/** The serial PUT+complete loop shared by `uploadAlbum` and
+ *  `retryAlbumItems`. Each item may carry its own `signal` (cancel just that
+ *  one — the tray's ✕) on top of the operation-wide `opts.signal`. */
+async function uploadItemsSerially(
+  items: { localId: string; file: Blob; tags: string[]; signal?: AbortSignal }[],
+  mints: { mediaId: string; presignedPutUrl: string; requiredContentType: string }[],
+  onProgress: ((itemIndex: number, itemPct: number, total: number) => void) | undefined,
+  opts: UploadOptions | undefined,
+): Promise<AlbumItemResult[]> {
+  const results: AlbumItemResult[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const input = items[i]!;
+    const linked = linkSignals(opts?.signal, input.signal);
+    try {
+      const result = await uploadOneItem(input.file, input.tags, mints[i]!, i, items.length, onProgress, linked.signal);
+      results.push({ ...result, localId: input.localId });
+    } finally {
+      linked.release();
+    }
+  }
+  return results;
 }
 
 export interface AlbumUploadOutcome {
@@ -183,40 +324,46 @@ export interface AlbumUploadOutcome {
  * a failed item's `{mediaId, presignedPutUrl, requiredContentType}` is
  * included so the caller can retry just that item via `retryAlbumItems`
  * without re-minting (§5.1: "a failed send keeps the tray").
+ *
+ * Cancellation: `opts.signal` for the whole album, or a per-item `signal`
+ * (see `UploadOptions`). Holds `busy('upload')` for its whole duration so an
+ * SW update can't reload the page out from under it (`lib/pwa.ts`); the
+ * finally makes sure that hold can't outlive the call.
  */
 export async function uploadAlbum(
   chatId: string,
-  items: { localId: string; file: Blob; kind: MediaKind; mime: string; tags: string[] }[],
+  items: { localId: string; file: Blob; kind: MediaKind; mime: string; tags: string[]; signal?: AbortSignal }[],
   caption: string | undefined,
   replyToId: string | undefined,
   onProgress?: (itemIndex: number, itemPct: number, total: number) => void,
+  opts?: UploadOptions,
 ): Promise<AlbumUploadOutcome> {
-  // docs/MEDIA_ATTACHMENTS.md §4.6 — measure intrinsic sizes before minting so
-  // every other member's 'processing' placeholder has the right aspect from
-  // the moment the album appears. Measured here rather than in `stageFiles`
-  // because that's a synchronous pure helper and this is the one place that
-  // already awaits; a failure to measure just omits the hint.
-  const sizes = await Promise.all(items.map((i) => intrinsicSize(i.file, i.kind)));
+  if (opts?.signal?.aborted) throw new UploadInterruptedError('aborted');
+  const release = holdBusy('upload');
+  try {
+    // docs/MEDIA_ATTACHMENTS.md §4.6 — measure intrinsic sizes before minting so
+    // every other member's 'processing' placeholder has the right aspect from
+    // the moment the album appears. Measured here rather than in `stageFiles`
+    // because that's a synchronous pure helper and this is the one place that
+    // already awaits; a failure to measure just omits the hint.
+    const sizes = await Promise.all(items.map((i) => intrinsicSize(i.file, i.kind)));
 
-  const createBody: CreateUploadRequest = {
-    chatId,
-    items: items.map((i, idx) => ({ kind: i.kind, mime: i.mime, sizeBytes: i.file.size, ...(sizes[idx] ?? {}) })),
-    ...(caption?.trim() ? { caption: caption.trim() } : {}),
-    ...(replyToId ? { replyToId } : {}),
-  };
-  const created = await api<CreateUploadResponse>('/api/media/uploads', {
-    method: 'POST',
-    body: JSON.stringify(createBody),
-  });
+    const createBody: CreateUploadRequest = {
+      chatId,
+      items: items.map((i, idx) => ({ kind: i.kind, mime: i.mime, sizeBytes: i.file.size, ...(sizes[idx] ?? {}) })),
+      ...(caption?.trim() ? { caption: caption.trim() } : {}),
+      ...(replyToId ? { replyToId } : {}),
+    };
+    const created = await api<CreateUploadResponse>('/api/media/uploads', {
+      method: 'POST',
+      body: JSON.stringify(createBody),
+    });
 
-  const results: AlbumItemResult[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const input = items[i]!;
-    const mint = created.items[i]!;
-    const result = await uploadOneItem(input.file, input.tags, mint, i, items.length, onProgress);
-    results.push({ ...result, localId: input.localId });
+    const results = await uploadItemsSerially(items, created.items, onProgress, opts);
+    return { messageId: created.messageId, items: results };
+  } finally {
+    release();
   }
-  return { messageId: created.messageId, items: results };
 }
 
 /**
@@ -266,25 +413,27 @@ async function intrinsicSize(file: Blob, kind: MediaKind): Promise<{ width: numb
  *  stays scoped to the *same* album message. Callers should check
  *  `AlbumItemResult.expired` on a fresh failure and fall back to minting a
  *  brand-new album (`uploadAlbum`) + discarding the orphaned old message
- *  (docs §5.1: "expired URLs → re-mint as a new album and discard the old"). */
+ *  (docs §5.1: "expired URLs → re-mint as a new album and discard the old").
+ *  Same cancellation and busy-hold behaviour as `uploadAlbum`. */
 export async function retryAlbumItems(
-  items: { localId: string; file: Blob; tags: string[]; mediaId: string; presignedPutUrl: string; requiredContentType: string }[],
+  items: {
+    localId: string;
+    file: Blob;
+    tags: string[];
+    mediaId: string;
+    presignedPutUrl: string;
+    requiredContentType: string;
+    signal?: AbortSignal;
+  }[],
   onProgress?: (itemIndex: number, itemPct: number, total: number) => void,
+  opts?: UploadOptions,
 ): Promise<AlbumItemResult[]> {
-  const results: AlbumItemResult[] = [];
-  for (let i = 0; i < items.length; i++) {
-    const input = items[i]!;
-    const result = await uploadOneItem(
-      input.file,
-      input.tags,
-      { mediaId: input.mediaId, presignedPutUrl: input.presignedPutUrl, requiredContentType: input.requiredContentType },
-      i,
-      items.length,
-      onProgress,
-    );
-    results.push({ ...result, localId: input.localId });
+  const release = holdBusy('upload');
+  try {
+    return await uploadItemsSerially(items, items, onProgress, opts);
+  } finally {
+    release();
   }
-  return results;
 }
 
 /** Voice is unchanged (docs §5.1 — push-to-talk still sends immediately,
@@ -295,9 +444,15 @@ export async function uploadVoice(
   mime: string,
   replyToId?: string,
   onProgress?: (pct: number) => void,
+  opts?: UploadOptions,
 ): Promise<AlbumUploadOutcome> {
-  return uploadAlbum(chatId, [{ localId: 'voice', file, kind: 'voice', mime, tags: [] }], undefined, replyToId, (_i, pct) =>
-    onProgress?.(pct),
+  return uploadAlbum(
+    chatId,
+    [{ localId: 'voice', file, kind: 'voice', mime, tags: [] }],
+    undefined,
+    replyToId,
+    (_i, pct) => onProgress?.(pct),
+    opts,
   );
 }
 

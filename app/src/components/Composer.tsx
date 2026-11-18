@@ -3,6 +3,7 @@ import { Camera, Check, EyeOff, FileQuestion, Image as ImageIcon, Mic, Play, Plu
 import { detectEmbedUrl, sensitivityOf, type DetectableEmbedProvider, type GifSearchItem } from '@den/shared';
 import { GifPanel } from './GifPanel';
 import { useKeyboardInset } from '../hooks/useKeyboardInset';
+import { useBusyWhile } from '../lib/busy';
 import type { StagedAttachment } from '../lib/media';
 import { suppressTouchContextMenu } from '../lib/nativeMenu';
 import { RecordingBar, type RecState } from './RecordingBar';
@@ -575,6 +576,10 @@ export function Composer({
    *  attachment. Drives both the trailing slot (Send instead of the mic) and
    *  whether the GIF button keeps its place in the leading slot. */
   const hasContent = draft.trim().length > 0 || attachments.length > 0;
+  // lib/busy.ts — tells lib/pwa.ts not to apply an SW update (a page reload)
+  // over a draft, staged attachments or a recording in progress. The hook's
+  // effect cleanup releases it on unmount, so a chat switch can't strand it.
+  useBusyWhile('composer', hasContent || recState !== 'idle');
 
   // docs/EMBEDS.md §4.4 — recomputed on every draft keystroke/paste; cheap
   // (a couple of regex passes over one message-length string), and this is

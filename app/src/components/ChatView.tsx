@@ -306,6 +306,22 @@ export function ChatView({
   // posture as `loadingOlderRef` above: a ref, because the fix has to hold
   // between the call and the re-render, not after it.
   const sendingAlbumRef = useRef(false);
+  // Per-item cancel handles for the album round in flight, keyed by localId
+  // (lib/media.ts — each item's `signal`). They make the tray's ✕ mean what
+  // it says while that item is uploading: abort its PUT, or skip it if it
+  // hasn't started, rather than hiding the thumbnail and sending it anyway.
+  // A ref: written and read only inside handlers.
+  const itemCancelsRef = useRef(new Map<string, AbortController>());
+  /** Arms a fresh cancel handle per item for one upload round; pair with
+   *  `disarmItemCancels` in that round's `finally`. */
+  function armItemCancels(localIds: string[]): Map<string, AbortController> {
+    const round = new Map(localIds.map((id) => [id, new AbortController()] as const));
+    for (const [id, ctrl] of round) itemCancelsRef.current.set(id, ctrl);
+    return round;
+  }
+  function disarmItemCancels(round: Map<string, AbortController>) {
+    for (const [id, ctrl] of round) if (itemCancelsRef.current.get(id) === ctrl) itemCancelsRef.current.delete(id);
+  }
   const [viewer, setViewer] = useState<ViewerState>(null);
   // The items of whichever grid sheet is open (UI-7 legacy fan, or
   // docs/MEDIA_ATTACHMENTS.md §5.3's album "+N" overflow) — held as resolved
@@ -1285,6 +1301,9 @@ export function ChatView({
   }
 
   function handleRemoveAttachment(localId: string) {
+    // Mid-upload, removing an item cancels it (see `itemCancelsRef`); the
+    // round's own bookkeeping then leaves it out of the settle/failed count.
+    itemCancelsRef.current.get(localId)?.abort();
     setAttachments((prev) => prev.filter((a) => a.localId !== localId));
   }
 
@@ -1331,21 +1350,25 @@ export function ChatView({
     setDraft('');
     setReplyingTo(null);
     setAttachments((prev) => prev.map((a) => ({ ...a, status: 'uploading' as const, progress: 0 })));
+    const cancels = armItemCancels(items.map((a) => a.localId));
     try {
       const outcome = await uploadAlbum(
         chat.id,
-        items.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags })),
+        items.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags, signal: cancels.get(a.localId)?.signal })),
         caption,
         replyToId,
         (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
       );
-      const failedCount = settleAttachments(outcome.items);
+      // Items the user removed mid-upload are gone from the tray on purpose —
+      // they aren't failures to report or retry.
+      const results = outcome.items.filter((r) => !cancels.get(r.localId)?.signal.aborted);
+      const failedCount = settleAttachments(results);
       if (failedCount === 0) {
         failedAlbumMessageIdRef.current = null;
       } else {
         failedAlbumMessageIdRef.current = outcome.messageId;
         setUploadError(
-          failedCount === items.length ? 'Upload failed — try again' : `${failedCount} of ${items.length} failed — retry or discard`,
+          failedCount === results.length ? 'Upload failed — try again' : `${failedCount} of ${results.length} failed — retry or discard`,
         );
       }
     } catch {
@@ -1358,6 +1381,7 @@ export function ChatView({
       failedAlbumMessageIdRef.current = null;
       setUploadError('Upload failed — try again');
     } finally {
+      disarmItemCancels(cancels);
       sendingAlbumRef.current = false;
       setUpload(null);
     }
@@ -1375,6 +1399,8 @@ export function ChatView({
     sendingAlbumRef.current = true;
     setUploadError('');
     setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'uploading' as const, progress: 0 } : a)));
+    const cancels = armItemCancels(retryable.map((a) => a.localId));
+    const cancelled = (localId: string) => cancels.get(localId)?.signal.aborted === true;
     try {
       let results = await retryAlbumItems(
         retryable.map((a) => ({
@@ -1384,23 +1410,26 @@ export function ChatView({
           mediaId: a.mediaId!,
           presignedPutUrl: a.presignedPutUrl!,
           requiredContentType: a.requiredContentType!,
+          signal: cancels.get(a.localId)?.signal,
         })),
         (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
       );
+      // Removed mid-retry (see `sendAlbum`): not a failure, and not re-minted.
+      results = results.filter((r) => !cancelled(r.localId));
       const expired = results.filter((r) => r.expired);
       if (expired.length > 0) {
         const oldMessageId = failedAlbumMessageIdRef.current;
         const toRemint = attachments.filter((a) => expired.some((r) => r.localId === a.localId));
         const remint = await uploadAlbum(
           chat.id,
-          toRemint.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags })),
+          toRemint.map((a) => ({ localId: a.localId, file: a.file, kind: a.kind, mime: a.file.type, tags: a.tags, signal: cancels.get(a.localId)?.signal })),
           undefined,
           undefined,
           (index, pct, total) => setUpload({ index: index + 1, total, progress: pct }),
         );
         if (oldMessageId) void deleteMessages(chat.id, [oldMessageId]).catch(() => {});
         failedAlbumMessageIdRef.current = remint.messageId;
-        results = results.filter((r) => !r.expired).concat(remint.items);
+        results = results.filter((r) => !r.expired).concat(remint.items.filter((r) => !cancelled(r.localId)));
       }
       const failedCount = settleAttachments(results);
       if (failedCount === 0) {
@@ -1413,6 +1442,7 @@ export function ChatView({
       setAttachments((prev) => prev.map((a) => (retryable.some((f) => f.localId === a.localId) ? { ...a, status: 'failed' as const, progress: 0 } : a)));
       setUploadError('Retry failed — try again');
     } finally {
+      disarmItemCancels(cancels);
       sendingAlbumRef.current = false;
       setUpload(null);
     }
