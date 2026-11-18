@@ -67,7 +67,8 @@ jobs:
     env:
       DATABASE_URL: postgres://den:den@127.0.0.1:5432/den
       # media/service.test.ts PUTs and HEADs a real object, so it needs an
-      # S3 endpoint: a throwaway MinIO, exactly like local dev's stand-in.
+      # S3 endpoint: a throwaway S3Mock (see the "Start S3 stand-in" step).
+      # S3Mock ignores credentials; the values below just satisfy env.ts.
       R2_ENDPOINT: http://127.0.0.1:9000
       R2_ACCESS_KEY_ID: den-ci
       R2_SECRET_ACCESS_KEY: den-ci-secret
@@ -87,20 +88,20 @@ jobs:
       - name: Install
         run: npm ci
 
-      # Started by hand rather than as a `services:` entry: the minio image
-      # needs a `server /data` command, which service containers can't take.
-      # Same image as docker-compose.yml's dev-only minio service.
-      - name: Start MinIO (S3 stand-in for R2)
+      # Adobe S3Mock, not MinIO: MinIO stopped publishing its community image
+      # (pulling minio/minio from Docker Hub or quay.io is refused since late
+      # 2025), so a fresh runner can't get it. S3Mock covers everything the
+      # tests use — create bucket, PUT, HEAD, ranged GET, DELETE, path-style —
+      # and is pinned to an exact release so an upstream change can't break
+      # the gate. Verified 2026-11-18: full server suite 151/151 against it.
+      - name: Start S3 stand-in for R2 (S3Mock)
         run: |
-          docker run -d --name minio -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER="$R2_ACCESS_KEY_ID" \
-            -e MINIO_ROOT_PASSWORD="$R2_SECRET_ACCESS_KEY" \
-            minio/minio:latest server /data
+          docker run -d --name s3mock -p 127.0.0.1:9000:9090 adobe/s3mock:5.2.3
           for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/live; then exit 0; fi
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/; then exit 0; fi
             sleep 2
           done
-          docker logs minio
+          docker logs s3mock
           exit 1
 
       # @den/shared resolves to shared/dist (its package.json `exports`), so
