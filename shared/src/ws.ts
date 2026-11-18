@@ -138,7 +138,13 @@ export interface PresenceUpdatePayload {
 
 /** Client → server: send a text message. Server validates chat membership,
  *  persists, then broadcasts `MessageNew` to the chat room (sender included) —
- *  the client reconciles its optimistic bubble via the envelope's `reqId`. */
+ *  the client reconciles its optimistic bubble via the envelope's `reqId`.
+ *
+ *  Idempotent on the envelope's `reqId` (PROJECT.md §14, 2026-11-18): the
+ *  server stores it as the message's client nonce, so re-sending the same
+ *  reqId (a Retry after a lost ack) returns the EXISTING message to the
+ *  sending socket only — no second row, no second room broadcast or push.
+ *  A retry must therefore reuse the original reqId, never mint a new one. */
 export interface MessageSendPayload {
   chatId: string;
   body: string;

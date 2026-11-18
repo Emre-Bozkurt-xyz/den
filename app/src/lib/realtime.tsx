@@ -26,7 +26,14 @@ import {
   TypingTimings,
 } from '@den/shared';
 import { fetchMessages } from './chats';
-import { mergeNewestPage, type MessagesCache } from './messageSync';
+import {
+  applyServerMessage,
+  deliveredReqIds,
+  insertMessages,
+  mergeNewestPage,
+  reconcileOlderPage,
+  type MessagesCache,
+} from './messageSync';
 import { connectSocket, reviveSocket } from './socket';
 import { setChatBadge } from './push';
 import { useChats } from '../hooks/useChats';
@@ -69,8 +76,10 @@ interface RealtimeCtx {
   sendMessage: (chatId: string, body: string, replyToId?: string, replyPreview?: ReplyPreview) => void;
   /** docs/GIFS.md §6 — picking a GIF sends it immediately. */
   sendGif: (chatId: string, gif: { slug: string; width: number; height: number; title: string }, replyToId?: string, replyPreview?: ReplyPreview) => void;
-  /** docs/RECEIPTS.md §5.3 — removes the failed bubble and resends its
-   *  original args as a brand-new optimistic send (fresh reqId). No-op if
+  /** docs/RECEIPTS.md §5.3 — swaps the failed bubble for a pending one and
+   *  resends its original args under the SAME reqId: the reqId is the
+   *  server's idempotency key, so a retry of a send that actually landed
+   *  (lost ack) gets the original message back instead of a copy. No-op if
    *  `failedId` isn't a known failed id (e.g. already retried/discarded). */
   retrySend: (failedId: string) => void;
   /** docs/RECEIPTS.md §5.3 — removes a failed bubble for good; client-only
@@ -180,19 +189,6 @@ export function applyReactionRemoved(reactions: ReactionSummary[], emoji: string
   return reactions.map((rr, i) => (i === idx ? { ...rr, count, mine: userId === meId ? false : rr.mine } : rr));
 }
 
-/** Sort key for reinserting restored messages: numeric id descending
- *  (newest first, matching the server's keyset page order), with any local
- *  (`pending:`/`failed:`) bubble — not yet a real BigInt id — pinned above
- *  everything else rather than fed to `BigInt()`. */
-function byIdDesc(a: Message, b: Message): number {
-  const aLocal = isLocalId(a.id);
-  const bLocal = isLocalId(b.id);
-  if (aLocal || bLocal) return aLocal && bLocal ? 0 : aLocal ? -1 : 1;
-  const an = BigInt(a.id);
-  const bn = BigInt(b.id);
-  return an === bn ? 0 : an > bn ? -1 : 1;
-}
-
 /** Args needed to (re)send a text message — captured at `sendMessage` time
  *  and kept in `failedRef` (keyed by reqId) so `retrySend` can replay them
  *  without the caller re-supplying anything (docs/RECEIPTS.md §5.3). */
@@ -271,7 +267,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
   // docs/RECEIPTS.md §5.3: stays populated across a pending→failed rename
   // (only the stored `tempId` changes) so a late `message.new` echo can still
   // find and reconcile it; only removed once the send is truly resolved
-  // (echo arrives, or the server sends `error`).
+  // (echo arrives, a catch-up page carries its nonce, the server sends
+  // `error`, or it's discarded — see `settleSend`). A Retry reuses the reqId,
+  // so it overwrites its own entry instead of orphaning the old one.
   const pendingRef = useRef(new Map<string, { chatId: string; tempId: string }>());
   // docs/RECEIPTS.md §5.3: reqId -> the original send args, kept alongside
   // (and slightly longer than) `pendingRef` so `retrySend` can replay a
@@ -416,6 +414,15 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  /** Drops every bit of bookkeeping for a send that is now settled for good —
+   *  delivered (echo/ack, or a catch-up page carrying its nonce) or
+   *  discarded. One place, so no path can forget one of the three maps. */
+  function settleSend(reqId: string): void {
+    pendingRef.current.delete(reqId);
+    failedRef.current.delete(reqId);
+    clearSendTimeout(reqId);
+  }
+
   /** Chats currently being *looked at* — one on mobile, up to two in the
    *  desktop split view. Read off the query cache rather than threaded down
    *  from `AuthedApp`, so nothing above here has to know that resync exists. */
@@ -444,8 +451,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     if (resyncingRef.current.has(chatId)) return;
     resyncingRef.current.add(chatId);
     void fetchMessages(chatId, null)
-      .then((page) => {
+      .then(async (page) => {
         qc.setQueryData<MessagesCache>(['messages', chatId], (old) => mergeNewestPage(old, page));
+        // The merge just dropped any bubble this page proved delivered (its
+        // nonce came back on our own row) — its timers/args go with it.
+        for (const reqId of deliveredReqIds(page)) settleSend(reqId);
+        await resyncOlderPages(chatId);
       })
       // A failed catch-up is not worth surfacing: the query is already marked
       // stale, so a remount refetches, and the next resume tries again.
@@ -453,13 +464,48 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       .finally(() => resyncingRef.current.delete(chatId));
   }
 
+  /**
+   * The deeper loaded pages of an open chat, re-validated one at a time AFTER
+   * the newest page has merged — so the reader sees new messages first, and
+   * this is background work, never the "frozen until N pages land" refetch
+   * `resyncChat` exists to avoid. Without it, an edit/delete/reaction/
+   * media-ready on an older message that happened while we were away stayed
+   * wrong until the chat was closed and reopened (a desktop split view or a
+   * PWA left on one chat could go days). Sequential and bounded by what's
+   * loaded (usually 1–3 pages). Chose this over trimming the cache to page 0:
+   * a reader scrolled up in history would watch their content vanish.
+   *
+   * Each pass re-reads the cache and only applies if page `i` still has the
+   * cursor it was fetched with — a gap-reset or a remount in between just
+   * ends the walk. A live frame landing mid-fetch can be overwritten by the
+   * slightly older fetched copy; the same (pre-existing) race as
+   * `mergeNewestPage`, and the next resume corrects it.
+   */
+  async function resyncOlderPages(chatId: string): Promise<void> {
+    const loaded = qc.getQueryData<MessagesCache>(['messages', chatId])?.pages.length ?? 0;
+    for (let i = 1; i < loaded; i++) {
+      const before = qc.getQueryData<MessagesCache>(['messages', chatId])?.pageParams[i];
+      if (typeof before !== 'string') return;
+      const fetched = await fetchMessages(chatId, before);
+      qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
+        old && old.pageParams[i] === before ? reconcileOlderPage(old, i, fetched) : old,
+      );
+    }
+  }
+
   /** Everything a wake-up owes the user, in the order they'll notice it. */
   function resync(): void {
     for (const chatId of activeChatIds()) resyncChat(chatId);
-    void qc.invalidateQueries({ queryKey: ['chats'] });
-    // Server is truth (hard invariant 3): refetch receipts rather than
-    // trusting whatever WS frames were missed while we were away.
-    void qc.invalidateQueries({ queryKey: ['receipts'] });
+    // Server is truth (hard invariant 3): every non-message query that a WS
+    // frame would have patched or invalidated is refetched (active) or marked
+    // stale (inactive) rather than trusting frames missed while we were away:
+    // chat list (message.new/deleted/…), receipts (message.read/delivered),
+    // friends (friend.*), gallery + per-media tags (tag.*, media.ready),
+    // search results (edits/deletes change what a result shows). Messages are
+    // handled per-chat above and below.
+    for (const key of ['chats', 'receipts', 'friends', 'gallery', 'mediaTags', 'messageSearch']) {
+      void qc.invalidateQueries({ queryKey: [key] });
+    }
     // Chats that aren't on screen only get marked stale — they refetch when
     // next opened, which is exactly when their contents start mattering.
     void qc.invalidateQueries({ queryKey: ['messages'], refetchType: 'none' });
@@ -524,20 +570,18 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
       switch (frame.type) {
         case WsType.MessageNew: {
           const { message } = frame.payload as MessageNewPayload;
-          const pending = frame.reqId ? pendingRef.current.get(frame.reqId) : undefined;
 
+          // Matched by reqId → bubble id (`pending:`/`failed:<reqId>`), not
+          // via `pendingRef`, so a late ack still lands after a timeout,
+          // after a Retry (same reqId), or after a catch-up merge already
+          // brought the row in — in which case the bubble is just dropped
+          // (`applyServerMessage` never inserts an id twice). Other members'
+          // copies of a broadcast carry the sender's reqId too; they have no
+          // bubble by that id, so it's inert for them.
           qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
-            withFirstPage(old, (messages) => {
-              if (pending) return messages.map((m) => (m.id === pending.tempId ? message : m));
-              if (messages.some((m) => m.id === message.id)) return messages;
-              return [message, ...messages];
-            }),
+            applyServerMessage(old, message, frame.reqId),
           );
-          if (pending && frame.reqId) {
-            pendingRef.current.delete(frame.reqId);
-            failedRef.current.delete(frame.reqId);
-            clearSendTimeout(frame.reqId);
-          }
+          if (frame.reqId) settleSend(frame.reqId);
           void qc.invalidateQueries({ queryKey: ['chats'] });
           // docs/RECEIPTS.md §5.2 — every landed message (mine or another
           // member's) gets acked, unconditionally: the server only advances
@@ -564,8 +608,10 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
         case WsType.MediaReady: {
           const { message } = frame.payload as MediaReadyPayload;
+          // Every page, not just the first: a placeholder that has scrolled
+          // off page 0 (busy chat, slow transcode) must still flip to ready.
           qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
-            withFirstPage(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
+            withAllPages(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
           );
           void qc.invalidateQueries({ queryKey: ['chats'] });
           sendDeliveredAck([{ chatId: message.chatId, messageId: message.id }]);
@@ -576,7 +622,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
           // resolved card replaces the 'processing' placeholder in place.
           const { message } = frame.payload as EmbedReadyPayload;
           qc.setQueryData<MessagesCache>(['messages', message.chatId], (old) =>
-            withFirstPage(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
+            withAllPages(old, (messages) => messages.map((m) => (m.id === message.id ? message : m))),
           );
           void qc.invalidateQueries({ queryKey: ['chats'] });
           sendDeliveredAck([{ chatId: message.chatId, messageId: message.id }]);
@@ -650,13 +696,11 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
         }
         case WsType.MessageRestored: {
           const { chatId, messages: restored } = frame.payload as MessageRestoredPayload;
-          qc.setQueryData<MessagesCache>(['messages', chatId], (old) =>
-            withFirstPage(old, (messages) => {
-              const byId = new Map(messages.map((m) => [m.id, m]));
-              for (const m of restored) byId.set(m.id, m);
-              return Array.from(byId.values()).sort(byIdDesc);
-            }),
-          );
+          // Each restored message goes back onto the page whose id range owns
+          // it (`insertMessages`) — piling them all onto page 0 sorted an old
+          // one below page 1's newest row. One older than anything loaded is
+          // left for pagination to fetch.
+          qc.setQueryData<MessagesCache>(['messages', chatId], (old) => insertMessages(old, restored));
           void qc.invalidateQueries({ queryKey: ['chats'] });
           break;
         }
@@ -789,11 +833,13 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     dispatchSend({ chatId, body: '', replyToId, replyPreview, gif });
   }
 
-  function dispatchSend(args: PendingSendArgs): void {
+  /** `reqId` is passed only by `retrySend` — it MUST be the original one (the
+   *  server dedupes on it); every fresh send mints its own. */
+  function dispatchSend(args: PendingSendArgs, reqId: string = crypto.randomUUID()): void {
     const { chatId } = args;
     const socket = socketRef.current;
     const me = qc.getQueryData<MeResponse | null>(['me']);
-    const reqId = crypto.randomUUID();
+    clearSendTimeout(reqId);
 
     // No socket at all, or a known-disconnected one — fail immediately
     // rather than trust socket.io's own outbound buffering, which would
@@ -854,18 +900,26 @@ export function RealtimeProvider({ children }: { children: ReactNode }) {
     const reqId = failedId.slice('failed:'.length);
     const args = failedRef.current.get(reqId);
     if (!args) return;
-    failedRef.current.delete(reqId);
     qc.setQueryData<MessagesCache>(['messages', args.chatId], (old) =>
       withFirstPage(old, (messages) => messages.filter((m) => m.id !== failedId)),
     );
-    sendMessage(args.chatId, args.body, args.replyToId, args.replyPreview);
+    // Same reqId, on purpose (see `RealtimeCtx.retrySend`): if the first
+    // attempt actually landed, the server answers with that message rather
+    // than inserting a copy. `dispatchSend` re-registers it in `pendingRef`/
+    // `failedRef` under the same key, so nothing is left behind under an old
+    // one. Straight to `dispatchSend` (not `sendMessage`) so a GIF retries as
+    // a GIF rather than as an empty text that `sendMessage` would drop.
+    dispatchSend(args, reqId);
   }
 
   function discardFailed(failedId: string): void {
     if (!isFailedId(failedId)) return;
     const reqId = failedId.slice('failed:'.length);
     const args = failedRef.current.get(reqId);
-    failedRef.current.delete(reqId);
+    // All three maps — a timed-out send keeps its `pendingRef` entry (for a
+    // late ack), which used to leak here. If that ack does still arrive, the
+    // message shows up: it really was sent, and the server is the truth.
+    settleSend(reqId);
     if (!args) return;
     qc.setQueryData<MessagesCache>(['messages', args.chatId], (old) =>
       withFirstPage(old, (messages) => messages.filter((m) => m.id !== failedId)),

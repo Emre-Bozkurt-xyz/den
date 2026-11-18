@@ -44,6 +44,10 @@ export interface MessageRow {
   replyToMessageId: bigint | null;
   /** docs/MESSAGE_EDIT.md — null if never edited. */
   editedAt: Date | null;
+  /** Migration 018 — the sender's `message.send` reqId. Optional so callers
+   *  that build rows by hand (tests, partial selects) needn't supply it; only
+   *  `toMessage`'s `ownNonceFor` reads it. */
+  clientNonce?: string | null;
 }
 
 export interface MediaRow {
@@ -92,7 +96,12 @@ export function toMessage(
   replyTo: ReplyPreview | null = null,
   reactions: ReactionSummary[] = [],
   embed: EmbedInfo | null = null,
+  /** Pass the viewer's id to expose `clientNonce` on THEIR OWN messages
+   *  (shared `Message.clientNonce`). Omitted ⇒ never exposed — the default for
+   *  every room broadcast, since one DTO object goes to every member. */
+  ownNonceFor?: bigint,
 ): MessageDto {
+  const exposeNonce = ownNonceFor !== undefined && m.senderId === ownNonceFor && !!m.clientNonce;
   return {
     id: m.id.toString(),
     chatId: m.chatId.toString(),
@@ -105,6 +114,7 @@ export function toMessage(
     replyTo,
     reactions,
     editedAt: m.editedAt ? m.editedAt.toISOString() : null,
+    ...(exposeNonce ? { clientNonce: m.clientNonce! } : {}),
   };
 }
 

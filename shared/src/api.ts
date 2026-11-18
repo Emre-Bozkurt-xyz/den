@@ -138,6 +138,14 @@ export interface LoginRequest {
   password: string;
 }
 
+/** POST /auth/logout. `endpoint` is this device's push subscription, if any:
+ *  the server deletes that row (scoped to the departing user) so the device
+ *  stops receiving their notifications. The browser keeps the subscription
+ *  itself, so the next login re-binds it without a new permission prompt. */
+export interface LogoutRequest {
+  endpoint?: string;
+}
+
 /** Register and login both return the authenticated user (session set via cookie). */
 export type AuthResponse = PublicUser;
 
@@ -479,6 +487,14 @@ export interface Message {
    *  is edited; null if never edited. Own messages with a body only (text +
    *  media captions) — see EditMessageRequest. */
   editedAt: string | null;
+  /** Idempotent sends (PROJECT.md §14, 2026-11-18): the WS `reqId` this
+   *  message was sent with (`message.send` only). Present **only** on the
+   *  viewer's OWN messages, and only in `GET /chats/:id/messages` pages — it
+   *  exists so a catch-up merge can recognise "this fetched row IS my local
+   *  pending/failed bubble" when the `message.new` ack was lost, and nobody
+   *  else has any use for it. Absent (not null) everywhere else; live frames
+   *  correlate through the envelope's `reqId` instead. */
+  clientNonce?: string;
 }
 
 /** DMs are 2-member chats with isGroup=false — never special-cased (BACKBONE §5/§11). */
@@ -560,6 +576,9 @@ export const ChatLimits = {
   searchPageDefault: 25,
   searchPageMax: 50,
   searchQueryMax: 256,
+  /** Longest `message.send` reqId the server will persist as a client nonce
+   *  (a `crypto.randomUUID()` is 36). Longer/odd ones are sent un-deduped. */
+  clientNonceMax: 64,
 } as const;
 
 // ─── message search (post-MVP, docs/MESSAGE_SEARCH.md) ──────────────────────

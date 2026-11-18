@@ -38,11 +38,22 @@ async function memberIdsOf(chatId: bigint): Promise<bigint[]> {
   return rows.map((r) => r.userId);
 }
 
+// ─── visibility rule ────────────────────────────────────────────────────────
+// A member-visible message is `deleted_at IS NULL AND pending_upload = false`.
+// `pending_upload` (migration 018) is true for a media message from upload
+// mint until its first item completes (media/service.ts); until then it has
+// no bytes, so every READ path here (history, preview, unread, search,
+// receipt/reply/reaction targets, edit) treats it exactly like a deleted row.
+// The sender loses nothing: an in-progress album lives in ChatView's composer
+// tray, never as a bubble in the message cache. Write paths that must still
+// reach it — the sender's own soft-delete (`discardAlbum`), the upload flow
+// itself — deliberately don't filter.
+
 async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
   const rows = await db
     .select()
     .from(messages)
-    .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt)))
+    .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(messages.pendingUpload, false)))
     .orderBy(desc(messages.id))
     .limit(1);
   const row = rows[0];
@@ -60,7 +71,12 @@ async function lastMessageOf(chatId: bigint): Promise<MessageDto | null> {
 }
 
 async function unreadCountFor(chatId: bigint, viewerId: bigint, lastReadId: bigint | null): Promise<number> {
-  const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), ne(messages.senderId, viewerId)];
+  const conditions = [
+    eq(messages.chatId, chatId),
+    isNull(messages.deletedAt),
+    eq(messages.pendingUpload, false),
+    ne(messages.senderId, viewerId),
+  ];
   if (lastReadId !== null) conditions.push(gt(messages.id, lastReadId));
   const rows = await db
     .select({ count: sql<number>`count(*)::int` })
@@ -156,26 +172,49 @@ export async function createChat(creatorId: bigint, body: CreateChatRequest): Pr
     const [a, b] = pair(creatorId, otherId);
     const dmKey = `${a}:${b}`;
 
-    const existing = await db.select().from(chats).where(eq(chats.dmKey, dmKey)).limit(1);
-    if (existing[0]) {
+    const existingSummary = async (): Promise<CreateChatResult | null> => {
+      const existing = await db.select().from(chats).where(eq(chats.dmKey, dmKey)).limit(1);
       const chat = existing[0];
+      if (!chat) return null;
       const membership = await db
         .select({ lastRead: chatMembers.lastReadMessageId })
         .from(chatMembers)
         .where(and(eq(chatMembers.chatId, chat.id), eq(chatMembers.userId, creatorId)))
         .limit(1);
       return { chat: await buildSummary(chat, creatorId, membership[0]?.lastRead ?? null), created: false, newMemberIds: [] };
-    }
+    };
 
+    const found = await existingSummary();
+    if (found) return found;
+
+    // The check above is only the fast path. Two concurrent "message Bob"
+    // taps (both of us at once, or one double-tap) can both miss it, and the
+    // `dm_key` unique constraint then fails one insert — which used to surface
+    // as a 500. `ON CONFLICT DO NOTHING` makes the loser wait for the winner's
+    // commit and insert nothing; it then returns the winner's chat exactly as
+    // the fast path would have. Targeted at `dm_key` so any other constraint
+    // violation still throws rather than being silently swallowed.
     const chat = await db.transaction(async (tx) => {
-      const inserted = await tx.insert(chats).values({ isGroup: false, dmKey, createdBy: creatorId }).returning();
-      const created = inserted[0]!;
+      const inserted = await tx
+        .insert(chats)
+        .values({ isGroup: false, dmKey, createdBy: creatorId })
+        .onConflictDoNothing({ target: chats.dmKey })
+        .returning();
+      const created = inserted[0];
+      if (!created) return null;
       await tx.insert(chatMembers).values([
         { chatId: created.id, userId: creatorId },
         { chatId: created.id, userId: otherId },
       ]);
       return created;
     });
+    if (!chat) {
+      const raced = await existingSummary();
+      // Only reachable if the winning row vanished between its commit and this
+      // read — chats are never hard-deleted, so treat it as the bug it'd be.
+      if (!raced) throw new Error(`createChat: dm ${dmKey} conflicted but no row found`);
+      return raced;
+    }
     syncNewChatMembersToVaultGroup(chat.id, [creatorId, otherId]);
     return { chat: await buildSummary(chat, creatorId, null), created: true, newMemberIds: [otherId] };
   }
@@ -202,7 +241,7 @@ export async function getMessagesPage(
   limit: number,
   viewerId: bigint,
 ): Promise<MessagesResponse> {
-  const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt)];
+  const conditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(messages.pendingUpload, false)];
   if (before !== null) conditions.push(lt(messages.id, before));
 
   const rows = await db
@@ -229,6 +268,9 @@ export async function getMessagesPage(
         r.replyToMessageId ? (replyMap.get(r.replyToMessageId.toString()) ?? null) : null,
         reactionsMap.get(r.id.toString()) ?? [],
         embedMap.get(r.id.toString()) ?? null,
+        // Own-message nonces only — the resync merge (app lib/messageSync.ts)
+        // matches them to a local pending/failed bubble whose ack was lost.
+        viewerId,
       ),
     ),
     nextCursor,
@@ -272,7 +314,12 @@ export async function searchMessages(
   limit: number,
   viewerId: bigint,
 ): Promise<SearchMessagesResponse> {
-  const baseConditions = [eq(messages.chatId, chatId), isNull(messages.deletedAt), ne(messages.kind, 'system')];
+  const baseConditions = [
+    eq(messages.chatId, chatId),
+    isNull(messages.deletedAt),
+    eq(messages.pendingUpload, false),
+    ne(messages.kind, 'system'),
+  ];
   if (filters.q) baseConditions.push(ilike(messages.body, `%${escapeLikePattern(filters.q)}%`));
   if (filters.from !== null) baseConditions.push(eq(messages.senderId, filters.from));
   if (filters.since) baseConditions.push(gte(messages.createdAt, filters.since));
@@ -331,15 +378,22 @@ export async function searchMessages(
 // ─── receipts (post-MVP, docs/RECEIPTS.md) ──────────────────────────────────
 
 /** Guard shared by `markRead`/`markDelivered`: a watermark may only advance
- *  to a message id that actually belongs to this chat and isn't soft-deleted
- *  — never trust a client-supplied id blindly (CLAUDE.md hard invariant 1's
+ *  to a message id that actually belongs to this chat and is member-visible
+ *  (not soft-deleted, not an unpublished upload) — never trust a client-supplied id blindly (CLAUDE.md hard invariant 1's
  *  spirit extended to "don't let a foreign id leak into another chat's
  *  watermark"). */
 async function messageExistsInChat(chatId: bigint, messageId: bigint): Promise<boolean> {
   const rows = await db
     .select({ id: messages.id })
     .from(messages)
-    .where(and(eq(messages.id, messageId), eq(messages.chatId, chatId), isNull(messages.deletedAt)))
+    .where(
+      and(
+        eq(messages.id, messageId),
+        eq(messages.chatId, chatId),
+        isNull(messages.deletedAt),
+        eq(messages.pendingUpload, false),
+      ),
+    )
     .limit(1);
   return rows.length > 0;
 }
@@ -409,15 +463,87 @@ export async function listReceipts(chatId: bigint): Promise<ChatReceipt[]> {
   }));
 }
 
+// ─── idempotent sends (PROJECT.md §14, 2026-11-18) ──────────────────────────
+//
+// `message.send` persists the frame's `reqId` as `messages.client_nonce`, with
+// a partial unique index on (sender_id, client_nonce). The failure this
+// closes: on a flaky radio the frame lands but the `message.new` ack doesn't,
+// the client's 10s backstop flips the bubble to failed, and Retry used to
+// insert a second copy. Now a retry reuses the reqId and gets the original
+// row back. Scoped per SENDER, so another member can never collide with (or
+// probe for) your nonces.
+
+/** A `message.send` reqId we're willing to persist as a nonce, else null —
+ *  absent/odd ids just send un-deduped, exactly as before this existed. The
+ *  charset covers `crypto.randomUUID()` and anything similarly boring. */
+export function parseClientNonce(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw.length < 8 || raw.length > ChatLimits.clientNonceMax) return null;
+  return /^[A-Za-z0-9_-]+$/.test(raw) ? raw : null;
+}
+
+export interface SendMessageResult {
+  message: MessageDto;
+  /** True when `clientNonce` matched a message this sender already sent: the
+   *  caller acks the sender with `message` but must NOT re-broadcast or
+   *  re-push — every member already got the original. */
+  duplicate: boolean;
+}
+
+/** The sender's existing message for `nonce`, as a full DTO (media, embed,
+ *  reactions — whatever it has accumulated since), or null. A nonce reused
+ *  across chats is a client bug or a probe; refuse it rather than ack a
+ *  message from a chat the frame didn't name. */
+export async function messageByClientNonce(
+  chatId: bigint,
+  senderId: bigint,
+  nonce: string,
+): Promise<MessageDto | null> {
+  const rows = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.senderId, senderId), eq(messages.clientNonce, nonce)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.chatId !== chatId) throw validation('reqId already used for another chat');
+  return messageDtoFor(row, senderId);
+}
+
+/** Stamps `nonce` onto a message that was inserted without one — the embed
+ *  path, whose insert lives in embeds/service.ts `createEmbedMessage`.
+ *  Returns false if a concurrent send with the same nonce already holds it
+ *  (unique violation), in which case the caller's row is the duplicate.
+ *  ⚠️ Interim: if `createEmbedMessage` ever takes the nonce into its own
+ *  insert (with the same ON CONFLICT handling as `sendTextMessage`), this and
+ *  its caller in ws.ts go away. */
+export async function claimClientNonce(messageId: bigint, nonce: string): Promise<boolean> {
+  try {
+    await db.update(messages).set({ clientNonce: nonce }).where(eq(messages.id, messageId));
+    return true;
+  } catch (e) {
+    if (typeof e === 'object' && e !== null && (e as { code?: string }).code === '23505') return false;
+    throw e;
+  }
+}
+
+/** Soft-deletes a row that lost a nonce race (see `claimClientNonce`) before
+ *  anyone was told about it — never broadcast, so no WS frame is owed. */
+export async function discardDuplicateSend(messageId: bigint): Promise<void> {
+  await db.update(messages).set({ deletedAt: new Date() }).where(eq(messages.id, messageId));
+}
+
 /** Persist a text message. Stage 2 only supports `kind: 'text'` — media kinds
  *  arrive in Stage 3 via the upload-complete flow, not this path. `replyToId`
- *  is post-MVP; a brand-new message never has reactions yet. */
+ *  is post-MVP; a brand-new message never has reactions yet. `clientNonce`
+ *  (from `parseClientNonce`) makes the insert idempotent per sender. */
 export async function sendTextMessage(
   chatId: bigint,
   senderId: bigint,
   body: string,
   replyToId?: bigint,
-): Promise<MessageDto> {
+  clientNonce: string | null = null,
+): Promise<SendMessageResult> {
   const trimmed = body.trim();
   if (!trimmed) throw validation('message body cannot be empty');
   if (trimmed.length > ChatLimits.messageBodyMax) {
@@ -427,11 +553,23 @@ export async function sendTextMessage(
 
   const inserted = await db
     .insert(messages)
-    .values({ chatId, senderId, kind: 'text', body: trimmed, replyToMessageId: replyToId ?? null })
+    .values({ chatId, senderId, kind: 'text', body: trimmed, replyToMessageId: replyToId ?? null, clientNonce })
+    // Must name the partial index's predicate for Postgres to infer it as the
+    // arbiter. Raw on purpose: an ON CONFLICT index predicate can't carry the
+    // table-qualified column drizzle would render.
+    .onConflictDoNothing({ target: [messages.senderId, messages.clientNonce], where: sql.raw('client_nonce IS NOT NULL') })
     .returning();
-  const row = inserted[0]!;
+  const row = inserted[0];
+  if (!row) {
+    // Conflict ⇒ clientNonce was non-null and this sender already used it.
+    // The ws.ts pre-check normally catches a retry before we get here; this
+    // is the two-frames-in-flight race.
+    const existing = clientNonce ? await messageByClientNonce(chatId, senderId, clientNonce) : null;
+    if (!existing) throw new Error('sendTextMessage: nonce conflict but no existing row');
+    return { message: existing, duplicate: true };
+  }
   const replyTo = await replyPreviewFor(row.replyToMessageId);
-  return toMessage(row, [], replyTo, []);
+  return { message: toMessage(row, [], replyTo, []), duplicate: false };
 }
 
 // ─── message deletion (Stage 6 / BACKBONE §2 item 11, docs/archive/MESSAGE_DELETE.md) ──
@@ -495,7 +633,11 @@ export async function restoreMessages(viewerId: bigint, chatId: bigint, rawIds: 
   const ids = parseMessageIdBatch(rawIds);
   const rows = await loadOwnMessagesOrThrow(chatId, viewerId, ids);
 
-  const toRestore = rows.filter((r) => r.deletedAt !== null).map((r) => r.id);
+  // A never-published upload (`pending_upload`, see the visibility rule at
+  // the top) is discarded by soft-delete, not hidden by it — restoring one
+  // would broadcast a bytes-less "processing" bubble to every member, so it
+  // is a silent no-op like an already-live row.
+  const toRestore = rows.filter((r) => r.deletedAt !== null && !r.pendingUpload).map((r) => r.id);
   if (toRestore.length === 0) return [];
   await db.update(messages).set({ deletedAt: null }).where(inArray(messages.id, toRestore));
 
@@ -571,7 +713,8 @@ export async function editMessage(
   const row = rows[0];
   if (!row || row.chatId !== chatId) throw notFound('message not found');
   if (row.senderId !== viewerId) throw forbidden('you can only edit your own messages');
-  if (row.deletedAt !== null) throw notFound('message not found');
+  // Unpublished uploads 404 like deleted rows (visibility rule, top of file).
+  if (row.deletedAt !== null || row.pendingUpload) throw notFound('message not found');
   if (!EDITABLE_KINDS.has(row.kind)) throw validation('this message cannot be edited');
 
   const trimmed = typeof rawBody === 'string' ? rawBody.trim() : '';

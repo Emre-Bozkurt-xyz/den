@@ -14,9 +14,19 @@ import assert from 'node:assert/strict';
 import { after, before, describe, test } from 'node:test';
 import { and, eq, inArray } from 'drizzle-orm';
 import { db, closeDb } from '../db/index.js';
-import { chatMembers, chats, messages, users } from '../db/schema.js';
+import { chatMembers, chats, friendships, messages, users } from '../db/schema.js';
 import { AppError } from '../errors.js';
-import { editMessage, listReceipts, markDelivered, markRead } from './service.js';
+import {
+  createChat,
+  editMessage,
+  getMessagesPage,
+  listReceipts,
+  markDelivered,
+  markRead,
+  messageByClientNonce,
+  parseClientNonce,
+  sendTextMessage,
+} from './service.js';
 
 const RUN_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -270,5 +280,96 @@ describe('markRead / markDelivered / listReceipts', () => {
         .where(and(eq(chatMembers.chatId, receiptsChatId), eq(chatMembers.userId, freshReaderId)));
       await db.delete(users).where(eq(users.id, freshReaderId));
     }
+  });
+});
+
+/**
+ * Audit fixes 2026-11-18 (migration 018): idempotent `message.send`, hidden
+ * unpublished uploads, and the DM-creation race. Own fixture: two accepted
+ * friends whose DM is created BY the test (through `createChat`), torn down
+ * in `after()`.
+ */
+describe('idempotent sends / pending uploads / DM race', () => {
+  let aliceId: bigint;
+  let bobId: bigint;
+  let dmId: bigint;
+
+  before(async () => {
+    aliceId = await insertUser('nonce-alice');
+    bobId = await insertUser('nonce-bob');
+    const [lo, hi] = aliceId < bobId ? [aliceId, bobId] : [bobId, aliceId];
+    await db.insert(friendships).values({ userA: lo, userB: hi, status: 'accepted', requestedBy: aliceId });
+  });
+
+  after(async () => {
+    if (dmId !== undefined) {
+      await db.delete(messages).where(eq(messages.chatId, dmId));
+      await db.delete(chatMembers).where(eq(chatMembers.chatId, dmId));
+      await db.delete(chats).where(eq(chats.id, dmId));
+    }
+    await db.delete(friendships).where(inArray(friendships.userA, [aliceId, bobId]));
+    await db.delete(users).where(inArray(users.id, [aliceId, bobId]));
+  });
+
+  test('two concurrent DM creates return one chat; the loser gets created:false, not a 500', async () => {
+    const [x, y] = await Promise.all([
+      createChat(aliceId, { memberIds: [bobId.toString()] }),
+      createChat(bobId, { memberIds: [aliceId.toString()] }),
+    ]);
+    assert.equal(x.chat.id, y.chat.id);
+    assert.equal([x.created, y.created].filter(Boolean).length, 1, 'exactly one request creates the row');
+    dmId = BigInt(x.chat.id);
+  });
+
+  test('parseClientNonce accepts a UUID and rejects junk', () => {
+    assert.equal(parseClientNonce('3f1c2a9e-8b7d-4c6e-9f0a-1b2c3d4e5f60'), '3f1c2a9e-8b7d-4c6e-9f0a-1b2c3d4e5f60');
+    assert.equal(parseClientNonce(undefined), null);
+    assert.equal(parseClientNonce('short'), null);
+    assert.equal(parseClientNonce('x'.repeat(65)), null);
+    assert.equal(parseClientNonce('has spaces in it'), null);
+  });
+
+  test('re-sending the same nonce returns the original row instead of inserting a copy', async () => {
+    const nonce = `nonce-${RUN_ID}`;
+    const first = await sendTextMessage(dmId, aliceId, 'hello once', undefined, nonce);
+    const second = await sendTextMessage(dmId, aliceId, 'hello once', undefined, nonce);
+    assert.equal(first.duplicate, false);
+    assert.equal(second.duplicate, true);
+    assert.equal(second.message.id, first.message.id);
+    const rows = await db.select().from(messages).where(and(eq(messages.senderId, aliceId), eq(messages.clientNonce, nonce)));
+    assert.equal(rows.length, 1);
+    assert.equal((await messageByClientNonce(dmId, aliceId, nonce))?.id, first.message.id);
+  });
+
+  test('nonces are per sender: the same string from another member is a different message', async () => {
+    const nonce = `shared-${RUN_ID}`;
+    const a = await sendTextMessage(dmId, aliceId, 'from alice', undefined, nonce);
+    const b = await sendTextMessage(dmId, bobId, 'from bob', undefined, nonce);
+    assert.equal(b.duplicate, false);
+    assert.notEqual(a.message.id, b.message.id);
+  });
+
+  test('the nonce is exposed on history pages only to its own sender', async () => {
+    const nonce = `visible-${RUN_ID}`;
+    const sent = await sendTextMessage(dmId, aliceId, 'whose nonce', undefined, nonce);
+    const asAlice = await getMessagesPage(dmId, null, 50, aliceId);
+    const asBob = await getMessagesPage(dmId, null, 50, bobId);
+    assert.equal(asAlice.messages.find((m) => m.id === sent.message.id)?.clientNonce, nonce);
+    assert.equal(asBob.messages.find((m) => m.id === sent.message.id)?.clientNonce, undefined);
+  });
+
+  test('an unpublished upload is invisible to history, receipts and replies', async () => {
+    const rows = await db
+      .insert(messages)
+      .values({ chatId: dmId, senderId: aliceId, kind: 'image', body: null, pendingUpload: true })
+      .returning();
+    const pending = rows[0]!;
+    for (const viewer of [aliceId, bobId]) {
+      const page = await getMessagesPage(dmId, null, 50, viewer);
+      assert.ok(!page.messages.some((m) => m.id === pending.id.toString()), 'hidden from sender and members alike');
+    }
+    await assert.rejects(() => markRead(dmId, bobId, pending.id), (err: unknown) => statusOf(err) === 400);
+    await assert.rejects(() => sendTextMessage(dmId, bobId, 'reply', pending.id), (err: unknown) => statusOf(err) === 400);
+    await assert.rejects(() => editMessage(aliceId, dmId, pending.id, 'caption'), (err: unknown) => statusOf(err) === 404);
   });
 });

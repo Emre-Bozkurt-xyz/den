@@ -56,13 +56,16 @@ function normalizeEmoji(raw: unknown): string {
  *  would be unreachable/unauthorized noise (CLAUDE.md hard invariant 1/8). */
 async function assertReactableMessage(chatId: bigint, messageId: bigint): Promise<void> {
   const rows = await db
-    .select({ chatId: messages.chatId, deletedAt: messages.deletedAt })
+    .select({ chatId: messages.chatId, deletedAt: messages.deletedAt, pendingUpload: messages.pendingUpload })
     .from(messages)
     .where(eq(messages.id, messageId))
     .limit(1);
   const row = rows[0];
   if (!row) throw notFound('message not found');
   if (row.chatId !== chatId) throw notFound('message not found');
+  // Unpublished upload (chat/service.ts visibility rule) — not found, so a
+  // reaction can't attach to (or reveal) a message no member can see yet.
+  if (row.pendingUpload) throw notFound('message not found');
   if (row.deletedAt !== null) throw validation('cannot react to a deleted message');
 }
 

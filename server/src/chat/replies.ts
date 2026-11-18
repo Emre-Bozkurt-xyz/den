@@ -47,6 +47,7 @@ export async function replyPreviewsForMessages(replyToIds: bigint[]): Promise<Ma
         kind: messages.kind,
         body: messages.body,
         deletedAt: messages.deletedAt,
+        pendingUpload: messages.pendingUpload,
       })
       .from(messages)
       .where(inArray(messages.id, replyToIds)),
@@ -60,7 +61,10 @@ export async function replyPreviewsForMessages(replyToIds: bigint[]): Promise<Ma
 
   const map = new Map<string, ReplyPreview>();
   for (const row of rows) {
-    const deleted = row.deletedAt !== null;
+    // An unpublished upload (`pending_upload`) reads as deleted, like every
+    // other read path (chat/service.ts visibility rule). `assertReplyTarget`
+    // stops new replies to one, so this is belt-and-braces.
+    const deleted = row.deletedAt !== null || row.pendingUpload;
     const kind = row.kind as MessageKind;
     const count = mediaCountByMessage.get(row.id.toString()) ?? 0;
     const preview = deleted ? '' : (row.body?.slice(0, 120) ?? '') || mediaLabel(kind, count);
@@ -89,11 +93,15 @@ export async function replyPreviewFor(replyToId: bigint | null): Promise<ReplyPr
  *  by chat/service.ts (text sends) and media/service.ts (upload-complete). */
 export async function assertReplyTarget(chatId: bigint, replyToId: bigint): Promise<void> {
   const rows = await db
-    .select({ chatId: messages.chatId, deletedAt: messages.deletedAt })
+    .select({ chatId: messages.chatId, deletedAt: messages.deletedAt, pendingUpload: messages.pendingUpload })
     .from(messages)
     .where(eq(messages.id, replyToId))
     .limit(1);
   const row = rows[0];
-  if (!row || row.chatId !== chatId) throw validation('replyToId must reference a message in this chat');
+  // An unpublished upload doesn't exist as far as members can tell — same
+  // answer as a foreign id, so its existence isn't leaked either.
+  if (!row || row.chatId !== chatId || row.pendingUpload) {
+    throw validation('replyToId must reference a message in this chat');
+  }
   if (row.deletedAt !== null) throw validation('cannot reply to a deleted message');
 }

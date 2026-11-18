@@ -14,6 +14,118 @@ function isLocalId(id: string): boolean {
   return id.startsWith('pending:') || id.startsWith('failed:');
 }
 
+/** The send's reqId behind a local bubble id (`pending:<reqId>` /
+ *  `failed:<reqId>`), or null for a real id. The reqId doubles as the
+ *  message's server-side idempotency key (shared `Message.clientNonce`), which
+ *  is what lets a fetched row be recognised as "this bubble, delivered". */
+export function localReqId(id: string): string | null {
+  if (id.startsWith('pending:')) return id.slice('pending:'.length);
+  if (id.startsWith('failed:')) return id.slice('failed:'.length);
+  return null;
+}
+
+function cursorValue(cursor: string | null | undefined): bigint | null {
+  if (typeof cursor !== 'string') return null;
+  try {
+    return BigInt(cursor);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The slice of id-space page `i` owns: `[lo, hi)`, null = unbounded.
+ *
+ * Keyset pagination makes this exact: page `i` was fetched as "ids below
+ * `pageParams[i]`" and handed its `nextCursor` (its oldest id) on as the next
+ * page's bound, so the cursors partition the id line with no overlap. Every
+ * insert below goes through this, so a message can only ever live on the one
+ * page whose range covers it — the alternative (always prepending to page 0)
+ * is how a restored or caught-up old message ended up sorted below page 1's
+ * top, or duplicated when page 1 was later fetched over it.
+ */
+function pageBounds(cache: MessagesCache, i: number): { lo: bigint | null; hi: bigint | null } {
+  return {
+    lo: cursorValue(cache.pages[i]?.nextCursor),
+    hi: i === 0 ? null : cursorValue(cache.pageParams[i]),
+  };
+}
+
+function inBounds(id: bigint, { lo, hi }: { lo: bigint | null; hi: bigint | null }): boolean {
+  return (lo === null || id >= lo) && (hi === null || id < hi);
+}
+
+/**
+ * Put server messages into the cache, each on the page that owns its id
+ * (`pageBounds`). A message already cached anywhere is replaced in place
+ * rather than inserted again; one older than everything loaded is dropped —
+ * paginating there fetches it, and caching it now would duplicate it then.
+ */
+export function insertMessages(cache: MessagesCache | undefined, incoming: Message[]): MessagesCache | undefined {
+  if (!cache || cache.pages.length === 0 || incoming.length === 0) return cache;
+  const byId = new Map(incoming.map((m) => [m.id, m]));
+  const pages = cache.pages.map((p) => ({
+    ...p,
+    messages: p.messages.map((m) => {
+      const fresh = byId.get(m.id);
+      if (!fresh) return m;
+      byId.delete(m.id);
+      return fresh;
+    }),
+  }));
+  const touched = new Set<number>();
+  for (const m of byId.values()) {
+    const id = cursorValue(m.id);
+    if (id === null) continue;
+    const i = pages.findIndex((_, idx) => inBounds(id, pageBounds(cache, idx)));
+    if (i === -1) continue;
+    pages[i] = { ...pages[i]!, messages: [...pages[i]!.messages, m] };
+    touched.add(i);
+  }
+  for (const i of touched) pages[i] = { ...pages[i]!, messages: pages[i]!.messages.slice().sort(byIdDesc) };
+  return { ...cache, pages };
+}
+
+/**
+ * Apply a `message.new` (a live broadcast, or the ack of our own send —
+ * `reqId` set). The local bubble for `reqId` is replaced by the real message
+ * in place; if the real message is already cached (a catch-up merge or an
+ * earlier frame got there first), the bubble is just removed. Never inserts a
+ * second copy of an id. A message with no bubble and no cached copy goes on
+ * top of page 0 — it is by definition the newest thing in the chat.
+ */
+export function applyServerMessage(
+  cache: MessagesCache | undefined,
+  message: Message,
+  reqId?: string,
+): MessagesCache | undefined {
+  if (!cache || cache.pages.length === 0) return cache;
+  const exists = cache.pages.some((p) => p.messages.some((m) => m.id === message.id));
+  let placed = exists;
+  const pages = cache.pages.map((p) => ({
+    ...p,
+    messages: p.messages.flatMap((m) => {
+      if (m.id === message.id) return [message];
+      if (reqId !== undefined && isLocalId(m.id) && localReqId(m.id) === reqId) {
+        if (placed) return [];
+        placed = true;
+        return [message];
+      }
+      return [m];
+    }),
+  }));
+  if (!placed) pages[0] = { ...pages[0]!, messages: [message, ...pages[0]!.messages] };
+  return { ...cache, pages };
+}
+
+/** reqIds a fetched page proves were delivered — the sender's own rows carry
+ *  their nonce (shared `Message.clientNonce`; never set on anyone else's). */
+export function deliveredReqIds(page: MessagesResponse): Set<string> {
+  const out = new Set<string>();
+  for (const m of page.messages) if (m.clientNonce) out.add(m.clientNonce);
+  return out;
+}
+
 /**
  * Merge a freshly-fetched *newest* page (`?before=` unset) into an existing
  * infinite-query cache — the catch-up half of `resyncChat` in `realtime.tsx`.
@@ -39,12 +151,20 @@ function isLocalId(id: string): boolean {
  *    and merging would leave a hole in the middle of the list. The cache is
  *    reset to exactly this page instead; scrolling up re-paginates normally.
  *    Server is truth (hard invariant 3) — never stitch across an unknown gap.
- * 3. **Local bubbles survive both paths.** A pending or failed send is not
- *    something the server can return, and dropping it would silently discard
- *    the user's unsent message.
+ * 3. **Local bubbles survive both paths** — unless the page proves they were
+ *    delivered. A pending or failed send the server never got must stay, or
+ *    the user's unsent message silently vanishes. But one whose frame DID
+ *    land and whose ack was lost comes back on this page as a real row
+ *    carrying the bubble's reqId as `clientNonce` (own messages only); that
+ *    bubble is dropped so the message shows once, not twice with a Retry
+ *    button on the copy (PROJECT.md §14, 2026-11-18).
+ * 4. **New rows go on the page that owns their id** (`insertMessages`), never
+ *    blindly onto page 0, and are never inserted twice.
  */
 export function mergeNewestPage(cache: MessagesCache | undefined, page: MessagesResponse): MessagesCache {
-  const locals = cache?.pages[0]?.messages.filter((m) => isLocalId(m.id)) ?? [];
+  const delivered = deliveredReqIds(page);
+  const undelivered = (m: Message): boolean => !delivered.has(localReqId(m.id) ?? '');
+  const locals = cache?.pages[0]?.messages.filter((m) => isLocalId(m.id) && undelivered(m)) ?? [];
   const fresh = (): MessagesCache => ({
     pages: [{ ...page, messages: [...locals, ...page.messages] }],
     pageParams: [null],
@@ -69,21 +189,60 @@ export function mergeNewestPage(cache: MessagesCache | undefined, page: Messages
   const pages = cache.pages.map((p) => ({
     ...p,
     messages: p.messages.flatMap((m) => {
-      if (isLocalId(m.id)) return [m];
+      if (isLocalId(m.id)) return undelivered(m) ? [m] : [];
       const server = byId.get(m.id);
       if (server) return [server];
       return floor !== null && BigInt(m.id) < floor ? [m] : [];
     }),
   }));
 
-  // Whatever the page brought that we'd never seen — by definition newer than
-  // anything cached, so it belongs at the top of page 0 (newest-first).
+  // Whatever the page brought that we'd never seen — almost always newer than
+  // anything cached (so page 0), but a row restored while we were away can
+  // belong further down; `insertMessages` routes each to its own page.
   const added = page.messages.filter((m) => !cachedReal.has(m.id));
-  if (added.length > 0) {
-    const first = pages[0]!;
-    pages[0] = { ...first, messages: [...first.messages, ...added].sort(byIdDesc) };
-  }
-  return { ...cache, pages };
+  return insertMessages({ ...cache, pages }, added) ?? { ...cache, pages };
+}
+
+/**
+ * Re-validate one DEEPER page (index ≥ 1) of an open chat after a resume —
+ * `fetched` is `GET ?before=pageParams[index]`. `mergeNewestPage` only speaks
+ * for the newest page's range, so an edit, delete, reaction or media-ready on
+ * an older loaded message that happened while we were away would otherwise
+ * stay wrong for as long as the chat stays open.
+ *
+ * Authoritative over `[max(page's own lo, fetched floor), hi)`: inside it,
+ * cached rows take the server's copy or are dropped if the server omitted
+ * them (deleted), and fetched rows we lacked (restored) are added. Rows the
+ * fetch reached below the page's own range belong to the next page down and
+ * are left for that page's own pass. No gap/reset rule here: a page whose
+ * cursor is unchanged can't have a gap.
+ */
+export function reconcileOlderPage(cache: MessagesCache, index: number, fetched: MessagesResponse): MessagesCache {
+  const target = cache.pages[index];
+  if (index < 1 || !target) return cache;
+  const bounds = pageBounds(cache, index);
+  // `nextCursor === null` ⇒ the server says nothing exists below this fetch,
+  // so the whole page range is covered; otherwise only down to its oldest row.
+  const oldest = fetched.messages[fetched.messages.length - 1];
+  const fetchedFloor = fetched.nextCursor === null || !oldest ? null : BigInt(oldest.id);
+  const lo = bounds.lo === null ? fetchedFloor : fetchedFloor === null || bounds.lo > fetchedFloor ? bounds.lo : fetchedFloor;
+  const covered = (id: bigint) => inBounds(id, { lo, hi: bounds.hi });
+
+  const byId = new Map(fetched.messages.map((m) => [m.id, m]));
+  const messages = target.messages.flatMap((m) => {
+    if (isLocalId(m.id)) return [m];
+    const server = byId.get(m.id);
+    if (server) return [server];
+    return covered(BigInt(m.id)) ? [] : [m];
+  });
+  const have = new Set(messages.map((m) => m.id));
+  const added = fetched.messages.filter((m) => !have.has(m.id) && covered(BigInt(m.id)));
+
+  const pages = cache.pages.slice();
+  pages[index] = { ...target, messages };
+  // Through `insertMessages` so an id that somehow sits on another page is
+  // replaced there rather than duplicated here.
+  return insertMessages({ ...cache, pages }, added) ?? { ...cache, pages };
 }
 
 /** Newest-first by numeric id, with local bubbles pinned above everything —
