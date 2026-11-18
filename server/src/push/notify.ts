@@ -28,6 +28,7 @@ import { chatMembers, chats, pushSubscriptions, users } from '../db/schema.js';
 import { env } from '../env.js';
 import { chatRoom } from '../realtime/rooms.js';
 import { isWatching } from '../realtime/presence.js';
+import { checkPushEndpoint } from './endpoint.js';
 
 let configured = false;
 function ensureVapid(): boolean {
@@ -76,6 +77,16 @@ async function subscriptionsForUsers(userIds: bigint[]): Promise<SubRow[]> {
  *  the phone ignored it", which is the hardest version of this bug to chase
  *  (docs/NOTIFICATIONS.md §2.4). */
 async function sendOne(sub: SubRow, payload: string, topic: string): Promise<void> {
+  // ⚠️ Re-checked at send time, not only at subscribe time: rows stored before
+  // endpoint validation existed (push/endpoint.ts) must not become an SSRF
+  // just because they are already in the table. Skipped and logged, NOT
+  // deleted — a refused row is most likely a real device on a push service
+  // missing from the allowlist, and extending the list should bring it back.
+  const check = checkPushEndpoint(sub.endpoint, env.isProd);
+  if (!check.ok) {
+    console.warn(`push send skipped: endpoint refused (${check.reason}, host ${check.host ?? 'none'})`);
+    return;
+  }
   try {
     await webpush.sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, payload, {
       TTL: PUSH_TTL_SECONDS,
@@ -88,7 +99,13 @@ async function sendOne(sub: SubRow, payload: string, topic: string): Promise<voi
   } catch (e) {
     const code = (e as { statusCode?: number })?.statusCode;
     if (code === 404 || code === 410) {
-      await db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, sub.endpoint));
+      // Guarded: this runs inside fire-and-forget fanout, where an unhandled
+      // rejection from a DB blip would take the whole process (and every
+      // socket) down with it.
+      await db
+        .delete(pushSubscriptions)
+        .where(eq(pushSubscriptions.endpoint, sub.endpoint))
+        .catch((err) => console.error('push prune failed:', err instanceof Error ? err.message : err));
       return;
     }
     console.error(`push send failed (status ${code ?? 'none'}):`, e instanceof Error ? e.message : e);
@@ -178,7 +195,22 @@ function chatNameFor(
   return others.join(', ') || 'Group';
 }
 
+/**
+ * ⚠️ Never throws, same contract as `notifyUser`: every caller fires this with
+ * `void` after the message is already committed and fanned out (ws.ts,
+ * routes/media.ts), so a rejection here has nobody to catch it — and an
+ * unhandled rejection from one transient DB error would kill the process and
+ * drop every connected socket. Push is best-effort; the message is not.
+ */
 export async function notifyChatMembers(io: IOServer, chatId: bigint, message: Message): Promise<void> {
+  try {
+    await notifyChatMembersUnsafe(io, chatId, message);
+  } catch (e) {
+    console.error(`notifyChatMembers failed for chat ${chatId}:`, e instanceof Error ? e.message : e);
+  }
+}
+
+async function notifyChatMembersUnsafe(io: IOServer, chatId: bigint, message: Message): Promise<void> {
   if (!ensureVapid()) return; // not configured locally — skip quietly, not fatal to sending the message
 
   const memberRows = await db

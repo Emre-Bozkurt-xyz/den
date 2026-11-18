@@ -12,7 +12,9 @@
  *   - `user:{id}`  — one user, all their tabs/devices; used for notices that
  *                    aren't chat-scoped yet (chat.created, friend.*).
  *   - `chat:{id}`  — every member of that chat; message fanout target.
- * A socket joins its own `user:` room plus a `chat:` room per chat it's
+ *   - `session:{hash}` — every socket opened with one session cookie; what
+ *                    logout / per-session revoke disconnect (realtime/revoke.ts).
+ * A socket joins its own `user:` and `session:` rooms plus a `chat:` room per chat it's
  * already a member of on connect. When a *new* chat is created, the route
  * handler explicitly joins the new members' sockets so fanout works without
  * requiring a reconnect.
@@ -40,17 +42,27 @@ import {
 } from '@den/shared';
 import { env, gifsEnabled } from './env.js';
 import { db } from './db/index.js';
-import { chatMembers, sessions } from './db/schema.js';
+import { chatMembers, sessions, users } from './db/schema.js';
 import { SESSION_COOKIE } from './auth/session.js';
 import { assertMember, isMember } from './chat/membership.js';
-import { markDelivered, sendTextMessage } from './chat/service.js';
+import {
+  claimClientNonce,
+  discardDuplicateSend,
+  markDelivered,
+  messageByClientNonce,
+  parseClientNonce,
+  sendTextMessage,
+} from './chat/service.js';
 import { createEmbedMessage, finalizeEmbed } from './embeds/service.js';
 import { notifyChatMembers } from './push/notify.js';
 import { AppError, unavailable } from './errors.js';
 import { isValidGifSlug } from './gifs/klipy.js';
 import { aspectHint } from './aspectHint.js';
-import { chatRoom, userRoom } from './realtime/rooms.js';
+import { chatRoom, sessionRoom, userRoom } from './realtime/rooms.js';
 import { clearSocket, clearTyping, setTyping } from './realtime/typing.js';
+import { startSessionRecheck } from './realtime/revoke.js';
+import { TokenBucket } from './realtime/tokenBucket.js';
+import { originAllowed } from './auth/originCheck.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -71,12 +83,16 @@ function readSessionToken(cookieHeader: string | undefined): string | null {
 
 async function userIdForToken(token: string): Promise<bigint | null> {
   const rows = await db
-    .select({ userId: sessions.userId, expiresAt: sessions.expiresAt })
+    .select({ userId: sessions.userId, expiresAt: sessions.expiresAt, disabledAt: users.disabledAt })
     .from(sessions)
+    .innerJoin(users, eq(users.id, sessions.userId))
     .where(eq(sessions.id, token))
     .limit(1);
   const row = rows[0];
   if (!row || row.expiresAt.getTime() <= Date.now()) return null;
+  // Same rule as resolveSession (auth/session.ts): a disabled account's
+  // sessions resolve to nothing, even if a row survived the disable.
+  if (row.disabledAt) return null;
   return row.userId;
 }
 
@@ -85,12 +101,56 @@ async function joinOwnChatRooms(socket: Socket, userId: bigint): Promise<void> {
   for (const r of rows) await socket.join(chatRoom(r.chatId));
 }
 
+/**
+ * Run a fire-and-forget async path with its rejection caught and logged.
+ *
+ * ⚠️ Every `void someAsync()` in this file used to be a bare `void`, so one
+ * transient DB error in a delivered-ack or presence lookup became an
+ * unhandled rejection — which kills the Node process and with it every
+ * connected socket in the circle. A frame handler failing must cost that one
+ * frame, never the server.
+ */
+function guard(label: string, work: Promise<unknown>): void {
+  work.catch((err) => console.error(`ws ${label} failed:`, err instanceof Error ? err.message : err));
+}
+
+/**
+ * Inbound frame budget, per socket (realtime/tokenBucket.ts).
+ *
+ * Without one, a member — or anyone holding a stolen session — could flood
+ * `message.send` (each one a DB write plus a push to every other member's
+ * phone) or `typing.update` as fast as the socket carried them. Sized so a
+ * real person in an active group never notices:
+ *   - all frames: burst 100, then 20/s. Opening the app sends one delivered
+ *     ack per chat-list refresh, a presence report and a few typing frames;
+ *     a busy group adds one ack per incoming message.
+ *   - message.send: burst 30, then 1/s sustained. Thirty rapid-fire messages
+ *     back to back, then one a second for as long as you like.
+ * A refused frame gets a WS error frame — the socket stays up. Disconnecting
+ * would make the client reconnect and resync, which costs the server more
+ * than the frames it was refusing.
+ */
+const FRAME_BUCKET = { capacity: 100, refillPerSecond: 20 } as const;
+const SEND_BUCKET = { capacity: 30, refillPerSecond: 1 } as const;
+/** Refusals of fire-and-forget frames (no reqId) are reported at most this
+ *  often, so a flood is not answered with a flood. */
+const RATE_NOTICE_INTERVAL_MS = 10_000;
+
 export function attachWs(app: FastifyInstance): IOServer {
   const io = new IOServer(app.server, {
     // Same-origin in production; allow the Vite dev origin in dev.
     cors: env.isProd ? undefined : { origin: true, credentials: true },
     pingInterval: 25_000, // proxies kill idle sockets (BACKBONE §8)
     pingTimeout: 20_000,
+    // Same-site forgery guard for the handshake (auth/originCheck.ts). With
+    // `cors` off, nothing else checks Origin on a WebSocket upgrade, and a
+    // page on a sibling subdomain is same-site — its handshake carries the
+    // SameSite=Lax cookie and would get a fully authenticated socket.
+    allowRequest: (req, callback) => {
+      const ok = originAllowed(req.headers.origin, { isProd: env.isProd, publicOrigin: env.publicOrigin });
+      if (!ok) app.log.warn({ origin: req.headers.origin }, 'refused cross-origin socket handshake');
+      callback(null, ok);
+    },
   });
 
   io.use((socket, next) => {
@@ -100,44 +160,93 @@ export function attachWs(app: FastifyInstance): IOServer {
       .then((userId) => {
         if (!userId) return next(new Error('unauthorized'));
         socket.data.userId = userId;
+        // Recorded so the session can be revoked out from under this socket
+        // (realtime/revoke.ts). Kept only in process memory, like the cookie
+        // header socket.io already holds for the handshake.
+        socket.data.sessionToken = token;
         next();
       })
-      .catch(next);
+      .catch((err) => {
+        // ⚠️ Never `next(err)` with the raw error: socket.io sends the
+        // message to the client, and a Postgres error message carries SQL.
+        console.error('ws handshake session lookup failed:', err instanceof Error ? err.message : err);
+        next(new Error('unavailable'));
+      });
   });
+
+  // Defence in depth behind the explicit disconnects in the routes that end
+  // sessions: re-validate every live socket's session on a coarse interval.
+  startSessionRecheck(io);
 
   io.on('connection', (socket) => {
     // socket.io's SocketData defaults to `any`; set in the io.use auth
     // middleware above, always a bigint by the time `connection` fires.
     const userId = socket.data.userId as bigint;
     void socket.join(userRoom(userId));
-    void joinOwnChatRooms(socket, userId);
+    void socket.join(sessionRoom(socket.data.sessionToken as string));
+    // A socket that silently failed to join its chat rooms would look
+    // connected and receive nothing. Closing the TRANSPORT (not
+    // `socket.disconnect()`, which the client treats as final) makes the
+    // client's own reconnect loop retry, and its reconnect handler resyncs.
+    joinOwnChatRooms(socket, userId).catch((err) => {
+      console.error('ws join chat rooms failed:', err instanceof Error ? err.message : err);
+      socket.conn.close();
+    });
 
     socket.emit('ws', makeEnvelope(WsType.Hello, { hello: 'den', socketId: socket.id }));
 
-    socket.on('ws', (frame: WsEnvelope) => {
-      if (!frame || typeof frame.type !== 'string') return;
-      // Guard the reserved call.* prefixes — MVP must never accept them.
-      if (isReservedWsType(frame.type)) return;
+    const frameBucket = new TokenBucket(FRAME_BUCKET.capacity, FRAME_BUCKET.refillPerSecond);
+    const sendBucket = new TokenBucket(SEND_BUCKET.capacity, SEND_BUCKET.refillPerSecond);
+    let lastRateNoticeAt = 0;
+    const refuseRateLimited = (frame: WsEnvelope): void => {
+      // A send carries a reqId and the client is waiting on it (the bubble
+      // flips to "failed", retryable) — always answer that one.
+      if (frame.type === WsType.MessageSend && frame.reqId) {
+        socket.emit('ws', makeEnvelope(WsType.Error, { code: ErrorCode.RateLimited, message: 'Slow down' }, frame.reqId));
+        return;
+      }
+      const now = Date.now();
+      if (now - lastRateNoticeAt < RATE_NOTICE_INTERVAL_MS) return;
+      lastRateNoticeAt = now;
+      socket.emit('ws', makeEnvelope(WsType.Error, { code: ErrorCode.RateLimited, message: 'Slow down' }));
+    };
 
-      switch (frame.type) {
-        case WsType.Ping:
-          socket.emit('ws', makeEnvelope(WsType.Pong, {}, frame.reqId));
-          break;
-        case WsType.MessageSend:
-          void handleMessageSend(io, socket, userId, frame as WsEnvelope<string, MessageSendPayload>);
-          break;
-        case WsType.DeliveredAck:
-          void handleDeliveredAck(io, userId, frame as WsEnvelope<string, DeliveredAckPayload>);
-          break;
-        case WsType.PresenceUpdate:
-          void handlePresenceUpdate(socket, userId, frame as WsEnvelope<string, PresenceUpdatePayload>);
-          break;
-        case WsType.TypingUpdate:
-          void handleTypingUpdate(socket, userId, frame as WsEnvelope<string, TypingUpdatePayload>);
-          break;
-        default:
-          // Unknown types are ignored — real handlers land per-stage.
-          break;
+    socket.on('ws', (frame: WsEnvelope) => {
+      // A synchronous throw out of an event listener would escape socket.io's
+      // packet handling as an uncaught exception — same fate as an unhandled
+      // rejection. Async handlers are covered by `guard`.
+      try {
+        if (!frame || typeof frame.type !== 'string') return;
+        // Guard the reserved call.* prefixes — MVP must never accept them.
+        if (isReservedWsType(frame.type)) return;
+
+        if (!frameBucket.take() || (frame.type === WsType.MessageSend && !sendBucket.take())) {
+          refuseRateLimited(frame);
+          return;
+        }
+
+        switch (frame.type) {
+          case WsType.Ping:
+            socket.emit('ws', makeEnvelope(WsType.Pong, {}, frame.reqId));
+            break;
+          case WsType.MessageSend:
+            guard('message.send', handleMessageSend(io, socket, userId, frame as WsEnvelope<string, MessageSendPayload>));
+            break;
+          case WsType.DeliveredAck:
+            guard('delivered.ack', handleDeliveredAck(io, userId, frame as WsEnvelope<string, DeliveredAckPayload>));
+            break;
+          case WsType.PresenceUpdate:
+            guard('presence.update', handlePresenceUpdate(socket, userId, frame as WsEnvelope<string, PresenceUpdatePayload>));
+            break;
+          case WsType.TypingUpdate:
+            guard('typing.update', handleTypingUpdate(socket, userId, frame as WsEnvelope<string, TypingUpdatePayload>));
+            break;
+          default:
+            // Unknown types are ignored — real handlers land per-stage.
+            break;
+        }
+      } catch (err) {
+        console.error('ws frame dispatch failed:', err instanceof Error ? err.message : err);
       }
     });
 
@@ -244,6 +353,22 @@ async function handleMessageSend(
 
     await assertMember(userId, chatId);
 
+    // Idempotent sends (chat/service.ts, PROJECT.md §14 2026-11-18): the
+    // frame's reqId is persisted as the message's client nonce. A frame whose
+    // nonce already has a row is a retry of a send that DID land (its ack was
+    // lost): ack THIS socket with the existing message and stop — no second
+    // room broadcast, no second push, no second embed resolve. Checked before
+    // any other validation so a retry is answered even if, say, its reply
+    // target has since been deleted.
+    const clientNonce = parseClientNonce(frame.reqId);
+    const ackExisting = (existing: MessageDto): void => {
+      socket.emit('ws', makeEnvelope(WsType.MessageNew, { message: existing }, frame.reqId));
+    };
+    if (clientNonce) {
+      const existing = await messageByClientNonce(chatId, userId, clientNonce);
+      if (existing) return ackExisting(existing);
+    }
+
     let replyToId: bigint | undefined;
     const replyToIdRaw = frame.payload?.replyToId;
     if (typeof replyToIdRaw === 'string' && replyToIdRaw) {
@@ -294,7 +419,21 @@ async function handleMessageSend(
       message = created.message;
       embedId = created.embedId;
     } else {
-      message = await sendTextMessage(chatId, userId, rawBody, replyToId);
+      // Two frames with one nonce in flight at once: the insert's ON CONFLICT
+      // hands the loser the winner's row.
+      const sent = await sendTextMessage(chatId, userId, rawBody, replyToId, clientNonce);
+      if (sent.duplicate) return ackExisting(sent.message);
+      message = sent.message;
+    }
+
+    // The embed insert (embeds/service.ts) doesn't take the nonce, so stamp it
+    // here — before anyone has heard of the row, so the loser of a concurrent
+    // duplicate can still be discarded unseen.
+    if (embedId !== null && clientNonce && !(await claimClientNonce(BigInt(message.id), clientNonce))) {
+      await discardDuplicateSend(BigInt(message.id));
+      const existing = await messageByClientNonce(chatId, userId, clientNonce);
+      if (existing) ackExisting(existing);
+      return;
     }
 
     // Placeholder fanout now (mirrors media/routes.ts's upload-complete
@@ -315,9 +454,19 @@ async function handleMessageSend(
         );
     }
   } catch (e) {
-    const code = e instanceof AppError ? e.code : 'internal';
-    const message = e instanceof Error ? e.message : 'failed to send message';
-    socket.emit('ws', makeEnvelope(WsType.Error, { code, message }, frame.reqId));
+    // ⚠️ Only the app's own errors are forwarded verbatim — same rule as the
+    // REST error handler (app.ts). Anything else (a Drizzle/Postgres error
+    // embeds the SQL and its parameters in `message`) is logged here and the
+    // client gets a generic string; it branches on `code` anyway.
+    if (e instanceof AppError) {
+      socket.emit('ws', makeEnvelope(WsType.Error, { code: e.code, message: e.message }, frame.reqId));
+      return;
+    }
+    console.error('message.send failed:', e instanceof Error ? e.message : e);
+    socket.emit(
+      'ws',
+      makeEnvelope(WsType.Error, { code: ErrorCode.Internal, message: 'Failed to send message' }, frame.reqId),
+    );
   }
 }
 

@@ -9,7 +9,7 @@
  * cookies, which would break local dev. Same-origin on iOS installed PWA works
  * (tested-in-week-1 assumption from §3).
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from '../db/index.js';
@@ -63,11 +63,45 @@ export async function createSession(
   return token;
 }
 
-/** Delete the current session row and clear the cookie. */
-export async function destroySession(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-  const token = req.cookies[SESSION_COOKIE];
-  if (token) await db.delete(sessions).where(eq(sessions.id, token));
+/**
+ * Delete the current session row and clear the cookie. Returns the token and
+ * the user the row belonged to (null when there was no live row), so logout
+ * can also disconnect that session's sockets and detach this device's push
+ * subscription (routes/auth.ts).
+ */
+export async function destroySession(
+  req: FastifyRequest,
+  reply: FastifyReply,
+): Promise<{ token: string | null; userId: bigint | null }> {
+  const token = req.cookies[SESSION_COOKIE] ?? null;
+  let userId: bigint | null = null;
+  if (token) {
+    const deleted = await db
+      .delete(sessions)
+      .where(eq(sessions.id, token))
+      .returning({ userId: sessions.userId });
+    userId = deleted[0]?.userId ?? null;
+  }
   reply.clearCookie(SESSION_COOKIE, { path: '/', domain: env.cookieDomain });
+  return { token, userId };
+}
+
+/**
+ * Rate-limit key for an authenticated REST caller (app.ts): a hash of the
+ * session token, or null when the request carries no session cookie.
+ *
+ * ⚠️ Per session, NOT per IP. Behind Caddy every client can share one peer
+ * address (auth/clientIp.ts), so an IP-keyed default limit would be one
+ * bucket for the whole circle — the exact outage docs/AUTH_HARDENING.md §1
+ * was about. Hashed so the limiter's in-memory store never holds a bearer
+ * token. The cookie is not verified here (this runs before `requireAuth`):
+ * a forged value just gets its own empty bucket and then a 401, so nothing
+ * that reaches a handler can escape its real session's bucket.
+ */
+export function sessionRateKey(req: FastifyRequest): string | null {
+  const token = req.cookies?.[SESSION_COOKIE];
+  if (!token) return null;
+  return `s:${createHash('sha256').update(token).digest('base64url').slice(0, 32)}`;
 }
 
 /**

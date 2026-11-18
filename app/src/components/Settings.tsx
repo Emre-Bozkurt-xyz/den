@@ -5,7 +5,6 @@ import { updateMe } from '../lib/auth';
 import { VaultLinkSection } from './Profile';
 import { NotificationsSection, PushPoc } from './PushPoc';
 import { PasskeysSection } from './PasskeysSection';
-import { VoicePoc } from './VoicePoc';
 import { WsProbe } from './WsProbe';
 import { KeyboardProbe } from './KeyboardProbe';
 import { ScreenHeader } from './ScreenHeader';
@@ -195,7 +194,6 @@ function DebugTools() {
       {open && (
         <div className="flex flex-col gap-4 border-t border-black/10 p-4 dark:border-white/10">
           <PushPoc />
-          <VoicePoc />
           <WsProbe />
           <KeyboardProbe />
         </div>

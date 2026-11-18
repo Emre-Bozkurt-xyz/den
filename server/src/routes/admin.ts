@@ -68,6 +68,7 @@ import { frozenUsernames, globalFreeze, setGlobalFreeze, setUserFreeze } from '.
 import { SecurityEventKind, listEvents, record } from '../admin/events.js';
 import { clientIp } from '../auth/clientIp.js';
 import { generateInviteCodes } from '../admin/invites.js';
+import { disconnectSession, disconnectUser } from '../realtime/revoke.js';
 import { env } from '../env.js';
 import { AppError, forbidden, notFound, validation } from '../errors.js';
 
@@ -513,6 +514,11 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       const doomed = rows.filter((r) => r.id !== currentToken).map((r) => r.id);
       if (doomed.length > 0) {
         await db.delete(sessions).where(inArray(sessions.id, doomed));
+        // ⚠️ Per session, not per user: the owner may be revoking their OWN
+        // other devices, and the kept session's socket (this console) must
+        // survive. Without this the revoked devices' sockets kept streaming
+        // every chat until they happened to reconnect (realtime/revoke.ts).
+        for (const token of doomed) disconnectSession(app.io, token);
       }
 
       const target = await db
@@ -619,8 +625,11 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       if (updated.length === 0) throw notFound('no such enabled user');
 
       // Sessions are deleted as cleanup; resolveSession refusing a disabled
-      // user is what actually enforces this (auth/session.ts).
+      // user is what actually enforces this for REST (auth/session.ts). Live
+      // sockets never pass through resolveSession, so they are dropped here
+      // explicitly — every device, since every session is gone.
       await db.delete(sessions).where(eq(sessions.userId, userId));
+      disconnectUser(app.io, userId);
 
       await record({
         kind: SecurityEventKind.UserDisabled,

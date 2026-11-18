@@ -27,13 +27,17 @@ import {
   DEFAULT_USER_SETTINGS,
   GIF_RATINGS,
   type AuthResponse,
+  type LogoutRequest,
   type MeResponse,
   type UserSettings,
 } from '@den/shared';
 import type { LoginRequest, RegisterRequest, UpdateMeRequest } from '@den/shared';
 import { db } from '../db/index.js';
-import { inviteCodes, users } from '../db/schema.js';
+import { inviteCodes, pushSubscriptions, users } from '../db/schema.js';
 import { hashPassword, verifyPassword } from '../auth/password.js';
+import { loginInputPlausible } from '../auth/loginInput.js';
+import { disconnectSession } from '../realtime/revoke.js';
+import { PUSH_ENDPOINT_MAX } from '../push/endpoint.js';
 import { checkLock, clearFailures, recordFailure, sweepExpired } from '../auth/throttle.js';
 import { clientIp } from '../auth/clientIp.js';
 import { isOwner } from '../auth/owner.js';
@@ -274,6 +278,19 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     const ip = clientIp(req, env.trustedProxy);
     const userAgent = req.headers['user-agent'] ?? null;
 
+    // ── shape gate (auth/loginInput.ts) ─────────────────────────────────────
+    // Before the lock check, the failure row and argon2 — all three used to
+    // receive whatever size the caller sent. Same answer as a wrong password
+    // and no failure recorded; no real account can fail this check, so it
+    // reveals nothing. Logged by length only: the value itself is the junk.
+    if (!loginInputPlausible(username, password)) {
+      req.log.warn(
+        { ip, usernameLength: username.length, passwordLength: password.length },
+        'login refused: malformed input',
+      );
+      throw new AppError(401, ErrorCode.InvalidCredentials, 'incorrect username or password');
+    }
+
     // ── throttle gate (docs/AUTH_HARDENING.md §2.2) ────────────────────────
     // Checked BEFORE the password is verified, so a locked account costs an
     // attacker an indexed count() rather than an argon2 hash. ⚠️ This runs for
@@ -385,10 +402,40 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── logout ────────────────────────────────────────────────────────────────
-  app.post('/auth/logout', async (req, reply) => {
-    await destroySession(req, reply);
-    return { ok: true };
-  });
+  //
+  // Three things end here, not one:
+  //   1. the session row (and cookie) — as always;
+  //   2. this session's live sockets (realtime/revoke.ts) — a socket
+  //      authenticates once at the handshake, so without this it kept
+  //      receiving every chat frame after the user had "logged out";
+  //   3. THIS device's push subscription row, when the client names its
+  //      endpoint — otherwise the device keeps getting the logged-out user's
+  //      notifications, lock screen previews included.
+  //
+  // ⚠️ (3) deletes only the server row. The browser keeps its subscription on
+  // purpose (app/src/lib/auth.ts): on iOS, re-subscribing after logout could
+  // need a fresh user gesture, while the existing subscription is re-bound to
+  // whoever logs in next by the gestureless sync. The delete is scoped to the
+  // session's own user, so a body naming someone else's endpoint does nothing.
+  app.post<{ Body: LogoutRequest | undefined }>(
+    '/auth/logout',
+    async (req, reply) => {
+      const { token, userId } = await destroySession(req, reply);
+      if (token) disconnectSession(app.io, token);
+
+      const endpoint = req.body?.endpoint;
+      if (userId !== null && typeof endpoint === 'string' && endpoint.length > 0 && endpoint.length <= PUSH_ENDPOINT_MAX) {
+        // Best-effort: the session is already gone, and failing the logout
+        // response over a push row would leave the client unsure whether it
+        // is signed out.
+        await db
+          .delete(pushSubscriptions)
+          .where(and(eq(pushSubscriptions.endpoint, endpoint), eq(pushSubscriptions.userId, userId)))
+          .catch((err) => req.log.error({ err }, 'logout: push subscription detach failed'));
+      }
+      return { ok: true };
+    },
+  );
 
   // ── me ──────────────────────────────────────────────────────────────────
   app.get('/me', { preHandler: requireAuth }, async (req) => {

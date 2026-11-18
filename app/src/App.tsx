@@ -20,7 +20,7 @@ import { NewGroupScreen } from './components/NewGroupScreen';
 import { GalleryScreen } from './components/GalleryScreen';
 import { ChatGallery } from './components/ChatGallery';
 import { createChat, fetchChats } from './lib/chats';
-import { onOpenChatFromNotification } from './lib/push';
+import { onOpenChatFromNotification, syncPushSubscription } from './lib/push';
 import { logout } from './lib/auth';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
@@ -32,6 +32,19 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
  */
 export default function App() {
   const { data: me, isLoading } = useMe();
+
+  // Re-bind this browser's existing push subscription to whoever just became
+  // the signed-in user (docs/NOTIFICATIONS.md §2.3). The app-start sync in
+  // lib/pwa.ts runs once, often before anyone is logged in — so after a
+  // logout → login (or a first login on this device) it had already 401'd and
+  // nothing re-ran it, leaving the device silent for the new account. Keyed on
+  // the user id so it fires on every sign-in, by password, invite or passkey.
+  // Gestureless by construction (it never prompts), so safe on iOS; on a cold
+  // start it duplicates the pwa.ts call, which is a no-op upsert.
+  const meId = me?.id;
+  useEffect(() => {
+    if (meId) void syncPushSubscription();
+  }, [meId]);
 
   if (isLoading) {
     return (
@@ -566,7 +579,16 @@ function ProfileTab({ me, onOpenSettings }: { me: MeResponse; onOpenSettings: ()
   const qc = useQueryClient();
   const signOut = useMutation({
     mutationFn: logout,
-    onSuccess: () => qc.setQueryData(['me'], null),
+    onSuccess: () => {
+      // ['me'] → null first: that is what unmounts AuthedApp (and with it every
+      // observer of the chat/message/gallery queries) in favour of AuthScreen.
+      qc.setQueryData(['me'], null);
+      // ⚠️ Then drop everything else. The cache outlives the session, so the
+      // next person to sign in on this device would otherwise be shown the
+      // previous user's chats, messages and gallery until each refetched.
+      // Server is the truth (hard invariant 3) — nothing here is worth keeping.
+      qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'me' });
+    },
   });
 
   return (

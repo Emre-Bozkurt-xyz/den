@@ -8,18 +8,24 @@
  * whether `CF-Connecting-IP` survives, and guessing is how the `trustProxy:
  * true` bug got written in the first place.
  *
- * Requires a session — a stranger learns nothing, and a member only ever sees
- * the headers on their own request. Run it once from a phone on mobile data:
- * whichever field shows that phone's real address names the right
- * TRUSTED_PROXY value.
+ * Run it once from a phone on mobile data: whichever field shows that phone's
+ * real address names the right TRUSTED_PROXY value.
+ *
+ * ⚠️ Owner-only in production (any session in dev). It used to accept any
+ * member, on the reasoning that it only describes the caller's own request —
+ * true, but it still hands every member a map of the proxy chain (which
+ * headers survive, the internal gateway addresses in X-Forwarded-For, the
+ * trust settings). That is operator knowledge, and the owner is the only one
+ * who needs it to set TRUSTED_PROXY.
  */
 import type { FastifyInstance } from 'fastify';
 import { clientIp, ipCandidates } from '../auth/clientIp.js';
+import { requireOwner } from '../auth/owner.js';
 import { requireAuth } from '../auth/session.js';
 import { env } from '../env.js';
 
 export async function debugRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/debug/client-ip', { preHandler: requireAuth }, async (req) => {
+  app.get('/debug/client-ip', { preHandler: env.isProd ? requireOwner : requireAuth }, async (req) => {
     return {
       strategy: env.trustedProxy,
       trustProxy: env.trustProxy,

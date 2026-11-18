@@ -79,6 +79,30 @@ export async function syncPushSubscription(): Promise<void> {
   }
 }
 
+/**
+ * The endpoint of the subscription this browser holds, or null — for logout,
+ * which hands it to the server so THIS device's row is detached from the
+ * departing user (routes/auth.ts).
+ *
+ * ⚠️ Read-only, never `unsubscribe()`. Dropping the browser subscription on
+ * logout would mean the next person to sign in on this device has to create a
+ * new one, and on iOS that can need a fresh user gesture ("Enable
+ * notifications" again). Keeping it lets the gestureless sync re-bind it to
+ * whoever logs in next. Uses `getRegistration()` rather than
+ * `serviceWorker.ready`, which never resolves without a registered SW, and is
+ * time-boxed: logout must never hang on a push lookup.
+ */
+export async function currentPushEndpoint(): Promise<string | null> {
+  if (!pushSupported()) return null;
+  const lookup = (async () => {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = await reg?.pushManager.getSubscription();
+    return sub?.endpoint ?? null;
+  })().catch(() => null);
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000));
+  return Promise.race([lookup, timeout]);
+}
+
 /** Debug trigger — server sends a test notification to the caller's own subs. */
 export async function sendTestPush(): Promise<{ delivered: number; total: number }> {
   return api('/api/push/test', { method: 'POST' });
