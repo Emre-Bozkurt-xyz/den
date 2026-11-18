@@ -121,10 +121,13 @@ response.
 
 ### 2.5 Finish the IP question
 
-`GET /api/debug/client-ip` (**requires a session**) echoes the resolved client
-plus the candidate headers Fastify actually received. Authenticated so it
-reveals nothing to a stranger, and it only ever describes the caller's own
-request. Run it once from a phone on mobile data and the correct
+`GET /api/debug/client-ip` (**owner-only in production**, any session in dev)
+echoes the resolved client plus the candidate headers Fastify actually
+received. It only ever describes the caller's own request, but it still maps
+the proxy chain (which headers survive, the internal hop addresses in
+`X-Forwarded-For`, the trust settings) — operator knowledge, so since
+2026-11-18 it is gated by `requireOwner` rather than any member's session. Run
+it once as the owner from a phone on mobile data and the correct
 `TRUSTED_PROXY` value is immediate.
 
 ## 3. What this does NOT do
