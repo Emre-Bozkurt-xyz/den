@@ -1,7 +1,7 @@
 /**
- * ffmpeg/ffprobe process wrappers, shared by the voice PoC (routes/voice-poc.ts)
- * and the real Stage 3 worker (media/process.ts). Both spawn the CLI rather
- * than a binding — ffmpeg's on PATH in the Docker image (Dockerfile.api) and
+ * ffmpeg/ffprobe process wrappers for the media worker (media/process.ts) and
+ * the maintenance scripts (scripts/). They spawn the CLI rather than a
+ * binding — ffmpeg's on PATH in the Docker image (Dockerfile.api) and
  * expected on PATH for local dev (BACKBONE §14 Stage 0 gate).
  */
 import { spawn } from 'node:child_process';

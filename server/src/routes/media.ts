@@ -11,7 +11,8 @@ import { assertMember } from '../chat/membership.js';
 import { validation } from '../errors.js';
 import { notifyChatMembers } from '../push/notify.js';
 import { chatRoom } from '../realtime/rooms.js';
-import { chatIdForMedia, completeUpload, createUpload, finalizeProcessing, getMediaUrls } from '../media/service.js';
+import { chatIdForMedia, completeUpload, createUpload, getMediaUrls } from '../media/service.js';
+import { startMediaProcessing } from '../media/pipeline.js';
 import { addTag, removeTag, tagsForMediaIds } from '../media/tags.js';
 
 const MEDIA_KINDS = new Set(['image', 'video', 'voice']);
@@ -94,13 +95,13 @@ export async function mediaRoutes(app: FastifyInstance): Promise<void> {
         if (result.isFirstComplete) void notifyChatMembers(app.io, result.chatId, result.message);
       }
 
-      // Run the sharp/ffmpeg pipeline in the background; don't make the
-      // uploader's request wait on transcode time. media.ready follows.
-      void finalizeProcessing(result.mediaId)
-        .then((message) => {
-          app.io?.to(chatRoom(result.chatId)).emit('ws', makeEnvelope(WsType.MediaReady, { message }));
-        })
-        .catch((err) => req.log.error({ err, mediaId: result.mediaId.toString() }, 'media processing failed'));
+      // Run the sharp/ffmpeg pipeline in the background (queued — see
+      // media/pipeline.ts); don't make the uploader's request wait on
+      // transcode time. media.ready follows. ONLY when this call actually
+      // moved the item forward: a retried complete of a ready item used to
+      // re-run processing, which for video re-encoded onto the stored key
+      // and then deleted it (audit 2026-11-18).
+      if (result.shouldProcess) startMediaProcessing(app.io, req.log, result.mediaId, result.mediaKind);
 
       return result.message;
     },

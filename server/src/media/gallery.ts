@@ -64,7 +64,16 @@ export async function getGalleryPage(
   // and the page can never drift apart — two hand-maintained copies of the
   // tag-matching predicates is exactly the bug that would silently mis-size
   // the filmstrip's ghost slots.
-  const filters = [eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready')];
+  // `pending_upload = false` is belt-and-braces: a pending message's media
+  // can't be 'ready' today (processing only starts after completeUpload
+  // publishes the message), but the gallery must never be the one read path
+  // that surfaces an unpublished upload if that ordering ever changes.
+  const filters = [
+    eq(messages.chatId, chatId),
+    isNull(messages.deletedAt),
+    eq(messages.pendingUpload, false),
+    eq(media.status, 'ready'),
+  ];
   // 'visual' = image OR video — the Media segment's grid (BACKBONE §15
   // 2026-07-22); any other value is a single MediaKind (Voice segment uses
   // 'voice').
@@ -172,7 +181,7 @@ async function mediaSummaryFor(chatId: bigint): Promise<ChatMediaSummary> {
       .select({ count: sql<number>`count(*)::int` })
       .from(media)
       .innerJoin(messages, eq(messages.id, media.messageId))
-      .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(media.status, 'ready'))),
+      .where(and(eq(messages.chatId, chatId), isNull(messages.deletedAt), eq(messages.pendingUpload, false), eq(media.status, 'ready'))),
     // Cover candidates = ready media *that has a thumbnail* (BACKBONE §15
     // 2026-07-22), newest first — voice never has a thumb_key, so picking the
     // bare-latest item previously left the album tile blank whenever the
@@ -185,6 +194,7 @@ async function mediaSummaryFor(chatId: bigint): Promise<ChatMediaSummary> {
         and(
           eq(messages.chatId, chatId),
           isNull(messages.deletedAt),
+          eq(messages.pendingUpload, false),
           eq(media.status, 'ready'),
           isNotNull(media.thumbKey),
         ),

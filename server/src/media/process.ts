@@ -1,10 +1,14 @@
 /**
- * Media processing worker (BACKBONE §7). Runs inline, right after upload-
- * complete verifies the object — no job queue for MVP (closed friend-circle
- * volume doesn't warrant one; §14 doesn't call for one either). The route
- * that invokes this already flipped the message to visible with
- * `media.status='processing'`, so callers see a placeholder, not silence,
- * while this runs.
+ * Media processing worker (BACKBONE §7). Runs right after upload-complete
+ * verifies the object, behind the small in-process queue in pipeline.ts
+ * (one video at a time, a few images/voice — audit 2026-11-18; before that
+ * every complete started its own encode). The route that invokes this
+ * already published the message with `media.status='processing'`, so
+ * members see a placeholder, not silence, while this runs.
+ *
+ * ⚠️ Not idempotent on its own: it deletes `originalKey` once the derived
+ * asset is uploaded. Only call it through service.ts `finalizeProcessing`,
+ * which refuses rows that are no longer 'processing'.
  *
  * Per-kind behavior (§7 table):
  *   image — sharp: strip EXIF (incl. GPS) + auto-rotate, re-encode to WebP,
@@ -19,16 +23,17 @@
  * Originals superseded by a derived asset (image, voice, and now video) are
  * deleted from R2 after their replacement is confirmed uploaded, so we don't
  * pay to store both forever. ⚠️ Video is the one exception-with-an-exception:
- * on the transcode-timeout fallback the original IS the stored asset, so it
- * must be kept.
+ * when transcode AND the metadata-stripping fallback remux both fail, the
+ * original IS the stored asset, so it must be kept.
  */
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import type { MediaKind } from '@den/shared';
 import { FfmpegTimeoutError, probeCodecs, probeMedia, runFfmpeg } from './ffmpeg.js';
-import { deleteObject, getObjectBuffer, mediaKey, putObjectBuffer } from './r2.js';
+import { VIDEO_MAX_LONG_EDGE, videoFallbackRemuxPlan, videoRemuxArgs, videoTranscodeArgs, voiceTranscodeArgs } from './ffmpegArgs.js';
+import { deleteObject, downloadObjectToFile, getObjectBuffer, mediaKey, putObjectBuffer, putObjectFile } from './r2.js';
 import { pcmToPeaks } from './waveform.js';
 
 export interface ProcessResult {
@@ -125,17 +130,16 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
  * H.264 + AAC in MP4 — so nothing downstream ever detects a format at
  * playback time.
  */
-const VIDEO_MAX_LONG_EDGE = 1920;
-/** Wall clock for the encode. Past this the original is kept, honestly typed. */
+/** Wall clock for the encode. Past this the fallback below kicks in. */
 const MAX_TRANSCODE_MS = 90_000;
 /** Remuxing is a container rewrite, not an encode — it should never be slow. */
 const MAX_REMUX_MS = 30_000;
 
 async function processVideo({ chatId, mediaId, originalKey }: ProcessArgs): Promise<ProcessResult> {
   return withTempDir(async (dir) => {
-    const orig = await getObjectBuffer(originalKey);
     const inPath = join(dir, 'in');
-    await writeFile(inPath, orig);
+    // Streamed to disk, never buffered: originals run up to 500MB.
+    await downloadObjectToFile(originalKey, inPath);
 
     const codecs = await probeCodecs(inPath);
     const inProbe = await probeMedia(inPath);
@@ -159,55 +163,58 @@ async function processVideo({ chatId, mediaId, originalKey }: ProcessArgs): Prom
       (codecs.audioCodec === null || codecs.audioCodec === 'aac') &&
       withinSizeCap;
 
+    // Every command here strips container metadata (ffmpegArgs.ts — iPhone
+    // GPS lives there). `stored` is the file that ends up in R2 and the one
+    // that gets probed; its `mime` is known by construction on the primary
+    // path and probed on the fallback.
     const outPath = join(dir, 'out.mp4');
-    let transcoded = false;
+    let stored: { path: string; filename: string; mime: string | null } | null = null;
     try {
-      if (canRemux) {
-        await runFfmpeg(
-          ['-y', '-i', inPath, '-c', 'copy', '-movflags', '+faststart', outPath],
-          MAX_REMUX_MS,
-        );
-      } else {
-        await runFfmpeg(
-          [
-            '-y', '-i', inPath,
-            '-c:v', 'libx264',
-            '-preset', 'veryfast',
-            '-crf', '23',
-            // Some phone/screen-capture sources are 4:2:2 or 10-bit, which
-            // Safari and older Android decoders refuse. yuv420p is the
-            // universally decodable choice.
-            '-pix_fmt', 'yuv420p',
-            // Cap the LONG edge, whichever way round the video is — a portrait
-            // clip must not be squashed into a landscape box. `-2` keeps the
-            // other side proportional and even (H.264 requires even dims).
-            '-vf', `scale='if(gt(iw,ih),min(iw,${VIDEO_MAX_LONG_EDGE}),-2)':'if(gt(iw,ih),-2,min(ih,${VIDEO_MAX_LONG_EDGE}))'`,
-            ...(codecs.audioCodec ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
-            '-movflags', '+faststart',
-            outPath,
-          ],
-          MAX_TRANSCODE_MS,
-        );
-      }
-      transcoded = true;
+      if (canRemux) await runFfmpeg(videoRemuxArgs(inPath, outPath), MAX_REMUX_MS);
+      else await runFfmpeg(videoTranscodeArgs(inPath, outPath, codecs.audioCodec !== null), MAX_TRANSCODE_MS);
+      stored = { path: outPath, filename: 'video.mp4', mime: 'video/mp4' };
     } catch (e) {
       // ⚠️ Falling back rather than failing. A long or exotic video that plays
       // for some people is a worse outcome than one that plays for everyone,
       // but it is a far better outcome than a message stuck in 'processing'
       // forever. The mime below is then PROBED, never assumed — which is the
       // actual invariant-7 fix, and it holds on this path too.
+      const step = canRemux ? 'remux' : 'transcode';
       if (e instanceof FfmpegTimeoutError) {
-        console.warn(`video ${mediaId}: transcode timed out after ${e.timeoutMs}ms — keeping the original`);
+        console.warn(`video ${mediaId}: ${step} timed out after ${e.timeoutMs}ms — falling back`);
       } else {
-        console.error(`video ${mediaId}: transcode failed, keeping the original:`, e instanceof Error ? e.message : e);
+        console.error(`video ${mediaId}: ${step} failed, falling back:`, e instanceof Error ? e.message : e);
       }
-      transcoded = false;
+    }
+
+    if (!stored) {
+      // The fallback used to ship the untouched upload — GPS and all. Try a
+      // metadata-stripping stream copy first: seconds, same codecs, so the
+      // same playback compatibility as the original. Skipped when the primary
+      // attempt already WAS a stream copy — the same copy failing twice tells
+      // us nothing.
+      const plan = canRemux ? null : videoFallbackRemuxPlan(inPath, dir, codecs.formatName, codecs.videoCodec);
+      if (plan) {
+        try {
+          await runFfmpeg(plan.args, MAX_REMUX_MS);
+          stored = { path: plan.outPath, filename: plan.filename, mime: null };
+        } catch (e) {
+          console.error(`video ${mediaId}: metadata-stripping fallback remux failed:`, e instanceof Error ? e.message : e);
+        }
+      }
+    }
+
+    if (!stored) {
+      // Last resort: the raw original, container metadata included. Logged
+      // loudly because it is the one path where an upload's embedded
+      // location data can still reach other members.
+      console.error(`video ${mediaId}: storing the ORIGINAL unmodified — container metadata NOT stripped`);
     }
 
     // Measure whatever we ACTUALLY ended up with. Transcoding bakes the
     // display-matrix rotation into the pixels and drops the side data, so the
     // input's dimensions can be the wrong way round for the output.
-    const measuredPath = transcoded ? outPath : inPath;
+    const measuredPath = stored?.path ?? inPath;
     const probe = await probeMedia(measuredPath);
 
     // Poster from the same file, for the same reason.
@@ -224,13 +231,13 @@ async function processVideo({ chatId, mediaId, originalKey }: ProcessArgs): Prom
       thumbKey = null;
     }
 
-    if (!transcoded) {
+    if (!stored) {
       return {
         r2Key: originalKey,
         // Honest, not assumed. `mov,mp4,...` covers both; anything else is
         // reported as-is so the client can fail visibly rather than silently.
         mime: mimeForFormat(codecs.formatName),
-        sizeBytes: orig.length,
+        sizeBytes: (await stat(inPath)).size,
         width: probe.width,
         height: probe.height,
         durationMs: probe.durationMs,
@@ -239,17 +246,20 @@ async function processVideo({ chatId, mediaId, originalKey }: ProcessArgs): Prom
       };
     }
 
-    const outBuffer = await readFile(outPath);
-    const outKey = mediaKey(chatId, mediaId, 'video.mp4');
-    await putObjectBuffer(outKey, outBuffer, 'video/mp4');
+    const mime = stored.mime ?? mimeForFormat((await probeCodecs(stored.path)).formatName);
+    const outKey = mediaKey(chatId, mediaId, stored.filename);
+    const sizeBytes = await putObjectFile(outKey, stored.path, mime);
     // Only once the replacement is confirmed uploaded — same order image and
-    // voice already use.
-    await deleteObject(originalKey);
+    // voice use. ⚠️ The key guard is load-bearing: without it, a re-run
+    // against an already-processed row (whose r2Key IS video.mp4) writes onto
+    // that same key and then deletes it, leaving a 'ready' row pointing at
+    // nothing (audit 2026-11-18).
+    if (outKey !== originalKey) await deleteObject(originalKey);
 
     return {
       r2Key: outKey,
-      mime: 'video/mp4', // true by construction now, not a guess
-      sizeBytes: outBuffer.length,
+      mime,
+      sizeBytes,
       width: probe.width,
       height: probe.height,
       durationMs: probe.durationMs,
@@ -272,26 +282,18 @@ function mimeForFormat(formatName: string | null): string {
 
 async function processVoice({ chatId, mediaId, originalKey }: ProcessArgs): Promise<ProcessResult> {
   return withTempDir(async (dir) => {
-    const orig = await getObjectBuffer(originalKey);
     const inPath = join(dir, 'in');
     const outPath = join(dir, 'out.m4a');
-    await writeFile(inPath, orig);
+    await downloadObjectToFile(originalKey, inPath);
 
-    // Same normalization as the Stage 0 voice PoC (routes/voice-poc.ts):
+    // The normalization the Stage 0 voice PoC proved out (since removed):
     // MediaRecorder gives audio/mp4 on iOS Safari, audio/webm;opus on Chrome —
     // normalize both to mono 48kHz AAC/m4a, the one format that plays
     // natively everywhere (§7 THE cursed feature).
-    await runFfmpeg([
-      '-y',
-      '-i', inPath,
-      '-vn',
-      '-ac', '1',
-      '-ar', '48000',
-      '-c:a', 'aac', '-b:a', '96k',
-      '-strict', 'experimental',
-      '-movflags', '+faststart',
-      outPath,
-    ]);
+    // Container metadata is stripped as well (ffmpegArgs.ts): an iOS
+    // recording is an MP4 container and can carry the same location atoms a
+    // video does.
+    await runFfmpeg(voiceTranscodeArgs(inPath, outPath));
 
     const probe = await probeMedia(outPath);
     const outBuffer = await readFile(outPath);

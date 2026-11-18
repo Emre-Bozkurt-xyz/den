@@ -7,6 +7,10 @@
  * the real Cloudflare R2 account endpoint (env.ts). Same client code either
  * way — R2's S3 API compatibility is the whole point.
  */
+import { createReadStream, createWriteStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { DeleteObjectCommand, HeadObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { MediaLimits, type MediaKind } from '@den/shared';
@@ -59,6 +63,29 @@ export function embedKey(chatId: bigint, embedId: bigint, filename: string): str
   return `embeds/${chatId}/${embedId}/${filename}`;
 }
 
+/** ⚠️ The URL this mints signs ONLY `host` (`X-Amz-SignedHeaders=host`) —
+ *  neither the content type nor the length is bound, so a client can PUT any
+ *  type and more bytes than it declared at mint. `requiredContentType` in the
+ *  mint response is advisory.
+ *
+ *  What the installed SDK does (read in @aws-sdk/s3-request-presigner
+ *  3.1091.0 + @smithy/signature-v4 5.6.7, and confirmed by presigning
+ *  offline, audit 2026-11-18):
+ *   - `S3RequestPresigner.prepareRequest` always adds `content-type` to the
+ *     unsignable set, so passing `ContentType` here signs nothing.
+ *   - `content-length` is NOT in the signer's ALWAYS_UNSIGNABLE_HEADERS, and
+ *     PutObject serializes `ContentLength` to a `Content-Length` header — so
+ *     adding `ContentLength: declaredSize` would give
+ *     `SignedHeaders=content-length;host`. The browser sets Content-Length
+ *     from the Blob itself (app/src/lib/media.ts PUTs exactly the Blob whose
+ *     `.size` it declared), so a binding would be compatible with the client.
+ *  Deliberately NOT enabled: whether R2 actually rejects a PUT whose
+ *  Content-Length differs from the signed value is unconfirmed, and a wrong
+ *  assumption here either fails every upload or silently enforces nothing.
+ *  Test it against the real bucket (PUT with a mismatched length must 403)
+ *  before turning it on. The backstop meanwhile is completeUpload: the
+ *  HEAD-verified size is checked against the per-kind ceiling, the type is
+ *  magic-number sniffed, and a rejected object is deleted. */
 export async function presignPut(key: string, contentType: string): Promise<string> {
   const cmd = new PutObjectCommand({ Bucket: env.r2Bucket, Key: key, ContentType: contentType });
   return getSignedUrl(signingS3, cmd, { expiresIn: MediaLimits.putUrlTtlSeconds });
@@ -79,6 +106,35 @@ export interface HeadResult {
 export async function headObject(key: string): Promise<HeadResult> {
   const res = await s3.send(new HeadObjectCommand({ Bucket: env.r2Bucket, Key: key }));
   return { sizeBytes: res.ContentLength ?? 0, contentType: res.ContentType };
+}
+
+/** True when an S3/R2 error means "no such object" rather than "couldn't
+ *  ask". The sweeper (sweeper.ts) marks media failed on a missing object, so
+ *  an R2 outage must never read as "every object is gone". */
+export function isNotFoundError(err: unknown): boolean {
+  const status = (err as { $metadata?: { httpStatusCode?: number } } | null)?.$metadata?.httpStatusCode;
+  return status === 404 || (err instanceof Error && (err.name === 'NotFound' || err.name === 'NoSuchKey'));
+}
+
+/** Stream an object to a local file. Video originals run up to 500MB
+ *  (MediaLimits) — buffering one whole in memory per job is how a small VPS
+ *  falls over, so the ffmpeg paths stream to their temp dir instead. */
+export async function downloadObjectToFile(key: string, path: string): Promise<void> {
+  const res = await s3.send(new GetObjectCommand({ Bucket: env.r2Bucket, Key: key }));
+  // In Node the SDK's streaming body is an http IncomingMessage (a Readable);
+  // the union type also covers browser streams, so narrow it explicitly.
+  if (!(res.Body instanceof Readable)) throw new Error(`object body for key ${key} is not a Node stream`);
+  await pipeline(res.Body, createWriteStream(path));
+}
+
+/** Upload a local file without reading it into memory. ContentLength is set
+ *  from stat — S3/R2 need it for a streamed (non-chunked) PUT body. */
+export async function putObjectFile(key: string, path: string, contentType: string): Promise<number> {
+  const { size } = await stat(path);
+  await s3.send(
+    new PutObjectCommand({ Bucket: env.r2Bucket, Key: key, Body: createReadStream(path), ContentLength: size, ContentType: contentType }),
+  );
+  return size;
 }
 
 export async function getObjectBuffer(key: string): Promise<Buffer> {

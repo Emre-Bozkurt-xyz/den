@@ -290,6 +290,47 @@ describe('completeUpload fanout race (docs/MEDIA_ATTACHMENTS.md §4.4)', () => {
     assert.equal(completed.isFirstComplete, true);
   });
 
+  test('mint is pending; the first complete publishes it (audit 2026-11-18)', async () => {
+    const result = await createUpload(chatId, userId, [{ kind: 'image', mime: 'image/png', sizeBytes: TINY_PNG.length }], undefined, undefined);
+    const minted = await db.select().from(messages).where(eq(messages.id, result.messageId));
+    assert.equal(minted[0]!.pendingUpload, true, 'a freshly minted upload must be invisible to read paths');
+
+    await putRealObjectFor(result.items[0]!.mediaId);
+    const completed = await completeUpload(result.items[0]!.mediaId, userId, undefined);
+    assert.equal(completed.isFirstComplete, true);
+    assert.equal(completed.shouldProcess, true);
+    const published = await db.select().from(messages).where(eq(messages.id, result.messageId));
+    assert.equal(published[0]!.pendingUpload, false);
+    const mediaRow = await db.select().from(media).where(eq(media.id, result.items[0]!.mediaId));
+    assert.ok(mediaRow[0]!.completedAt, 'complete stamps completed_at — the marker the sweeper trusts (migration 019)');
+  });
+
+  test('a retried complete of an already-ready item never re-processes or re-announces', async () => {
+    const result = await createUpload(chatId, userId, [{ kind: 'image', mime: 'image/png', sizeBytes: TINY_PNG.length }], undefined, undefined);
+    const item = result.items[0]!;
+    await putRealObjectFor(item.mediaId);
+    await completeUpload(item.mediaId, userId, undefined);
+    await db.update(media).set({ status: 'ready' }).where(eq(media.id, item.mediaId)); // as if processing finished
+
+    const retried = await completeUpload(item.mediaId, userId, undefined);
+    assert.equal(retried.shouldProcess, false, 'processing must not run twice — for video that destroyed the stored file');
+    assert.equal(retried.isFirstComplete, false, 'a retry rides media.ready, never a second message.new');
+  });
+
+  test('complete for a soft-deleted message is refused (CLAUDE.md #8)', async () => {
+    const result = await createUpload(chatId, userId, [{ kind: 'image', mime: 'image/png', sizeBytes: TINY_PNG.length }], undefined, undefined);
+    const item = result.items[0]!;
+    await putRealObjectFor(item.mediaId);
+    await db.update(messages).set({ deletedAt: new Date() }).where(eq(messages.id, result.messageId));
+
+    await assert.rejects(
+      () => completeUpload(item.mediaId, userId, undefined),
+      (err: unknown) => statusOf(err) === 404,
+    );
+    const row = await db.select().from(messages).where(eq(messages.id, result.messageId));
+    assert.equal(row[0]!.pendingUpload, true, 'a deleted message must never be published');
+  });
+
   test('tags passed to completeUpload are attached before the returned message is built', async () => {
     const result = await createUpload(chatId, userId, [{ kind: 'image', mime: 'image/png', sizeBytes: TINY_PNG.length }], undefined, undefined);
     const item = result.items[0]!;
