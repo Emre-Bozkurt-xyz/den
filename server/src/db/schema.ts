@@ -54,6 +54,14 @@
  * Migration 017 (post-MVP, docs/SIGNIN_FREEZE.md): sign-in freeze.
  *   users.logins_frozen_at · app_settings (first singleton config row).
  *
+ * Migration 018 (audit fixes 2026-11-18): messages.pending_upload ·
+ *   messages.client_nonce (+ partial unique index for idempotent sends).
+ *
+ * Migration 019 (audit fixes 2026-11-18, media/sweeper.ts): media.completed_at
+ *   (the durable "complete ran" marker) + two partial indexes for the
+ *   sweeper's scans (idx_media_processing_created,
+ *   idx_messages_pending_created).
+ *
  * ⚠️ auth_identities and webauthn_credentials ship NOW but MVP writes NOTHING to
  * them (OAuth = post-MVP #2, passkeys = post-MVP #1). They exist so those land
  * as an INSERT pattern, not a migration. Do not implement OAuth/passkeys yet.
@@ -369,8 +377,28 @@ export const messages = pgTable(
     // Post-MVP (migration 007, docs/MESSAGE_EDIT.md): set the first time the
     // message's body is edited; null if never edited. No time limit on edits.
     editedAt: timestamp('edited_at', { withTimezone: true }),
+    // Migration 018 (audit fixes). True from media/service.ts createUpload's
+    // mint until the first item's completeUpload publishes the message; every
+    // message read path filters `pending_upload = false`, so an abandoned
+    // upload never surfaces as a ghost "processing" bubble. Flipping it with
+    // `UPDATE … WHERE pending_upload RETURNING` is also the atomic,
+    // restart-safe "first complete" claim. Existing rows default to false.
+    pendingUpload: boolean('pending_upload').notNull().default(false),
+    // Migration 018 (audit fixes). The sender's WS `reqId`, persisted so a
+    // retried `message.send` returns the existing row instead of inserting a
+    // duplicate. Null for messages not sent over `message.send`.
+    clientNonce: text('client_nonce'),
   },
   (t) => [
+    // Idempotent sends: one row per (sender, client nonce). Partial so the
+    // many null-nonce rows don't collide.
+    uniqueIndex('messages_sender_nonce_unique')
+      .on(t.senderId, t.clientNonce)
+      .where(sql`${t.clientNonce} IS NOT NULL`),
+    // Migration 019. Only the media sweeper (media/sweeper.ts) scans for
+    // pending uploads; partial, so it stays as small as the number of uploads
+    // currently in progress (normally zero).
+    index('idx_messages_pending_created').on(t.createdAt).where(sql`${t.pendingUpload}`),
     check(
       'messages_kind_check',
       // 'embed' added migration 010 (docs/EMBEDS.md §4.1).
@@ -410,11 +438,22 @@ export const media = pgTable(
     thumbKey: text('thumb_key'), // R2 key of thumbnail (null for voice)
     status: text('status').notNull().default('processing'), // 'processing' | 'ready' | 'failed'
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    // Migration 019 (audit fixes). Set by media/service.ts completeUpload once
+    // the upload is verified AND its tags are attached (D7), i.e. the moment
+    // the item became safe to show. Null = complete never got that far. The
+    // sweeper only re-queues a stuck row whose completed_at is set; a null
+    // row is never auto-processed, because publishing it would show it
+    // without the tags its complete call would have carried. Pre-019 rows
+    // are null.
+    completedAt: timestamp('completed_at', { withTimezone: true }),
   },
   (t) => [
     check('media_kind_check', sql`${t.kind} IN ('image','video','voice')`),
     check('media_status_check', sql`${t.status} IN ('processing','ready','failed')`),
     index('idx_media_message').on(t.messageId),
+    // Migration 019. The sweeper's stuck-row scan; partial, so it only ever
+    // holds the handful of rows mid-processing.
+    index('idx_media_processing_created').on(t.createdAt).where(sql`${t.status} = 'processing'`),
   ],
 );
 
