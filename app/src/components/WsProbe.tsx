@@ -38,7 +38,7 @@ export function WsProbe() {
           {connected ? 'connected' : 'disconnected'}
         </span>
         <button
-          onClick={onPing}
+          onClick={() => void onPing()}
           disabled={!connected}
           className="rounded-sm border border-black/10 px-3 py-1 text-sm dark:border-white/15 disabled:opacity-40"
         >

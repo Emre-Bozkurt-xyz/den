@@ -196,7 +196,8 @@ export function CameraPanel({
     if (captured) return;
     let cancelled = false;
     setReady(false);
-    (async () => {
+    // Cannot reject: both getUserMedia calls are caught and play() is caught.
+    void (async () => {
       // `width`/`height` are HINTS, never guarantees (D2) — the real
       // dimensions are read back off the element at capture time.
       const video = { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } };

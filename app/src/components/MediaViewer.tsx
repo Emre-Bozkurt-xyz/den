@@ -422,7 +422,6 @@ export function MediaViewer({
     };
     // Callbacks are read through `navCbRef`, so this binds once for the life
     // of the viewer.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /** True for a pointerdown inside a video's native controls strip, which is

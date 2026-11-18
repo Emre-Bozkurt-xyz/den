@@ -55,7 +55,7 @@ export function NotificationsSection() {
       )}
 
       <button
-        onClick={onEnable}
+        onClick={() => void onEnable()}
         disabled={busy || !supported}
         className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:pointer-events-none disabled:opacity-40"
       >
@@ -109,7 +109,7 @@ export function PushPoc() {
 
       <div className="mt-3">
         <button
-          onClick={onTest}
+          onClick={() => void onTest()}
           disabled={busy}
           className="rounded-md border border-black/10 px-4 py-2 text-sm font-medium dark:border-white/15"
         >

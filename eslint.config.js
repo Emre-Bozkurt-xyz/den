@@ -49,6 +49,47 @@ export default tseslint.config(
     },
   },
   {
+    // Type-aware promise safety for all source (incl. tests). Added
+    // 2026-11-18: the server is promise-heavy (Fastify + socket.io + Drizzle)
+    // and a forgotten `await` on a DB write is an unhandled rejection that no
+    // untyped rule can see. Only the promise rules are enabled — not the whole
+    // `recommendedTypeChecked` preset — so the rest of the lint behaves as
+    // before. Explicit projects (not `projectService`) because the app's
+    // `tsconfig.json` is solution-style and does not reference
+    // `tsconfig.test.json`, so the project service would type app tests
+    // against an inferred default project. `@den/shared` resolves through its
+    // built `dist/` types: run `npm -w shared run build` before linting.
+    files: ['server/src/**/*.ts', 'shared/src/**/*.ts', 'app/src/**/*.{ts,tsx}'],
+    languageOptions: {
+      parserOptions: {
+        project: [
+          './server/tsconfig.json',
+          './shared/tsconfig.json',
+          './app/tsconfig.app.json',
+          './app/tsconfig.test.json',
+        ],
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      // Every promise is awaited, returned, or explicitly `void`-ed with a
+      // `.catch` that logs (the codebase convention for fire-and-forget).
+      // node:test's `test()`/`describe()` return promises the runner itself
+      // tracks; awaiting them at module top level is not the idiom.
+      '@typescript-eslint/no-floating-promises': [
+        'error',
+        {
+          allowForKnownSafeCalls: [
+            { from: 'package', package: 'node:test', name: ['test', 'describe', 'it', 'suite'] },
+          ],
+        },
+      ],
+      // Promise-returning callbacks where a void callback is expected
+      // (event handlers, socket.on, setTimeout) drop their rejection.
+      '@typescript-eslint/no-misused-promises': 'error',
+    },
+  },
+  {
     rules: {
       // `any` is allowed only with a justifying comment (enforced by review, not lint),
       // but flag the accidental ones.

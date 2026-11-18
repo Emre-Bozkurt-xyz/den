@@ -42,7 +42,9 @@ function decode(ctx: OfflineAudioContext, buf: ArrayBuffer): Promise<AudioBuffer
   // promise form, but honoring both costs three lines and removes a whole
   // class of "works on Android, silently no bars on iOS" bug.
   return new Promise((resolve, reject) => {
-    const maybe = ctx.decodeAudioData(buf, resolve, reject);
+    // lib.dom types this as always a Promise; the callback-only Safari
+    // implementation returns undefined, which is exactly what the check is for.
+    const maybe = ctx.decodeAudioData(buf, resolve, reject) as Promise<AudioBuffer> | undefined;
     if (maybe && typeof maybe.then === 'function') maybe.then(resolve, reject);
   });
 }
