@@ -4,13 +4,19 @@
 FROM node:22-slim AS build
 WORKDIR /repo
 # Manifests first for layer caching.
-# All workspace manifests must be present for `npm install --workspaces` to
-# resolve, even though this image only builds shared + server.
-COPY package.json package-lock.json* tsconfig.base.json ./
+# All workspace manifests must be present for npm to resolve the workspace
+# tree, even though this image only builds shared + server.
+#
+# `npm ci`, with the lockfile REQUIRED (no `package-lock.json*` glob): the
+# image gets exactly the dependency versions the repo was tested with, and a
+# package.json that drifted from the lockfile fails the build loudly instead
+# of quietly resolving new versions on the prod host. Plain `npm ci` installs
+# the root plus every workspace listed in the one root lockfile.
+COPY package.json package-lock.json tsconfig.base.json ./
 COPY shared/package.json shared/
 COPY server/package.json server/
 COPY app/package.json app/
-RUN npm install --workspaces --include-workspace-root
+RUN npm ci
 # Sources
 COPY shared/ shared/
 COPY server/ server/
@@ -25,11 +31,11 @@ ENV NODE_ENV=production
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg ca-certificates libvips \
   && rm -rf /var/lib/apt/lists/*
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json ./
 COPY shared/package.json shared/
 COPY server/package.json server/
 COPY app/package.json app/
-RUN npm install --workspaces --include-workspace-root --omit=dev
+RUN npm ci --omit=dev
 COPY --from=build /repo/shared/dist shared/dist
 COPY --from=build /repo/server/dist server/dist
 # drizzle-kit migrate (run via `docker compose exec api npm -w server run
@@ -41,6 +47,18 @@ COPY --from=build /repo/server/dist server/dist
 COPY server/drizzle.config.ts server/
 COPY server/drizzle server/drizzle
 COPY server/src/db server/src/db
+# Run unprivileged, as the `node` user (uid 1000) the base image ships.
+# Audited 2026-11-18 — everything this container writes:
+#   - media processing / backfill / probe scripts: mkdtemp(os.tmpdir()) =
+#     /tmp, world-writable;
+#   - `docker compose exec api npm ...` (migrate, invite, owner, backup.js):
+#     they read dist/ + talk to Postgres/R2 + stdin/stdout; npm's own logs go
+#     to $HOME=/home/node, which the base image owns for this user;
+#   - no volumes are mounted into this service (docker-compose.yml).
+# Everything else (/repo, node_modules) stays root-owned and read-only to
+# the process, which is the point. If a new feature writes to disk, give it
+# a path under /tmp or pre-create + chown it here.
+USER node
 EXPOSE 3000
 # Simple healthcheck against the /health route.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

@@ -1,0 +1,20 @@
+# Den — notify when den-backup.service fails. Triggered by that unit's
+# OnFailure= line; never enabled or scheduled on its own.
+#
+# Opt-in: does nothing (logs one line, exits 0) unless DEN_ALERT_URL and/or
+# DEN_ALERT_CMD is set in the env file below — see deploy/alert.sh.
+#
+# Install alongside the backup units (deploy/README.md "Scheduling"):
+#   sudo cp deploy/systemd/den-backup* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+# Test the alert path without breaking a backup:
+#   sudo systemctl start den-backup-alert.service
+#   journalctl -u den-backup-alert.service -n 20
+
+[Unit]
+Description=Den — alert on a failed Postgres backup
+
+[Service]
+Type=oneshot
+Environment=DEN_ENV_FILE=/opt/apps/den/secrets/.env
+ExecStart=/usr/bin/env bash /opt/apps/den/repo/deploy/alert.sh den-backup.service

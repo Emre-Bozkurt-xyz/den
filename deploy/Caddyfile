@@ -10,6 +10,34 @@
 http://den.ems-place.com {
 	encode gzip zstd
 
+	# Baseline security headers, on every response (static PWA, API, WS).
+	# Nothing else sets these today: deploy/README.md documents no headers
+	# added by the VPS proxy or Cloudflare, and Fastify sets none of its own,
+	# so this block is the single source. If the VPS proxy ever starts adding
+	# any of them, remove it from one side — two sources drift apart.
+	header {
+		# Never let a browser second-guess a Content-Type (e.g. run a
+		# mislabelled response as script).
+		X-Content-Type-Options "nosniff"
+		# Full URL to ourselves, nothing to anyone else. Cross-origin loads
+		# that care already opt out per element (Klipy thumbnails: no-referrer).
+		Referrer-Policy "same-origin"
+		# Clickjacking: nothing legitimately frames Den (Den frames Vault, not
+		# the other way round). XFO for older engines, frame-ancestors for
+		# current ones. ⚠️ frame-ancestors is deliberately the ONLY CSP
+		# directive: a full default-src policy is a tested follow-up (see
+		# deploy/README.md "Content-Security-Policy — proposed follow-up"), and
+		# whoever adds it must MERGE into this header, not add a second one.
+		X-Frame-Options "DENY"
+		Content-Security-Policy "frame-ancestors 'none'"
+		# The browser only ever sees https://den.ems-place.com (TLS ends at
+		# the VPS proxy), so pin it to HTTPS. NO includeSubDomains and NO
+		# preload: sibling *.ems-place.com subdomains host other apps whose TLS
+		# posture this file must not decide. To back out, ship max-age=0 and
+		# leave that up for at least the old max-age.
+		Strict-Transport-Security "max-age=31536000"
+	}
+
 	# API + health → Fastify.
 	handle /api/* {
 		reverse_proxy api:3000
@@ -38,21 +66,32 @@ http://den.ems-place.com {
 	handle {
 		root * /srv/app
 
-		# Vite's content-hashed output: the filename changes whenever the bytes
-		# do, so these can be cached forever and never revalidated.
-		@immutable path /assets/*
-		header @immutable Cache-Control "public, max-age=31536000, immutable"
-
-		# Everything else — index.html, sw.js, the manifest, icons — has a
-		# stable URL with changing content, so it must revalidate every time.
-		# The cost is a conditional request answered with 304, not a re-download.
-		@revalidate {
-			not path /assets/*
+		# Vite's content-hashed output: the filename changes whenever the
+		# bytes do, so these can be cached forever and never revalidated.
+		#
+		# No SPA fallback in here. A missing hashed asset (a stale index.html,
+		# a client mid-deploy) must be a real 404: falling through to
+		# index.html hands HTML to a <script type=module>, and used to stamp
+		# that HTML with the one-year immutable header, pinning the wrong
+		# bytes under that URL. So the immutable header is set only when the
+		# file exists, and a miss is explicitly uncacheable.
+		handle /assets/* {
+			@asset_exists file
+			header @asset_exists Cache-Control "public, max-age=31536000, immutable"
+			@asset_missing not file
+			header @asset_missing Cache-Control "no-store"
+			file_server
 		}
-		header @revalidate Cache-Control "no-cache"
 
-		try_files {path} /index.html
-		file_server
+		# Everything else — index.html, sw.js, the manifest, icons, and every
+		# app route via the SPA fallback — has a stable URL with changing
+		# content, so it must revalidate every time. The cost is a conditional
+		# request answered with 304, not a re-download.
+		handle {
+			header Cache-Control "no-cache"
+			try_files {path} /index.html
+			file_server
+		}
 	}
 
 	# Long-lived sockets: don't cut the connection under the ping interval.

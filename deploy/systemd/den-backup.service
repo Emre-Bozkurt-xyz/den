@@ -1,9 +1,11 @@
 # Den — nightly Postgres backup to R2. Paired with den-backup.timer.
 #
 # Install on the home server:
-#   sudo cp deploy/systemd/den-backup.* /etc/systemd/system/
+#   sudo cp deploy/systemd/den-backup* /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now den-backup.timer
+# (`den-backup*`, not `den-backup.*`: it must also pick up
+# den-backup-alert.service, which OnFailure= below points at.)
 #
 # Adjust the paths below if the repo/env file don't live where the deploy
 # docs assume. Verify with:  sudo systemctl start den-backup.service
@@ -14,6 +16,11 @@ Description=Den — Postgres backup to R2
 # The whole job runs through docker exec, so it's pointless before docker is up.
 After=docker.service
 Requires=docker.service
+# A failed nightly backup used to alert nobody. This runs deploy/alert.sh,
+# which is a no-op until DEN_ALERT_URL / DEN_ALERT_CMD is set in the env file.
+# If the alert unit isn't installed, systemd logs that and nothing else
+# changes — the backup itself is unaffected either way.
+OnFailure=den-backup-alert.service
 
 [Service]
 Type=oneshot

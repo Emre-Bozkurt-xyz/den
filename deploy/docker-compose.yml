@@ -73,6 +73,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.api
     restart: unless-stopped
+    # On SIGTERM the api drains in-flight media jobs for up to 30s before
+    # closing the DB pool. Docker's default 10s grace would SIGKILL it
+    # mid-drain; 40s = the 30s drain + headroom for the pool close. Every
+    # stop/recreate of this service (deploy, rollback, `down`) can therefore
+    # take up to ~40s — deploy/deploy.sh only starts its health clock after
+    # `up` has returned, so that wait never eats into the health budget.
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy

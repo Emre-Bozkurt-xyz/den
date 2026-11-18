@@ -1,8 +1,15 @@
 name: Deploy
 
-# Runs on the home-server self-hosted runner itself — the job's shell commands
-# execute directly on that machine, no SSH step needed. See deploy/README.md
-# "CI/CD — self-hosted runner" for one-time runner setup on the host.
+# Two jobs:
+#   verify — typecheck + lint + tests on a GitHub-HOSTED runner (throwaway VM).
+#   deploy — runs on the home-server self-hosted runner itself (the job's
+#            shell commands execute directly on that machine, no SSH step
+#            needed), and only if verify passed.
+# See deploy/README.md "CI/CD — self-hosted runner" for one-time runner setup.
+#
+# ⚠️ Deliberately NO `pull_request` trigger. The self-hosted runner is the
+# prod host; a PR-triggered workflow would run the PR's code there. Only
+# pushes to main (and manual dispatch by someone with write access) ever run.
 on:
   push:
     branches: [main]
@@ -16,8 +23,140 @@ concurrency:
   group: deploy
   cancel-in-progress: false
 
+# Least privilege for GITHUB_TOKEN: both jobs only need to read the repo.
+permissions:
+  contents: read
+
 jobs:
+  # ── quality gate ─────────────────────────────────────────────────────────
+  # On GitHub-hosted ubuntu rather than the self-hosted runner: it keeps
+  # `npm ci` + two databases + the test suite off the box that serves prod,
+  # and gives every run a clean machine, so a test can never touch prod's
+  # Postgres or R2. (Costs Actions minutes on a private repo — a few per push.)
+  #
+  # Actions are pinned to major tags, not commit SHAs: a SHA is only worth
+  # pinning if it's known-correct, and none were verified when this was
+  # written. Pin both jobs' `uses:` together if you do it later.
+  verify:
+    name: Typecheck, lint, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The server tests are integration tests against a real Postgres (see the
+    # header of server/src/chat/service.test.ts) — a disposable one here,
+    # same image as docker-compose.yml.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: den
+          POSTGRES_PASSWORD: den
+          POSTGRES_DB: den
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U den -d den"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    # Everything server/src/env.ts reads that the tests depend on. NODE_ENV
+    # stays unset (= development), so SESSION_SECRET / VAULT_TOKEN_ENC_KEY
+    # get env.ts's dev defaults; DATABASE_URL being set also makes
+    # env-file.ts skip looking for a .env. No real secrets anywhere.
+    env:
+      DATABASE_URL: postgres://den:den@127.0.0.1:5432/den
+      # media/service.test.ts PUTs and HEADs a real object, so it needs an
+      # S3 endpoint: a throwaway MinIO, exactly like local dev's stand-in.
+      R2_ENDPOINT: http://127.0.0.1:9000
+      R2_ACCESS_KEY_ID: den-ci
+      R2_SECRET_ACCESS_KEY: den-ci-secret
+      R2_BUCKET: den-media
+      R2_FORCE_PATH_STYLE: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Exactly the lockfile, like the Docker images — a package.json that
+      # drifted from package-lock.json fails here, not on the prod host.
+      - name: Install
+        run: npm ci
+
+      # Started by hand rather than as a `services:` entry: the minio image
+      # needs a `server /data` command, which service containers can't take.
+      # Same image as docker-compose.yml's dev-only minio service.
+      - name: Start MinIO (S3 stand-in for R2)
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER="$R2_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$R2_SECRET_ACCESS_KEY" \
+            minio/minio:latest server /data
+          for i in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:9000/minio/health/live; then exit 0; fi
+            sleep 2
+          done
+          docker logs minio
+          exit 1
+
+      # @den/shared resolves to shared/dist (its package.json `exports`), so
+      # the server/app typechecks and every test import need it built first.
+      - name: Build shared
+        run: npm -w shared run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # Same migrations prod runs, from an empty database — which also proves
+      # the full chain still applies cleanly from scratch.
+      - name: Migrate test database
+        run: npm -w server run db:migrate
+
+      # Nothing in the repo creates the bucket (dev does it by hand), so do it
+      # with the SDK the server already depends on.
+      - name: Create test bucket
+        working-directory: server
+        run: |
+          node --input-type=module -e "
+            import { S3Client, CreateBucketCommand } from '@aws-sdk/client-s3';
+            const s3 = new S3Client({
+              region: 'us-east-1',
+              endpoint: process.env.R2_ENDPOINT,
+              forcePathStyle: true,
+              credentials: {
+                accessKeyId: process.env.R2_ACCESS_KEY_ID,
+                secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+              },
+            });
+            await s3.send(new CreateBucketCommand({ Bucket: process.env.R2_BUCKET }));
+            console.log('created bucket', process.env.R2_BUCKET);
+          "
+
+      # embeds/service.test.ts asserts that an Instagram resolve degrades to
+      # 'failed' and was written for a sandbox with no outbound internet. A
+      # hosted runner HAS internet, which would make that test depend on what
+      # instagram.com answers today (and call it on every push). Pointing the
+      # IG hosts at a closed local port restores the condition the test was
+      # written for: connection refused -> 'failed', deterministically.
+      # TODO(server tests): inject the resolver's fetch instead; then drop this.
+      - name: Make instagram.com unreachable (hermetic embed test)
+        run: |
+          printf '127.0.0.1 instagram.com www.instagram.com\n::1 instagram.com www.instagram.com\n' \
+            | sudo tee -a /etc/hosts
+
+      - name: Test
+        run: npm run test
+
+  # ── deploy ───────────────────────────────────────────────────────────────
   deploy:
+    needs: verify
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
@@ -31,10 +170,11 @@ jobs:
           clean: false
 
       # Everything the deploy does lives in deploy/deploy.sh — preflight
-      # guards, build, migrations, prune. CI and a human on the box run the
-      # SAME script, so the two paths can't silently drift apart again (they
-      # did once: manual deploys kept working while every CI deploy failed).
-      # Fixes and new steps land in one place and apply to both.
+      # guards, build, backup, migrations, health-gated swap, prune. CI and a
+      # human on the box run the SAME script, so the two paths can't silently
+      # drift apart again (they did once: manual deploys kept working while
+      # every CI deploy failed). Fixes and new steps land in one place and
+      # apply to both.
       #
       # Called via `bash` rather than `./deploy/deploy.sh`: the repo is
       # authored on Windows, which can't set the POSIX exec bit. The bit is
